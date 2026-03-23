@@ -111,7 +111,7 @@ func (c *Client) ListInstances() ([]Instance, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Instances...)
-		if page >= result.Meta.TotalPages {
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
 			break
 		}
 		page++
@@ -244,7 +244,7 @@ func (c *Client) ListTasks() ([]Task, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Tasks...)
-		if page >= result.Meta.TotalPages {
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
 			break
 		}
 		page++
@@ -368,7 +368,7 @@ func (c *Client) ListWorkflows() ([]Workflow, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Workflows...)
-		if page >= result.Meta.TotalPages {
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
 			break
 		}
 		page++
@@ -387,11 +387,13 @@ func (c *Client) GetWorkflow(id int64) (*Workflow, string, error) {
 
 	etag := resp.Header.Get("ETag")
 	var result struct {
-		Workflow Workflow `json:"workflow"`
+		Workflow Workflow          `json:"workflow"`
+		Versions []WorkflowVersion `json:"versions"`
 	}
 	if err := decodeResponse(resp, &result); err != nil {
 		return nil, "", fmt.Errorf("decoding response: %w", err)
 	}
+	result.Workflow.Versions = result.Versions
 	return &result.Workflow, etag, nil
 }
 
@@ -470,7 +472,7 @@ func (c *Client) workflowAction(id int64, action string) error {
 }
 
 func (c *Client) CreateWorkflowVersion(workflowID int64, input CreateWorkflowVersionInput) (*WorkflowVersion, error) {
-	body := map[string]interface{}{"version": input}
+	body := input
 	path := fmt.Sprintf("/api/v1/workflows/%d/versions", workflowID)
 	resp, err := c.doRequest("POST", path, body, nil)
 	if err != nil {
@@ -526,7 +528,7 @@ func (c *Client) ListUptimeMonitors() ([]UptimeMonitor, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.UptimeMonitors...)
-		if page >= result.Meta.TotalPages {
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
 			break
 		}
 		page++

@@ -4,10 +4,9 @@ import "fmt"
 
 // PaginationMeta represents pagination metadata in list responses.
 type PaginationMeta struct {
-	CurrentPage int `json:"current_page"`
-	TotalPages  int `json:"total_pages"`
-	TotalCount  int `json:"total_count"`
-	PerPage     int `json:"per_page"`
+	Count  int `json:"count"`
+	Total  int `json:"total"`
+	Offset int `json:"offset"`
 }
 
 // Instance represents a monitored server (Host).
@@ -151,7 +150,7 @@ type UptimeMonitor struct {
 	TimeoutSeconds      int     `json:"timeout_seconds"`
 	ConfirmationCount   int     `json:"confirmation_count"`
 	Keyword             string  `json:"keyword"`
-	KeywordAbsent       string  `json:"keyword_absent"`
+	KeywordAbsent       bool    `json:"keyword_absent"`
 	FollowRedirects     bool    `json:"follow_redirects"`
 	ExpectedStatusCodes []int   `json:"expected_status_codes"`
 	ProbeRegionIDs      []int64 `json:"probe_region_ids"`
@@ -176,7 +175,7 @@ type CreateUptimeMonitorInput struct {
 	TimeoutSeconds      *int    `json:"timeout_seconds,omitempty"`
 	ConfirmationCount   *int    `json:"confirmation_count,omitempty"`
 	Keyword             string  `json:"keyword,omitempty"`
-	KeywordAbsent       string  `json:"keyword_absent,omitempty"`
+	KeywordAbsent       *bool   `json:"keyword_absent,omitempty"`
 	FollowRedirects     *bool   `json:"follow_redirects,omitempty"`
 	ExpectedStatusCodes []int   `json:"expected_status_codes,omitempty"`
 	ProbeRegionIDs      []int64 `json:"probe_region_ids,omitempty"`
@@ -194,7 +193,7 @@ type UpdateUptimeMonitorInput struct {
 	TimeoutSeconds      *int    `json:"timeout_seconds,omitempty"`
 	ConfirmationCount   *int    `json:"confirmation_count,omitempty"`
 	Keyword             *string `json:"keyword,omitempty"`
-	KeywordAbsent       *string `json:"keyword_absent,omitempty"`
+	KeywordAbsent       *bool   `json:"keyword_absent,omitempty"`
 	FollowRedirects     *bool   `json:"follow_redirects,omitempty"`
 	ExpectedStatusCodes []int   `json:"expected_status_codes,omitempty"`
 	ProbeRegionIDs      []int64 `json:"probe_region_ids,omitempty"`

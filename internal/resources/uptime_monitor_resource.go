@@ -44,7 +44,7 @@ type uptimeMonitorModel struct {
 	TimeoutSeconds      types.Int64  `tfsdk:"timeout_seconds"`
 	ConfirmationCount   types.Int64  `tfsdk:"confirmation_count"`
 	Keyword             types.String `tfsdk:"keyword"`
-	KeywordAbsent       types.String `tfsdk:"keyword_absent"`
+	KeywordAbsent       types.Bool   `tfsdk:"keyword_absent"`
 	FollowRedirects     types.Bool   `tfsdk:"follow_redirects"`
 	ExpectedStatusCodes types.List   `tfsdk:"expected_status_codes"`
 	ProbeRegionIDs      types.List   `tfsdk:"probe_region_ids"`
@@ -144,9 +144,11 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Description: "Keyword that must be present in the response body.",
 				Optional:    true,
 			},
-			"keyword_absent": schema.StringAttribute{
-				Description: "Keyword that must be absent from the response body.",
+			"keyword_absent": schema.BoolAttribute{
+				Description: "If true, alert when the keyword IS found (absent check).",
 				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
 			},
 			"follow_redirects": schema.BoolAttribute{
 				Description: "Whether to follow HTTP redirects.",
@@ -254,7 +256,8 @@ func (r *uptimeMonitorResource) Create(ctx context.Context, req resource.CreateR
 		input.Keyword = plan.Keyword.ValueString()
 	}
 	if !plan.KeywordAbsent.IsNull() && !plan.KeywordAbsent.IsUnknown() {
-		input.KeywordAbsent = plan.KeywordAbsent.ValueString()
+		v := plan.KeywordAbsent.ValueBool()
+		input.KeywordAbsent = &v
 	}
 	if !plan.FollowRedirects.IsNull() && !plan.FollowRedirects.IsUnknown() {
 		v := plan.FollowRedirects.ValueBool()
@@ -374,7 +377,7 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		input.Keyword = &v
 	}
 	if !plan.KeywordAbsent.IsNull() && !plan.KeywordAbsent.IsUnknown() {
-		v := plan.KeywordAbsent.ValueString()
+		v := plan.KeywordAbsent.ValueBool()
 		input.KeywordAbsent = &v
 	}
 	if !plan.FollowRedirects.IsNull() && !plan.FollowRedirects.IsUnknown() {
@@ -454,7 +457,7 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	state.TimeoutSeconds = types.Int64Value(int64(m.TimeoutSeconds))
 	state.ConfirmationCount = types.Int64Value(int64(m.ConfirmationCount))
 	state.Keyword = types.StringValue(m.Keyword)
-	state.KeywordAbsent = types.StringValue(m.KeywordAbsent)
+	state.KeywordAbsent = types.BoolValue(m.KeywordAbsent)
 	state.FollowRedirects = types.BoolValue(m.FollowRedirects)
 
 	// Convert expected_status_codes ([]int → []int64 for ListValueFrom)

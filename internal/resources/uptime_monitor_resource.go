@@ -2,9 +2,6 @@ package resources
 
 import (
 	"context"
-	"fmt"
-	"strconv"
-
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -14,9 +11,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
@@ -32,7 +29,7 @@ type uptimeMonitorResource struct {
 }
 
 type uptimeMonitorModel struct {
-	ID                  types.Int64  `tfsdk:"id"`
+	ID                  types.String `tfsdk:"id"`
 	Name                types.String `tfsdk:"name"`
 	Protocol            types.String `tfsdk:"protocol"`
 	URL                 types.String `tfsdk:"url"`
@@ -69,11 +66,11 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 	resp.Schema = schema.Schema{
 		Description: "Manages a FiveNines uptime monitor.",
 		Attributes: map[string]schema.Attribute{
-			"id": schema.Int64Attribute{
-				Description: "Unique identifier.",
+			"id": schema.StringAttribute{
+				Description: "Unique identifier (UUID).",
 				Computed:    true,
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.UseStateForUnknown(),
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"name": schema.StringAttribute{
@@ -301,7 +298,7 @@ func (r *uptimeMonitorResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 
-	monitor, _, err := r.client.GetUptimeMonitor(state.ID.ValueInt64())
+	monitor, _, err := r.client.GetUptimeMonitor(state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -328,7 +325,7 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		return
 	}
 
-	id := state.ID.ValueInt64()
+	id := state.ID.ValueString()
 	_, etag, err := r.client.GetUptimeMonitor(id)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading uptime monitor for update", err.Error())
@@ -420,9 +417,9 @@ func (r *uptimeMonitorResource) Delete(ctx context.Context, req resource.DeleteR
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting uptime monitor", map[string]interface{}{"id": state.ID.ValueInt64()})
+	tflog.Debug(ctx, "Deleting uptime monitor", map[string]interface{}{"id": state.ID.ValueString()})
 
-	err := r.client.DeleteUptimeMonitor(state.ID.ValueInt64())
+	err := r.client.DeleteUptimeMonitor(state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
@@ -432,16 +429,11 @@ func (r *uptimeMonitorResource) Delete(ctx context.Context, req resource.DeleteR
 }
 
 func (r *uptimeMonitorResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	id, err := strconv.ParseInt(req.ID, 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid ID", fmt.Sprintf("Cannot parse %q as int64: %s", req.ID, err))
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
+	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
 func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.UptimeMonitor, state *uptimeMonitorModel, diags *diag.Diagnostics) {
-	state.ID = types.Int64Value(m.ID)
+	state.ID = types.StringValue(m.ID)
 	state.Name = types.StringValue(m.Name)
 	state.Protocol = types.StringValue(m.Protocol)
 	state.URL = types.StringValue(m.URL)

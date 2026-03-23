@@ -52,7 +52,7 @@ type UpdateInstanceInput struct {
 
 // Task represents a cron/heartbeat monitor.
 type Task struct {
-	ID                 int64   `json:"id"`
+	ID                 string  `json:"id"` // UUID
 	Name               string  `json:"name"`
 	ScheduleType       string  `json:"schedule_type"`
 	Schedule           string  `json:"schedule"`
@@ -137,7 +137,7 @@ type CreateWorkflowVersionInput struct {
 
 // UptimeMonitor represents an uptime monitoring check.
 type UptimeMonitor struct {
-	ID                  int64   `json:"id"`
+	ID                  string  `json:"id"` // UUID
 	Name                string  `json:"name"`
 	Protocol            string  `json:"protocol"`
 	Status              string  `json:"status"`

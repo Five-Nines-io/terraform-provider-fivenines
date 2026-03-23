@@ -2,17 +2,14 @@ package resources
 
 import (
 	"context"
-	"fmt"
-	"strconv"
-
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
@@ -28,7 +25,7 @@ type taskResource struct {
 }
 
 type taskModel struct {
-	ID                 types.Int64  `tfsdk:"id"`
+	ID                 types.String `tfsdk:"id"`
 	Name               types.String `tfsdk:"name"`
 	ScheduleType       types.String `tfsdk:"schedule_type"`
 	Schedule           types.String `tfsdk:"schedule"`
@@ -58,11 +55,11 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 	resp.Schema = schema.Schema{
 		Description: "Manages a FiveNines task (cron/heartbeat monitor).",
 		Attributes: map[string]schema.Attribute{
-			"id": schema.Int64Attribute{
-				Description: "Unique identifier.",
+			"id": schema.StringAttribute{
+				Description: "Unique identifier (UUID).",
 				Computed:    true,
-				PlanModifiers: []planmodifier.Int64{
-					int64planmodifier.UseStateForUnknown(),
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
 			"name": schema.StringAttribute{
@@ -197,7 +194,7 @@ func (r *taskResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
-	task, _, err := r.client.GetTask(state.ID.ValueInt64())
+	task, _, err := r.client.GetTask(state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -224,7 +221,7 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	id := state.ID.ValueInt64()
+	id := state.ID.ValueString()
 	_, etag, err := r.client.GetTask(id)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading task for update", err.Error())
@@ -273,9 +270,9 @@ func (r *taskResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting task", map[string]interface{}{"id": state.ID.ValueInt64()})
+	tflog.Debug(ctx, "Deleting task", map[string]interface{}{"id": state.ID.ValueString()})
 
-	err := r.client.DeleteTask(state.ID.ValueInt64())
+	err := r.client.DeleteTask(state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
@@ -285,16 +282,11 @@ func (r *taskResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 }
 
 func (r *taskResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	id, err := strconv.ParseInt(req.ID, 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid ID", fmt.Sprintf("Cannot parse %q as int64: %s", req.ID, err))
-		return
-	}
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
+	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 }
 
 func mapTaskToState(t *client.Task, state *taskModel) {
-	state.ID = types.Int64Value(t.ID)
+	state.ID = types.StringValue(t.ID)
 	state.Name = types.StringValue(t.Name)
 	state.ScheduleType = types.StringValue(t.ScheduleType)
 	state.Schedule = types.StringValue(t.Schedule)

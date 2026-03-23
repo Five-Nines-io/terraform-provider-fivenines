@@ -252,8 +252,8 @@ func (c *Client) ListTasks() ([]Task, error) {
 	return all, nil
 }
 
-func (c *Client) GetTask(id int64) (*Task, string, error) {
-	resp, err := c.doRequest("GET", "/api/v1/tasks/"+strconv.FormatInt(id, 10), nil, nil)
+func (c *Client) GetTask(id string) (*Task, string, error) {
+	resp, err := c.doRequest("GET", "/api/v1/tasks/"+id, nil, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -290,13 +290,13 @@ func (c *Client) CreateTask(input CreateTaskInput) (*Task, error) {
 	return &result.Task, nil
 }
 
-func (c *Client) UpdateTask(id int64, etag string, input UpdateTaskInput) (*Task, error) {
+func (c *Client) UpdateTask(id string, etag string, input UpdateTaskInput) (*Task, error) {
 	headers := map[string]string{}
 	if etag != "" {
 		headers["If-Match"] = etag
 	}
 	body := map[string]interface{}{"task": input}
-	resp, err := c.doRequest("PATCH", "/api/v1/tasks/"+strconv.FormatInt(id, 10), body, headers)
+	resp, err := c.doRequest("PATCH", "/api/v1/tasks/"+id, body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -313,8 +313,8 @@ func (c *Client) UpdateTask(id int64, etag string, input UpdateTaskInput) (*Task
 	return &result.Task, nil
 }
 
-func (c *Client) DeleteTask(id int64) error {
-	resp, err := c.doRequest("DELETE", "/api/v1/tasks/"+strconv.FormatInt(id, 10), nil, nil)
+func (c *Client) DeleteTask(id string) error {
+	resp, err := c.doRequest("DELETE", "/api/v1/tasks/"+id, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -325,16 +325,16 @@ func (c *Client) DeleteTask(id int64) error {
 	return nil
 }
 
-func (c *Client) PauseTask(id int64) error {
+func (c *Client) PauseTask(id string) error {
 	return c.taskAction(id, "pause")
 }
 
-func (c *Client) ResumeTask(id int64) error {
+func (c *Client) ResumeTask(id string) error {
 	return c.taskAction(id, "resume")
 }
 
-func (c *Client) taskAction(id int64, action string) error {
-	resp, err := c.doRequest("POST", fmt.Sprintf("/api/v1/tasks/%d/%s", id, action), nil, nil)
+func (c *Client) taskAction(id string, action string) error {
+	resp, err := c.doRequest("POST", fmt.Sprintf("/api/v1/tasks/%s/%s", id, action), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -536,8 +536,8 @@ func (c *Client) ListUptimeMonitors() ([]UptimeMonitor, error) {
 	return all, nil
 }
 
-func (c *Client) GetUptimeMonitor(id int64) (*UptimeMonitor, string, error) {
-	resp, err := c.doRequest("GET", "/api/v1/uptime_monitors/"+strconv.FormatInt(id, 10), nil, nil)
+func (c *Client) GetUptimeMonitor(id string) (*UptimeMonitor, string, error) {
+	resp, err := c.doRequest("GET", "/api/v1/uptime_monitors/"+id, nil, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -574,13 +574,13 @@ func (c *Client) CreateUptimeMonitor(input CreateUptimeMonitorInput) (*UptimeMon
 	return &result.UptimeMonitor, nil
 }
 
-func (c *Client) UpdateUptimeMonitor(id int64, etag string, input UpdateUptimeMonitorInput) (*UptimeMonitor, error) {
+func (c *Client) UpdateUptimeMonitor(id string, etag string, input UpdateUptimeMonitorInput) (*UptimeMonitor, error) {
 	headers := map[string]string{}
 	if etag != "" {
 		headers["If-Match"] = etag
 	}
 	body := map[string]interface{}{"uptime_monitor": input}
-	resp, err := c.doRequest("PATCH", "/api/v1/uptime_monitors/"+strconv.FormatInt(id, 10), body, headers)
+	resp, err := c.doRequest("PATCH", "/api/v1/uptime_monitors/"+id, body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -597,8 +597,8 @@ func (c *Client) UpdateUptimeMonitor(id int64, etag string, input UpdateUptimeMo
 	return &result.UptimeMonitor, nil
 }
 
-func (c *Client) DeleteUptimeMonitor(id int64) error {
-	resp, err := c.doRequest("DELETE", "/api/v1/uptime_monitors/"+strconv.FormatInt(id, 10), nil, nil)
+func (c *Client) DeleteUptimeMonitor(id string) error {
+	resp, err := c.doRequest("DELETE", "/api/v1/uptime_monitors/"+id, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -609,16 +609,16 @@ func (c *Client) DeleteUptimeMonitor(id int64) error {
 	return nil
 }
 
-func (c *Client) PauseUptimeMonitor(id int64) error {
+func (c *Client) PauseUptimeMonitor(id string) error {
 	return c.uptimeMonitorAction(id, "pause")
 }
 
-func (c *Client) ResumeUptimeMonitor(id int64) error {
+func (c *Client) ResumeUptimeMonitor(id string) error {
 	return c.uptimeMonitorAction(id, "resume")
 }
 
-func (c *Client) uptimeMonitorAction(id int64, action string) error {
-	resp, err := c.doRequest("POST", fmt.Sprintf("/api/v1/uptime_monitors/%d/%s", id, action), nil, nil)
+func (c *Client) uptimeMonitorAction(id string, action string) error {
+	resp, err := c.doRequest("POST", fmt.Sprintf("/api/v1/uptime_monitors/%s/%s", id, action), nil, nil)
 	if err != nil {
 		return err
 	}

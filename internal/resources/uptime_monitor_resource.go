@@ -88,10 +88,10 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Required:    true,
 			},
 			"protocol": schema.StringAttribute{
-				Description: `Protocol: "https", "tcp", "icmp", "dns", or "custom_http". Changing this forces recreation.`,
+				Description: `Protocol: "https", "tcp", "icmp", or "dns". Changing this forces recreation.`,
 				Required:    true,
 				Validators: []validator.String{
-					stringvalidator.OneOf("https", "tcp", "icmp", "dns", "custom_http"),
+					stringvalidator.OneOf("https", "tcp", "icmp", "dns"),
 				},
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),

@@ -53,7 +53,7 @@ resource "fivenines_uptime_monitor" "database" {
 ### Required
 
 - `name` (String) Name of the uptime monitor.
-- `protocol` (String) Protocol: "https", "tcp", "icmp", "dns", or "custom_http". Changing this forces recreation.
+- `protocol` (String) Protocol: "https", "tcp", "icmp", or "dns". Changing this forces recreation.
 
 ### Optional
 

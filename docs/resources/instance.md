@@ -34,17 +34,21 @@ resource "fivenines_instance" "web_server" {
 
 ### Read-Only
 
+- `client_version` (String) Agent client version.
 - `cpu_architecture` (String) CPU architecture.
 - `cpu_count` (Number) Number of CPUs.
 - `cpu_model` (String) CPU model.
 - `created_at` (String) Creation timestamp.
+- `first_sync_at` (String) First agent sync time.
 - `hostname` (String) Hostname reported by the agent.
 - `id` (String) Unique identifier (UUID).
 - `ipv4` (String) IPv4 address.
 - `ipv6` (String) IPv6 address.
 - `kernel_version` (String) Kernel version.
+- `last_request_at` (String) Last API request time from the agent.
 - `last_sync_at` (String) Last time the agent synced.
 - `memory_size` (Number) Memory size in bytes.
 - `operating_system_name` (String) Operating system name.
+- `source` (String) Agent type (e.g., fivenines-agent).
 - `status` (String) Current status of the instance.
 - `updated_at` (String) Last update timestamp.

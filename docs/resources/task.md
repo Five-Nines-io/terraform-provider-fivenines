@@ -35,13 +35,14 @@ resource "fivenines_task" "heartbeat" {
 ### Required
 
 - `name` (String) Name of the task.
-- `schedule_type` (String) Schedule type: "cron" or "interval".
+- `schedule_type` (String) Schedule type: "cron" or "interval". Changing this forces recreation.
 
 ### Optional
 
 - `grace_period_minutes` (Number) Grace period in minutes before marking as missed.
 - `host_id` (String) Optional host ID to associate this task with.
 - `interval_seconds` (Number) Interval in seconds (required when schedule_type is interval).
+- `paused` (Boolean) Whether the task is paused.
 - `schedule` (String) Cron expression (required when schedule_type is cron).
 - `time_zone` (String) Time zone for cron schedule.
 

@@ -53,7 +53,7 @@ resource "fivenines_uptime_monitor" "database" {
 ### Required
 
 - `name` (String) Name of the uptime monitor.
-- `protocol` (String) Protocol: "https", "tcp", "icmp", "dns", or "custom_http".
+- `protocol` (String) Protocol: "https", "tcp", "icmp", "dns", or "custom_http". Changing this forces recreation.
 
 ### Optional
 
@@ -71,6 +71,7 @@ resource "fivenines_uptime_monitor" "database" {
 - `ip_version` (String) IP version: "auto", "ipv4", or "ipv6".
 - `keyword` (String) Keyword that must be present in the response body.
 - `keyword_absent` (Boolean) If true, alert when the keyword IS found (absent check).
+- `paused` (Boolean) Whether the monitor is paused.
 - `port` (Number) Port to monitor (required for tcp protocol).
 - `probe_region_ids` (List of Number) Probe region IDs to check from. Defaults to all active regions.
 - `recovery_count` (Number) Number of successful checks required to transition from down to up.

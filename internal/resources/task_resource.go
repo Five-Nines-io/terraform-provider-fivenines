@@ -28,6 +28,7 @@ type taskModel struct {
 	ID                 types.String `tfsdk:"id"`
 	Name               types.String `tfsdk:"name"`
 	ScheduleType       types.String `tfsdk:"schedule_type"`
+	Paused             types.Bool   `tfsdk:"paused"`
 	Schedule           types.String `tfsdk:"schedule"`
 	IntervalSeconds    types.Int64  `tfsdk:"interval_seconds"`
 	GracePeriodMinutes types.Int64  `tfsdk:"grace_period_minutes"`
@@ -67,11 +68,19 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Required:    true,
 			},
 			"schedule_type": schema.StringAttribute{
-				Description: `Schedule type: "cron" or "interval".`,
+				Description: `Schedule type: "cron" or "interval". Changing this forces recreation.`,
 				Required:    true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("cron", "interval"),
 				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
+			},
+			"paused": schema.BoolAttribute{
+				Description: "Whether the task is paused.",
+				Optional:    true,
+				Computed:    true,
 			},
 			"schedule": schema.StringAttribute{
 				Description: "Cron expression (required when schedule_type is cron).",
@@ -177,10 +186,19 @@ func (r *taskResource) Create(ctx context.Context, req resource.CreateRequest, r
 
 	tflog.Debug(ctx, "Creating task", map[string]interface{}{"name": input.Name})
 
-	task, err := r.client.CreateTask(input)
+	task, err := r.client.CreateTask(ctx, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating task", err.Error())
 		return
+	}
+
+	// Handle pause state after creation
+	if !plan.Paused.IsNull() && plan.Paused.ValueBool() {
+		if err := r.client.PauseTask(ctx, task.ID); err != nil {
+			resp.Diagnostics.AddError("Error pausing task after creation", err.Error())
+			return
+		}
+		task.Status = "paused"
 	}
 
 	mapTaskToState(task, &plan)
@@ -194,7 +212,7 @@ func (r *taskResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
-	task, _, err := r.client.GetTask(state.ID.ValueString())
+	task, _, err := r.client.GetTask(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -222,11 +240,6 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	}
 
 	id := state.ID.ValueString()
-	_, etag, err := r.client.GetTask(id)
-	if err != nil {
-		resp.Diagnostics.AddError("Error reading task for update", err.Error())
-		return
-	}
 
 	name := plan.Name.ValueString()
 	input := client.UpdateTaskInput{
@@ -253,10 +266,42 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		input.HostID = &v
 	}
 
-	task, err := r.client.UpdateTask(id, etag, input)
-	if err != nil {
-		resp.Diagnostics.AddError("Error updating task", err.Error())
-		return
+	var task *client.Task
+	for attempt := 0; attempt < 3; attempt++ {
+		_, etag, err := r.client.GetTask(ctx, id)
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading task for update", err.Error())
+			return
+		}
+		task, err = r.client.UpdateTask(ctx, id, etag, input)
+		if err != nil {
+			if client.IsPreconditionFailed(err) && attempt < 2 {
+				tflog.Debug(ctx, "ETag mismatch on task update, retrying", map[string]interface{}{"attempt": attempt + 1})
+				continue
+			}
+			resp.Diagnostics.AddError("Error updating task", err.Error())
+			return
+		}
+		break
+	}
+
+	// Handle pause/resume state change
+	if !plan.Paused.IsNull() {
+		wantPaused := plan.Paused.ValueBool()
+		isPaused := task.Status == "paused"
+		if wantPaused && !isPaused {
+			if err := r.client.PauseTask(ctx, id); err != nil {
+				resp.Diagnostics.AddError("Error pausing task", err.Error())
+				return
+			}
+			task.Status = "paused"
+		} else if !wantPaused && isPaused {
+			if err := r.client.ResumeTask(ctx, id); err != nil {
+				resp.Diagnostics.AddError("Error resuming task", err.Error())
+				return
+			}
+			task.Status = "active"
+		}
 	}
 
 	mapTaskToState(task, &plan)
@@ -272,7 +317,7 @@ func (r *taskResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 
 	tflog.Debug(ctx, "Deleting task", map[string]interface{}{"id": state.ID.ValueString()})
 
-	err := r.client.DeleteTask(state.ID.ValueString())
+	err := r.client.DeleteTask(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
@@ -289,6 +334,7 @@ func mapTaskToState(t *client.Task, state *taskModel) {
 	state.ID = types.StringValue(t.ID)
 	state.Name = types.StringValue(t.Name)
 	state.ScheduleType = types.StringValue(t.ScheduleType)
+	state.Paused = types.BoolValue(t.Status == "paused")
 	state.Schedule = types.StringValue(t.Schedule)
 	if t.IntervalSeconds != nil {
 		state.IntervalSeconds = types.Int64Value(*t.IntervalSeconds)

@@ -32,6 +32,7 @@ type uptimeMonitorModel struct {
 	ID                  types.String `tfsdk:"id"`
 	Name                types.String `tfsdk:"name"`
 	Protocol            types.String `tfsdk:"protocol"`
+	Paused              types.Bool   `tfsdk:"paused"`
 	URL                 types.String `tfsdk:"url"`
 	Hostname            types.String `tfsdk:"hostname"`
 	Port                types.Int64  `tfsdk:"port"`
@@ -50,8 +51,17 @@ type uptimeMonitorModel struct {
 	LastError           types.String `tfsdk:"last_error"`
 	NextCheckAt         types.String `tfsdk:"next_check_at"`
 	LastCheckAt         types.String `tfsdk:"last_check_at"`
-	CreatedAt           types.String `tfsdk:"created_at"`
-	UpdatedAt           types.String `tfsdk:"updated_at"`
+	// DNS fields
+	DNSRecordType      types.String `tfsdk:"dns_record_type"`
+	DNSExpectedRecords types.List   `tfsdk:"dns_expected_records"`
+	// Custom HTTP fields
+	CustomHeaders types.Map    `tfsdk:"custom_headers"`
+	CustomBody    types.String `tfsdk:"custom_body"`
+	ContentType   types.String `tfsdk:"content_type"`
+	// Recovery
+	RecoveryCount types.Int64  `tfsdk:"recovery_count"`
+	CreatedAt     types.String `tfsdk:"created_at"`
+	UpdatedAt     types.String `tfsdk:"updated_at"`
 }
 
 func NewUptimeMonitorResource() resource.Resource {
@@ -78,11 +88,19 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Required:    true,
 			},
 			"protocol": schema.StringAttribute{
-				Description: `Protocol: "https", "tcp", or "icmp".`,
+				Description: `Protocol: "https", "tcp", "icmp", or "dns". Changing this forces recreation.`,
 				Required:    true,
 				Validators: []validator.String{
-					stringvalidator.OneOf("https", "tcp", "icmp"),
+					stringvalidator.OneOf("https", "tcp", "icmp", "dns"),
 				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
+			},
+			"paused": schema.BoolAttribute{
+				Description: "Whether the monitor is paused.",
+				Optional:    true,
+				Computed:    true,
 			},
 			"url": schema.StringAttribute{
 				Description: "URL to monitor (required for https protocol).",
@@ -164,6 +182,40 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Optional:    true,
 				Computed:    true,
 				ElementType: types.Int64Type,
+			},
+			"dns_record_type": schema.StringAttribute{
+				Description: `DNS record type to query (required for dns protocol): "A", "AAAA", "CNAME", "MX", "TXT", "NS".`,
+				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("A", "AAAA", "CNAME", "MX", "TXT", "NS"),
+				},
+			},
+			"dns_expected_records": schema.ListAttribute{
+				Description: "Expected DNS record values.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"custom_headers": schema.MapAttribute{
+				Description: "Custom HTTP headers as key-value pairs.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"custom_body": schema.StringAttribute{
+				Description: "Request body for POST requests (https/custom_http protocols).",
+				Optional:    true,
+			},
+			"content_type": schema.StringAttribute{
+				Description: `Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain".`,
+				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("application/json", "application/x-www-form-urlencoded", "text/plain"),
+				},
+			},
+			"recovery_count": schema.Int64Attribute{
+				Description: "Number of successful checks required to transition from down to up.",
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(1),
 			},
 			"status": schema.StringAttribute{
 				Description: "Current status.",
@@ -278,13 +330,53 @@ func (r *uptimeMonitorResource) Create(ctx context.Context, req resource.CreateR
 		}
 		input.ProbeRegionIDs = ids
 	}
+	if !plan.DNSRecordType.IsNull() && !plan.DNSRecordType.IsUnknown() {
+		input.DNSRecordType = plan.DNSRecordType.ValueString()
+	}
+	if !plan.DNSExpectedRecords.IsNull() && !plan.DNSExpectedRecords.IsUnknown() {
+		var records []string
+		for _, elem := range plan.DNSExpectedRecords.Elements() {
+			if v, ok := elem.(types.String); ok {
+				records = append(records, v.ValueString())
+			}
+		}
+		input.DNSExpectedRecords = records
+	}
+	if !plan.CustomHeaders.IsNull() && !plan.CustomHeaders.IsUnknown() {
+		headers := make(map[string]string)
+		for k, v := range plan.CustomHeaders.Elements() {
+			if sv, ok := v.(types.String); ok {
+				headers[k] = sv.ValueString()
+			}
+		}
+		input.CustomHeaders = headers
+	}
+	if !plan.CustomBody.IsNull() && !plan.CustomBody.IsUnknown() {
+		input.CustomBody = plan.CustomBody.ValueString()
+	}
+	if !plan.ContentType.IsNull() && !plan.ContentType.IsUnknown() {
+		input.ContentType = plan.ContentType.ValueString()
+	}
+	if !plan.RecoveryCount.IsNull() && !plan.RecoveryCount.IsUnknown() {
+		v := int(plan.RecoveryCount.ValueInt64())
+		input.RecoveryCount = &v
+	}
 
 	tflog.Debug(ctx, "Creating uptime monitor", map[string]interface{}{"name": input.Name})
 
-	monitor, err := r.client.CreateUptimeMonitor(input)
+	monitor, err := r.client.CreateUptimeMonitor(ctx, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating uptime monitor", err.Error())
 		return
+	}
+
+	// Handle pause state after creation
+	if !plan.Paused.IsNull() && plan.Paused.ValueBool() {
+		if err := r.client.PauseUptimeMonitor(ctx, monitor.ID); err != nil {
+			resp.Diagnostics.AddError("Error pausing uptime monitor after creation", err.Error())
+			return
+		}
+		monitor.Status = "paused"
 	}
 
 	r.mapToState(ctx, monitor, &plan, &resp.Diagnostics)
@@ -298,7 +390,7 @@ func (r *uptimeMonitorResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 
-	monitor, _, err := r.client.GetUptimeMonitor(state.ID.ValueString())
+	monitor, _, err := r.client.GetUptimeMonitor(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -326,11 +418,6 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 	}
 
 	id := state.ID.ValueString()
-	_, etag, err := r.client.GetUptimeMonitor(id)
-	if err != nil {
-		resp.Diagnostics.AddError("Error reading uptime monitor for update", err.Error())
-		return
-	}
 
 	input := client.UpdateUptimeMonitorInput{}
 	if !plan.Name.IsNull() {
@@ -399,11 +486,77 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		}
 		input.ProbeRegionIDs = ids
 	}
+	if !plan.DNSRecordType.IsNull() && !plan.DNSRecordType.IsUnknown() {
+		v := plan.DNSRecordType.ValueString()
+		input.DNSRecordType = &v
+	}
+	if !plan.DNSExpectedRecords.IsNull() && !plan.DNSExpectedRecords.IsUnknown() {
+		var records []string
+		for _, elem := range plan.DNSExpectedRecords.Elements() {
+			if sv, ok := elem.(types.String); ok {
+				records = append(records, sv.ValueString())
+			}
+		}
+		input.DNSExpectedRecords = records
+	}
+	if !plan.CustomHeaders.IsNull() && !plan.CustomHeaders.IsUnknown() {
+		headers := make(map[string]string)
+		for k, v := range plan.CustomHeaders.Elements() {
+			if sv, ok := v.(types.String); ok {
+				headers[k] = sv.ValueString()
+			}
+		}
+		input.CustomHeaders = &headers
+	}
+	if !plan.CustomBody.IsNull() && !plan.CustomBody.IsUnknown() {
+		v := plan.CustomBody.ValueString()
+		input.CustomBody = &v
+	}
+	if !plan.ContentType.IsNull() && !plan.ContentType.IsUnknown() {
+		v := plan.ContentType.ValueString()
+		input.ContentType = &v
+	}
+	if !plan.RecoveryCount.IsNull() && !plan.RecoveryCount.IsUnknown() {
+		v := int(plan.RecoveryCount.ValueInt64())
+		input.RecoveryCount = &v
+	}
 
-	monitor, err := r.client.UpdateUptimeMonitor(id, etag, input)
-	if err != nil {
-		resp.Diagnostics.AddError("Error updating uptime monitor", err.Error())
-		return
+	var monitor *client.UptimeMonitor
+	for attempt := 0; attempt < 3; attempt++ {
+		_, etag, err := r.client.GetUptimeMonitor(ctx, id)
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading uptime monitor for update", err.Error())
+			return
+		}
+		monitor, err = r.client.UpdateUptimeMonitor(ctx, id, etag, input)
+		if err != nil {
+			if client.IsPreconditionFailed(err) && attempt < 2 {
+				tflog.Debug(ctx, "ETag mismatch on uptime monitor update, retrying", map[string]interface{}{"attempt": attempt + 1})
+				continue
+			}
+			resp.Diagnostics.AddError("Error updating uptime monitor", err.Error())
+			return
+		}
+		break
+	}
+
+	// Handle pause/resume state change
+	if !plan.Paused.IsNull() {
+		wantPaused := plan.Paused.ValueBool()
+		isPaused := monitor.Status == "paused"
+		if wantPaused && !isPaused {
+			if err := r.client.PauseUptimeMonitor(ctx, id); err != nil {
+				resp.Diagnostics.AddError("Error pausing uptime monitor", err.Error())
+				return
+			}
+			monitor.Status = "paused"
+		} else if !wantPaused && isPaused {
+			if err := r.client.ResumeUptimeMonitor(ctx, id); err != nil {
+				resp.Diagnostics.AddError("Error resuming uptime monitor", err.Error())
+				return
+			}
+			monitor.Status = "active"
+		}
 	}
 
 	r.mapToState(ctx, monitor, &plan, &resp.Diagnostics)
@@ -419,7 +572,7 @@ func (r *uptimeMonitorResource) Delete(ctx context.Context, req resource.DeleteR
 
 	tflog.Debug(ctx, "Deleting uptime monitor", map[string]interface{}{"id": state.ID.ValueString()})
 
-	err := r.client.DeleteUptimeMonitor(state.ID.ValueString())
+	err := r.client.DeleteUptimeMonitor(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
@@ -436,6 +589,7 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	state.ID = types.StringValue(m.ID)
 	state.Name = types.StringValue(m.Name)
 	state.Protocol = types.StringValue(m.Protocol)
+	state.Paused = types.BoolValue(m.Status == "paused")
 	state.URL = types.StringValue(m.URL)
 	state.Hostname = types.StringValue(m.Hostname)
 	if m.Port != nil {
@@ -465,6 +619,41 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	regionsList, d := types.ListValueFrom(ctx, types.Int64Type, m.ProbeRegionIDs)
 	diags.Append(d...)
 	state.ProbeRegionIDs = regionsList
+
+	// DNS fields
+	if m.DNSRecordType != "" {
+		state.DNSRecordType = types.StringValue(m.DNSRecordType)
+	} else {
+		state.DNSRecordType = types.StringNull()
+	}
+	if len(m.DNSExpectedRecords) > 0 {
+		recordsList, d := types.ListValueFrom(ctx, types.StringType, m.DNSExpectedRecords)
+		diags.Append(d...)
+		state.DNSExpectedRecords = recordsList
+	} else {
+		state.DNSExpectedRecords = types.ListNull(types.StringType)
+	}
+
+	// Custom HTTP fields
+	if len(m.CustomHeaders) > 0 {
+		headersMap, d := types.MapValueFrom(ctx, types.StringType, m.CustomHeaders)
+		diags.Append(d...)
+		state.CustomHeaders = headersMap
+	} else {
+		state.CustomHeaders = types.MapNull(types.StringType)
+	}
+	if m.CustomBody != "" {
+		state.CustomBody = types.StringValue(m.CustomBody)
+	} else {
+		state.CustomBody = types.StringNull()
+	}
+	if m.ContentType != "" {
+		state.ContentType = types.StringValue(m.ContentType)
+	} else {
+		state.ContentType = types.StringNull()
+	}
+
+	state.RecoveryCount = types.Int64Value(int64(m.RecoveryCount))
 
 	state.Status = types.StringValue(m.Status)
 	state.SSLExpiresAt = optionalString(m.SSLExpiresAt)

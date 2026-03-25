@@ -95,7 +95,7 @@ func (d *integrationsDataSource) Configure(_ context.Context, req datasource.Con
 }
 
 func (d *integrationsDataSource) Read(ctx context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {
-	integrations, err := d.client.ListIntegrations()
+	integrations, err := d.client.ListIntegrations(ctx)
 	if err != nil {
 		resp.Diagnostics.AddError("Error listing integrations", err.Error())
 		return

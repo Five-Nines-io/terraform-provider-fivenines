@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -29,6 +31,8 @@ type workflowModel struct {
 	Name               types.String `tfsdk:"name"`
 	Description        types.String `tfsdk:"description"`
 	IntervalSeconds    types.Int64  `tfsdk:"interval_seconds"`
+	ExecutionGraphJSON types.String `tfsdk:"execution_graph_json"`
+	Active             types.Bool   `tfsdk:"active"`
 	Status             types.String `tfsdk:"status"`
 	TriggerType        types.String `tfsdk:"trigger_type"`
 	TriggerTypeLabel   types.String `tfsdk:"trigger_type_label"`
@@ -72,12 +76,22 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Optional:    true,
 				Computed:    true,
 			},
+			"execution_graph_json": schema.StringAttribute{
+				Description: "JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value.",
+				Optional:    true,
+			},
+			"active": schema.BoolAttribute{
+				Description: "Whether the workflow is active. Set to true to activate, false to pause. Requires a published version.",
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+			},
 			"status": schema.StringAttribute{
 				Description: "Current status (draft, active, paused, archived).",
 				Computed:    true,
 			},
 			"trigger_type": schema.StringAttribute{
-				Description: "Type of trigger.",
+				Description: "Type of trigger (derived from the execution graph).",
 				Computed:    true,
 			},
 			"trigger_type_label": schema.StringAttribute{
@@ -141,10 +155,34 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 
 	tflog.Debug(ctx, "Creating workflow", map[string]interface{}{"name": input.Name})
 
-	workflow, err := r.client.CreateWorkflow(input)
+	workflow, err := r.client.CreateWorkflow(ctx, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating workflow", err.Error())
 		return
+	}
+
+	// If execution_graph_json is provided, create a version and publish it
+	if !plan.ExecutionGraphJSON.IsNull() && !plan.ExecutionGraphJSON.IsUnknown() {
+		graphJSON := plan.ExecutionGraphJSON.ValueString()
+		if err := r.publishGraph(ctx, workflow.ID, graphJSON); err != nil {
+			resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
+			return
+		}
+
+		// If active=true, activate the workflow
+		if plan.Active.ValueBool() {
+			if err := r.client.ActivateWorkflow(ctx, workflow.ID); err != nil {
+				resp.Diagnostics.AddError("Error activating workflow", err.Error())
+				return
+			}
+		}
+
+		// Re-read to get updated state
+		workflow, _, err = r.client.GetWorkflow(ctx, workflow.ID)
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading workflow after publish", err.Error())
+			return
+		}
 	}
 
 	mapWorkflowToState(workflow, &plan)
@@ -158,7 +196,7 @@ func (r *workflowResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
-	workflow, _, err := r.client.GetWorkflow(state.ID.ValueInt64())
+	workflow, _, err := r.client.GetWorkflow(ctx, state.ID.ValueInt64())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -186,12 +224,8 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 	}
 
 	id := state.ID.ValueInt64()
-	_, etag, err := r.client.GetWorkflow(id)
-	if err != nil {
-		resp.Diagnostics.AddError("Error reading workflow for update", err.Error())
-		return
-	}
 
+	// Update metadata with ETag retry on 412
 	name := plan.Name.ValueString()
 	input := client.UpdateWorkflowInput{
 		Name: &name,
@@ -205,9 +239,58 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 		input.IntervalSeconds = &v
 	}
 
-	workflow, err := r.client.UpdateWorkflow(id, etag, input)
+	var workflow *client.Workflow
+	for attempt := 0; attempt < 3; attempt++ {
+		_, etag, err := r.client.GetWorkflow(ctx, id)
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading workflow for update", err.Error())
+			return
+		}
+		workflow, err = r.client.UpdateWorkflow(ctx, id, etag, input)
+		if err != nil {
+			if client.IsPreconditionFailed(err) && attempt < 2 {
+				tflog.Debug(ctx, "ETag mismatch on workflow update, retrying", map[string]interface{}{"attempt": attempt + 1})
+				continue
+			}
+			resp.Diagnostics.AddError("Error updating workflow", err.Error())
+			return
+		}
+		break
+	}
+
+	// If execution_graph_json changed, create a new version and publish
+	if !plan.ExecutionGraphJSON.IsNull() && !plan.ExecutionGraphJSON.IsUnknown() {
+		graphChanged := state.ExecutionGraphJSON.IsNull() ||
+			plan.ExecutionGraphJSON.ValueString() != state.ExecutionGraphJSON.ValueString()
+
+		if graphChanged {
+			graphJSON := plan.ExecutionGraphJSON.ValueString()
+			if err := r.publishGraph(ctx, id, graphJSON); err != nil {
+				resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
+				return
+			}
+		}
+	}
+
+	// Handle activate/pause transitions
+	wantActive := plan.Active.ValueBool()
+	isActive := workflow.Status == "active"
+	if wantActive && !isActive {
+		if err := r.client.ActivateWorkflow(ctx, id); err != nil {
+			resp.Diagnostics.AddError("Error activating workflow", err.Error())
+			return
+		}
+	} else if !wantActive && isActive {
+		if err := r.client.PauseWorkflow(ctx, id); err != nil {
+			resp.Diagnostics.AddError("Error pausing workflow", err.Error())
+			return
+		}
+	}
+
+	// Re-read final state
+	workflow, _, err := r.client.GetWorkflow(ctx, id)
 	if err != nil {
-		resp.Diagnostics.AddError("Error updating workflow", err.Error())
+		resp.Diagnostics.AddError("Error reading workflow after update", err.Error())
 		return
 	}
 
@@ -224,7 +307,7 @@ func (r *workflowResource) Delete(ctx context.Context, req resource.DeleteReques
 
 	tflog.Debug(ctx, "Deleting workflow", map[string]interface{}{"id": state.ID.ValueInt64()})
 
-	err := r.client.DeleteWorkflow(state.ID.ValueInt64())
+	err := r.client.DeleteWorkflow(ctx, state.ID.ValueInt64())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
@@ -242,6 +325,27 @@ func (r *workflowResource) ImportState(ctx context.Context, req resource.ImportS
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
 }
 
+// publishGraph creates a new workflow version from JSON and publishes it.
+func (r *workflowResource) publishGraph(ctx context.Context, workflowID int64, graphJSON string) error {
+	var graph map[string]interface{}
+	if err := json.Unmarshal([]byte(graphJSON), &graph); err != nil {
+		return fmt.Errorf("invalid execution_graph_json: %w", err)
+	}
+
+	version, err := r.client.CreateWorkflowVersion(ctx, workflowID, client.CreateWorkflowVersionInput{
+		ExecutionGraph: graph,
+	})
+	if err != nil {
+		return fmt.Errorf("creating version: %w", err)
+	}
+
+	if err := r.client.PublishWorkflowVersion(ctx, workflowID, version.ID); err != nil {
+		return fmt.Errorf("publishing version %d: %w", version.ID, err)
+	}
+
+	return nil
+}
+
 func mapWorkflowToState(w *client.Workflow, state *workflowModel) {
 	state.ID = types.Int64Value(w.ID)
 	state.Name = types.StringValue(w.Name)
@@ -252,6 +356,7 @@ func mapWorkflowToState(w *client.Workflow, state *workflowModel) {
 		state.IntervalSeconds = types.Int64Null()
 	}
 	state.Status = types.StringValue(w.Status)
+	state.Active = types.BoolValue(w.Status == "active")
 	state.TriggerType = types.StringValue(w.TriggerType)
 	state.TriggerTypeLabel = types.StringValue(w.TriggerTypeLabel)
 	if w.PublishedVersionID != nil {
@@ -263,4 +368,7 @@ func mapWorkflowToState(w *client.Workflow, state *workflowModel) {
 	state.LastEvaluationAt = optionalString(w.LastEvaluationAt)
 	state.CreatedAt = types.StringValue(w.CreatedAt)
 	state.UpdatedAt = types.StringValue(w.UpdatedAt)
+
+	// Preserve execution_graph_json — the API doesn't return it on the workflow
+	// object, so we keep whatever the user set. On import, it will be null.
 }

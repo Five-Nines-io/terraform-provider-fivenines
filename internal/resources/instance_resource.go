@@ -37,8 +37,12 @@ type instanceModel struct {
 	MemorySize          types.Int64  `tfsdk:"memory_size"`
 	IPv4                types.String `tfsdk:"ipv4"`
 	IPv6                types.String `tfsdk:"ipv6"`
+	Source              types.String `tfsdk:"source"`
+	ClientVersion       types.String `tfsdk:"client_version"`
 	Status              types.String `tfsdk:"status"`
+	FirstSyncAt         types.String `tfsdk:"first_sync_at"`
 	LastSyncAt          types.String `tfsdk:"last_sync_at"`
+	LastRequestAt       types.String `tfsdk:"last_request_at"`
 	CreatedAt           types.String `tfsdk:"created_at"`
 	UpdatedAt           types.String `tfsdk:"updated_at"`
 }
@@ -114,12 +118,28 @@ func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Description: "IPv6 address.",
 				Computed:    true,
 			},
+			"source": schema.StringAttribute{
+				Description: "Agent type (e.g., fivenines-agent).",
+				Computed:    true,
+			},
+			"client_version": schema.StringAttribute{
+				Description: "Agent client version.",
+				Computed:    true,
+			},
 			"status": schema.StringAttribute{
 				Description: "Current status of the instance.",
 				Computed:    true,
 			},
+			"first_sync_at": schema.StringAttribute{
+				Description: "First agent sync time.",
+				Computed:    true,
+			},
 			"last_sync_at": schema.StringAttribute{
 				Description: "Last time the agent synced.",
+				Computed:    true,
+			},
+			"last_request_at": schema.StringAttribute{
+				Description: "Last API request time from the agent.",
 				Computed:    true,
 			},
 			"created_at": schema.StringAttribute{
@@ -164,7 +184,7 @@ func (r *instanceResource) Create(ctx context.Context, req resource.CreateReques
 
 	tflog.Debug(ctx, "Creating instance", map[string]interface{}{"display_name": input.DisplayName})
 
-	instance, err := r.client.CreateInstance(input)
+	instance, err := r.client.CreateInstance(ctx, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating instance", err.Error())
 		return
@@ -181,7 +201,7 @@ func (r *instanceResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
-	instance, _, err := r.client.GetInstance(state.ID.ValueString())
+	instance, _, err := r.client.GetInstance(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -208,13 +228,6 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
-	// Fetch current to get ETag
-	_, etag, err := r.client.GetInstance(state.ID.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Error reading instance for update", err.Error())
-		return
-	}
-
 	displayName := plan.DisplayName.ValueString()
 	enabled := plan.Enabled.ValueBool()
 	maintenance := plan.MaintenanceMode.ValueBool()
@@ -224,10 +237,23 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 		MaintenanceMode: &maintenance,
 	}
 
-	instance, err := r.client.UpdateInstance(state.ID.ValueString(), etag, input)
-	if err != nil {
-		resp.Diagnostics.AddError("Error updating instance", err.Error())
-		return
+	var instance *client.Instance
+	for attempt := 0; attempt < 3; attempt++ {
+		_, etag, err := r.client.GetInstance(ctx, state.ID.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading instance for update", err.Error())
+			return
+		}
+		instance, err = r.client.UpdateInstance(ctx, state.ID.ValueString(), etag, input)
+		if err != nil {
+			if client.IsPreconditionFailed(err) && attempt < 2 {
+				tflog.Debug(ctx, "ETag mismatch on instance update, retrying", map[string]interface{}{"attempt": attempt + 1})
+				continue
+			}
+			resp.Diagnostics.AddError("Error updating instance", err.Error())
+			return
+		}
+		break
 	}
 
 	mapInstanceToState(instance, &plan)
@@ -243,7 +269,7 @@ func (r *instanceResource) Delete(ctx context.Context, req resource.DeleteReques
 
 	tflog.Debug(ctx, "Deleting instance", map[string]interface{}{"id": state.ID.ValueString()})
 
-	err := r.client.DeleteInstance(state.ID.ValueString())
+	err := r.client.DeleteInstance(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
@@ -270,8 +296,12 @@ func mapInstanceToState(i *client.Instance, state *instanceModel) {
 	state.MemorySize = types.Int64Value(i.MemorySize)
 	state.IPv4 = types.StringValue(i.IPv4)
 	state.IPv6 = types.StringValue(i.IPv6)
+	state.Source = types.StringValue(i.Source)
+	state.ClientVersion = types.StringValue(i.ClientVersion)
 	state.Status = types.StringValue(i.Status)
+	state.FirstSyncAt = optionalString(i.FirstSyncAt)
 	state.LastSyncAt = optionalString(i.LastSyncAt)
+	state.LastRequestAt = optionalString(i.LastRequestAt)
 	state.CreatedAt = types.StringValue(i.CreatedAt)
 	state.UpdatedAt = types.StringValue(i.UpdatedAt)
 }

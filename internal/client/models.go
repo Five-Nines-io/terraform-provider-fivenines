@@ -130,6 +130,16 @@ type UpdateWorkflowInput struct {
 	IntervalSeconds *int64  `json:"interval_seconds,omitempty"`
 }
 
+// WorkflowRun represents a single execution of a workflow.
+type WorkflowRun struct {
+	ID          int64   `json:"id"`
+	Status      string  `json:"status"`
+	ResourceKey string  `json:"resource_key"`
+	StartedAt   *string `json:"started_at"`
+	CompletedAt *string `json:"completed_at"`
+	CreatedAt   string  `json:"created_at"`
+}
+
 // CreateWorkflowVersionInput is the request body for creating a workflow version.
 type CreateWorkflowVersionInput struct {
 	ExecutionGraph map[string]interface{} `json:"execution_graph"`
@@ -154,49 +164,71 @@ type UptimeMonitor struct {
 	FollowRedirects     bool    `json:"follow_redirects"`
 	ExpectedStatusCodes []int   `json:"expected_status_codes"`
 	ProbeRegionIDs      []int64 `json:"probe_region_ids"`
-	SSLExpiresAt        *string `json:"ssl_expires_at"`
-	LastError           *string `json:"last_error"`
-	NextCheckAt         *string `json:"next_check_at"`
-	LastCheckAt         *string `json:"last_check_at"`
-	CreatedAt           string  `json:"created_at"`
-	UpdatedAt           string  `json:"updated_at"`
+	// DNS protocol fields
+	DNSRecordType      string   `json:"dns_record_type"`
+	DNSExpectedRecords []string `json:"dns_expected_records"`
+	// Custom HTTP fields
+	CustomHeaders map[string]string `json:"custom_headers"`
+	CustomBody    string            `json:"custom_body"`
+	ContentType   string            `json:"content_type"`
+	// Recovery
+	RecoveryCount int `json:"recovery_count"`
+	// Read-only
+	SSLExpiresAt *string `json:"ssl_expires_at"`
+	LastError    *string `json:"last_error"`
+	NextCheckAt  *string `json:"next_check_at"`
+	LastCheckAt  *string `json:"last_check_at"`
+	CreatedAt    string  `json:"created_at"`
+	UpdatedAt    string  `json:"updated_at"`
 }
 
 // CreateUptimeMonitorInput is the request body for creating an uptime monitor.
 type CreateUptimeMonitorInput struct {
-	Name                string  `json:"name"`
-	Protocol            string  `json:"protocol"`
-	URL                 string  `json:"url,omitempty"`
-	Hostname            string  `json:"hostname,omitempty"`
-	Port                *int    `json:"port,omitempty"`
-	HTTPMethod          string  `json:"http_method,omitempty"`
-	IPVersion           string  `json:"ip_version,omitempty"`
-	IntervalSeconds     *int    `json:"interval_seconds,omitempty"`
-	TimeoutSeconds      *int    `json:"timeout_seconds,omitempty"`
-	ConfirmationCount   *int    `json:"confirmation_count,omitempty"`
-	Keyword             string  `json:"keyword,omitempty"`
-	KeywordAbsent       *bool   `json:"keyword_absent,omitempty"`
-	FollowRedirects     *bool   `json:"follow_redirects,omitempty"`
-	ExpectedStatusCodes []int   `json:"expected_status_codes,omitempty"`
-	ProbeRegionIDs      []int64 `json:"probe_region_ids,omitempty"`
+	Name                string            `json:"name"`
+	Protocol            string            `json:"protocol"`
+	URL                 string            `json:"url,omitempty"`
+	Hostname            string            `json:"hostname,omitempty"`
+	Port                *int              `json:"port,omitempty"`
+	HTTPMethod          string            `json:"http_method,omitempty"`
+	IPVersion           string            `json:"ip_version,omitempty"`
+	IntervalSeconds     *int              `json:"interval_seconds,omitempty"`
+	TimeoutSeconds      *int              `json:"timeout_seconds,omitempty"`
+	ConfirmationCount   *int              `json:"confirmation_count,omitempty"`
+	Keyword             string            `json:"keyword,omitempty"`
+	KeywordAbsent       *bool             `json:"keyword_absent,omitempty"`
+	FollowRedirects     *bool             `json:"follow_redirects,omitempty"`
+	ExpectedStatusCodes []int             `json:"expected_status_codes,omitempty"`
+	ProbeRegionIDs      []int64           `json:"probe_region_ids,omitempty"`
+	DNSRecordType       string            `json:"dns_record_type,omitempty"`
+	DNSExpectedRecords  []string          `json:"dns_expected_records,omitempty"`
+	CustomHeaders       map[string]string `json:"custom_headers,omitempty"`
+	CustomBody          string            `json:"custom_body,omitempty"`
+	ContentType         string            `json:"content_type,omitempty"`
+	RecoveryCount       *int              `json:"recovery_count,omitempty"`
 }
 
 // UpdateUptimeMonitorInput is the request body for updating an uptime monitor.
 type UpdateUptimeMonitorInput struct {
-	Name                *string `json:"name,omitempty"`
-	URL                 *string `json:"url,omitempty"`
-	Hostname            *string `json:"hostname,omitempty"`
-	Port                *int    `json:"port,omitempty"`
-	HTTPMethod          *string `json:"http_method,omitempty"`
-	IPVersion           *string `json:"ip_version,omitempty"`
-	IntervalSeconds     *int    `json:"interval_seconds,omitempty"`
-	TimeoutSeconds      *int    `json:"timeout_seconds,omitempty"`
-	ConfirmationCount   *int    `json:"confirmation_count,omitempty"`
-	Keyword             *string `json:"keyword,omitempty"`
-	KeywordAbsent       *bool   `json:"keyword_absent,omitempty"`
-	FollowRedirects     *bool   `json:"follow_redirects,omitempty"`
-	ExpectedStatusCodes []int   `json:"expected_status_codes,omitempty"`
-	ProbeRegionIDs      []int64 `json:"probe_region_ids,omitempty"`
+	Name                *string            `json:"name,omitempty"`
+	URL                 *string            `json:"url,omitempty"`
+	Hostname            *string            `json:"hostname,omitempty"`
+	Port                *int               `json:"port,omitempty"`
+	HTTPMethod          *string            `json:"http_method,omitempty"`
+	IPVersion           *string            `json:"ip_version,omitempty"`
+	IntervalSeconds     *int               `json:"interval_seconds,omitempty"`
+	TimeoutSeconds      *int               `json:"timeout_seconds,omitempty"`
+	ConfirmationCount   *int               `json:"confirmation_count,omitempty"`
+	Keyword             *string            `json:"keyword,omitempty"`
+	KeywordAbsent       *bool              `json:"keyword_absent,omitempty"`
+	FollowRedirects     *bool              `json:"follow_redirects,omitempty"`
+	ExpectedStatusCodes []int              `json:"expected_status_codes,omitempty"`
+	ProbeRegionIDs      []int64            `json:"probe_region_ids,omitempty"`
+	DNSRecordType       *string            `json:"dns_record_type,omitempty"`
+	DNSExpectedRecords  []string           `json:"dns_expected_records,omitempty"`
+	CustomHeaders       *map[string]string `json:"custom_headers,omitempty"`
+	CustomBody          *string            `json:"custom_body,omitempty"`
+	ContentType         *string            `json:"content_type,omitempty"`
+	RecoveryCount       *int               `json:"recovery_count,omitempty"`
 }
 
 // ProbeRegion represents a monitoring probe region.
@@ -216,6 +248,22 @@ type Integration struct {
 	Enabled   bool   `json:"enabled"`
 	Verified  bool   `json:"verified"`
 	CreatedAt string `json:"created_at"`
+}
+
+// Incident represents an alert triggered by a workflow or manually.
+type Incident struct {
+	ID              int64   `json:"id"`
+	Title           string  `json:"title"`
+	Summary         string  `json:"summary"`
+	Status          string  `json:"status"`
+	HostID          *string `json:"host_id"`
+	WorkflowID      *int64  `json:"workflow_id"`
+	TaskID          *string `json:"task_id"`
+	StartedAt       *string `json:"started_at"`
+	EndedAt         *string `json:"ended_at"`
+	DurationSeconds *int64  `json:"duration_seconds"`
+	CreatedAt       string  `json:"created_at"`
+	UpdatedAt       string  `json:"updated_at"`
 }
 
 // APIError represents an error response from the API.

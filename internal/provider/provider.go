@@ -95,5 +95,7 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 	return []func() datasource.DataSource{
 		datasources.NewProbeRegionsDataSource,
 		datasources.NewIntegrationsDataSource,
+		datasources.NewWorkflowRunsDataSource,
+		datasources.NewIncidentsDataSource,
 	}
 }

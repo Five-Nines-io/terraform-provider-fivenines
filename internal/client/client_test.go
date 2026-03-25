@@ -126,10 +126,10 @@ func TestClient_UpdateInstance_ETag(t *testing.T) {
 		gotIfMatch = r.Header.Get("If-Match")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"instance": map[string]interface{}{
-				"id":         "abc-123",
+				"id":           "abc-123",
 				"display_name": "updated",
-				"created_at": "2026-01-01T00:00:00Z",
-				"updated_at": "2026-01-01T00:00:00Z",
+				"created_at":   "2026-01-01T00:00:00Z",
+				"updated_at":   "2026-01-01T00:00:00Z",
 			},
 		})
 	})

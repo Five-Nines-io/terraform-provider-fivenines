@@ -28,6 +28,7 @@ type taskModel struct {
 	ID                 types.String `tfsdk:"id"`
 	Name               types.String `tfsdk:"name"`
 	ScheduleType       types.String `tfsdk:"schedule_type"`
+	Paused             types.Bool   `tfsdk:"paused"`
 	Schedule           types.String `tfsdk:"schedule"`
 	IntervalSeconds    types.Int64  `tfsdk:"interval_seconds"`
 	GracePeriodMinutes types.Int64  `tfsdk:"grace_period_minutes"`
@@ -67,11 +68,19 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Required:    true,
 			},
 			"schedule_type": schema.StringAttribute{
-				Description: `Schedule type: "cron" or "interval".`,
+				Description: `Schedule type: "cron" or "interval". Changing this forces recreation.`,
 				Required:    true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("cron", "interval"),
 				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
+			},
+			"paused": schema.BoolAttribute{
+				Description: "Whether the task is paused.",
+				Optional:    true,
+				Computed:    true,
 			},
 			"schedule": schema.StringAttribute{
 				Description: "Cron expression (required when schedule_type is cron).",
@@ -183,6 +192,15 @@ func (r *taskResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
+	// Handle pause state after creation
+	if !plan.Paused.IsNull() && plan.Paused.ValueBool() {
+		if err := r.client.PauseTask(task.ID); err != nil {
+			resp.Diagnostics.AddError("Error pausing task after creation", err.Error())
+			return
+		}
+		task.Status = "paused"
+	}
+
 	mapTaskToState(task, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -259,6 +277,25 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
+	// Handle pause/resume state change
+	if !plan.Paused.IsNull() {
+		wantPaused := plan.Paused.ValueBool()
+		isPaused := task.Status == "paused"
+		if wantPaused && !isPaused {
+			if err := r.client.PauseTask(id); err != nil {
+				resp.Diagnostics.AddError("Error pausing task", err.Error())
+				return
+			}
+			task.Status = "paused"
+		} else if !wantPaused && isPaused {
+			if err := r.client.ResumeTask(id); err != nil {
+				resp.Diagnostics.AddError("Error resuming task", err.Error())
+				return
+			}
+			task.Status = "active"
+		}
+	}
+
 	mapTaskToState(task, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -289,6 +326,7 @@ func mapTaskToState(t *client.Task, state *taskModel) {
 	state.ID = types.StringValue(t.ID)
 	state.Name = types.StringValue(t.Name)
 	state.ScheduleType = types.StringValue(t.ScheduleType)
+	state.Paused = types.BoolValue(t.Status == "paused")
 	state.Schedule = types.StringValue(t.Schedule)
 	if t.IntervalSeconds != nil {
 		state.IntervalSeconds = types.Int64Value(*t.IntervalSeconds)

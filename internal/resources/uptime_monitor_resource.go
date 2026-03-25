@@ -32,6 +32,7 @@ type uptimeMonitorModel struct {
 	ID                  types.String `tfsdk:"id"`
 	Name                types.String `tfsdk:"name"`
 	Protocol            types.String `tfsdk:"protocol"`
+	Paused              types.Bool   `tfsdk:"paused"`
 	URL                 types.String `tfsdk:"url"`
 	Hostname            types.String `tfsdk:"hostname"`
 	Port                types.Int64  `tfsdk:"port"`
@@ -87,11 +88,19 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Required:    true,
 			},
 			"protocol": schema.StringAttribute{
-				Description: `Protocol: "https", "tcp", "icmp", "dns", or "custom_http".`,
+				Description: `Protocol: "https", "tcp", "icmp", "dns", or "custom_http". Changing this forces recreation.`,
 				Required:    true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("https", "tcp", "icmp", "dns", "custom_http"),
 				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
+			},
+			"paused": schema.BoolAttribute{
+				Description: "Whether the monitor is paused.",
+				Optional:    true,
+				Computed:    true,
 			},
 			"url": schema.StringAttribute{
 				Description: "URL to monitor (required for https protocol).",
@@ -361,6 +370,15 @@ func (r *uptimeMonitorResource) Create(ctx context.Context, req resource.CreateR
 		return
 	}
 
+	// Handle pause state after creation
+	if !plan.Paused.IsNull() && plan.Paused.ValueBool() {
+		if err := r.client.PauseUptimeMonitor(monitor.ID); err != nil {
+			resp.Diagnostics.AddError("Error pausing uptime monitor after creation", err.Error())
+			return
+		}
+		monitor.Status = "paused"
+	}
+
 	r.mapToState(ctx, monitor, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -514,6 +532,25 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		return
 	}
 
+	// Handle pause/resume state change
+	if !plan.Paused.IsNull() {
+		wantPaused := plan.Paused.ValueBool()
+		isPaused := monitor.Status == "paused"
+		if wantPaused && !isPaused {
+			if err := r.client.PauseUptimeMonitor(id); err != nil {
+				resp.Diagnostics.AddError("Error pausing uptime monitor", err.Error())
+				return
+			}
+			monitor.Status = "paused"
+		} else if !wantPaused && isPaused {
+			if err := r.client.ResumeUptimeMonitor(id); err != nil {
+				resp.Diagnostics.AddError("Error resuming uptime monitor", err.Error())
+				return
+			}
+			monitor.Status = "active"
+		}
+	}
+
 	r.mapToState(ctx, monitor, &plan, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
@@ -544,6 +581,7 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	state.ID = types.StringValue(m.ID)
 	state.Name = types.StringValue(m.Name)
 	state.Protocol = types.StringValue(m.Protocol)
+	state.Paused = types.BoolValue(m.Status == "paused")
 	state.URL = types.StringValue(m.URL)
 	state.Hostname = types.StringValue(m.Hostname)
 	if m.Port != nil {

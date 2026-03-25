@@ -37,8 +37,12 @@ type instanceModel struct {
 	MemorySize          types.Int64  `tfsdk:"memory_size"`
 	IPv4                types.String `tfsdk:"ipv4"`
 	IPv6                types.String `tfsdk:"ipv6"`
+	Source              types.String `tfsdk:"source"`
+	ClientVersion       types.String `tfsdk:"client_version"`
 	Status              types.String `tfsdk:"status"`
+	FirstSyncAt         types.String `tfsdk:"first_sync_at"`
 	LastSyncAt          types.String `tfsdk:"last_sync_at"`
+	LastRequestAt       types.String `tfsdk:"last_request_at"`
 	CreatedAt           types.String `tfsdk:"created_at"`
 	UpdatedAt           types.String `tfsdk:"updated_at"`
 }
@@ -114,12 +118,28 @@ func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Description: "IPv6 address.",
 				Computed:    true,
 			},
+			"source": schema.StringAttribute{
+				Description: "Agent type (e.g., fivenines-agent).",
+				Computed:    true,
+			},
+			"client_version": schema.StringAttribute{
+				Description: "Agent client version.",
+				Computed:    true,
+			},
 			"status": schema.StringAttribute{
 				Description: "Current status of the instance.",
 				Computed:    true,
 			},
+			"first_sync_at": schema.StringAttribute{
+				Description: "First agent sync time.",
+				Computed:    true,
+			},
 			"last_sync_at": schema.StringAttribute{
 				Description: "Last time the agent synced.",
+				Computed:    true,
+			},
+			"last_request_at": schema.StringAttribute{
+				Description: "Last API request time from the agent.",
 				Computed:    true,
 			},
 			"created_at": schema.StringAttribute{
@@ -270,8 +290,12 @@ func mapInstanceToState(i *client.Instance, state *instanceModel) {
 	state.MemorySize = types.Int64Value(i.MemorySize)
 	state.IPv4 = types.StringValue(i.IPv4)
 	state.IPv6 = types.StringValue(i.IPv6)
+	state.Source = types.StringValue(i.Source)
+	state.ClientVersion = types.StringValue(i.ClientVersion)
 	state.Status = types.StringValue(i.Status)
+	state.FirstSyncAt = optionalString(i.FirstSyncAt)
 	state.LastSyncAt = optionalString(i.LastSyncAt)
+	state.LastRequestAt = optionalString(i.LastRequestAt)
 	state.CreatedAt = types.StringValue(i.CreatedAt)
 	state.UpdatedAt = types.StringValue(i.UpdatedAt)
 }

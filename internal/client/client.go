@@ -109,6 +109,14 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	return resp, nil
 }
 
+// IsPreconditionFailed returns true if the error is a 412 Precondition Failed.
+func IsPreconditionFailed(err error) bool {
+	if apiErr, ok := err.(*APIError); ok {
+		return apiErr.StatusCode == 412
+	}
+	return false
+}
+
 // parseError reads an error response body into an APIError.
 func parseError(resp *http.Response) error {
 	defer resp.Body.Close()
@@ -747,6 +755,55 @@ func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 	return result.Integrations, nil
+}
+
+// --- Incidents ---
+
+func (c *Client) ListIncidents(ctx context.Context) ([]Incident, error) {
+	var all []Incident
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/incidents?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+
+		var result struct {
+			Incidents []Incident     `json:"incidents"`
+			Meta      PaginationMeta `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.Incidents...)
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+func (c *Client) GetIncident(ctx context.Context, id int64) (*Incident, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/incidents/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		Incident Incident `json:"incident"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Incident, nil
 }
 
 func (c *Client) GetIntegration(ctx context.Context, id int64) (*Integration, error) {

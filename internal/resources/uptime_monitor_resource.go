@@ -418,11 +418,6 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 	}
 
 	id := state.ID.ValueString()
-	_, etag, err := r.client.GetUptimeMonitor(ctx, id)
-	if err != nil {
-		resp.Diagnostics.AddError("Error reading uptime monitor for update", err.Error())
-		return
-	}
 
 	input := client.UpdateUptimeMonitorInput{}
 	if !plan.Name.IsNull() {
@@ -526,10 +521,23 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		input.RecoveryCount = &v
 	}
 
-	monitor, err := r.client.UpdateUptimeMonitor(ctx, id, etag, input)
-	if err != nil {
-		resp.Diagnostics.AddError("Error updating uptime monitor", err.Error())
-		return
+	var monitor *client.UptimeMonitor
+	for attempt := 0; attempt < 3; attempt++ {
+		_, etag, err := r.client.GetUptimeMonitor(ctx, id)
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading uptime monitor for update", err.Error())
+			return
+		}
+		monitor, err = r.client.UpdateUptimeMonitor(ctx, id, etag, input)
+		if err != nil {
+			if client.IsPreconditionFailed(err) && attempt < 2 {
+				tflog.Debug(ctx, "ETag mismatch on uptime monitor update, retrying", map[string]interface{}{"attempt": attempt + 1})
+				continue
+			}
+			resp.Diagnostics.AddError("Error updating uptime monitor", err.Error())
+			return
+		}
+		break
 	}
 
 	// Handle pause/resume state change

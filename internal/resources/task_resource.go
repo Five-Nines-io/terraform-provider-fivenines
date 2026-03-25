@@ -240,11 +240,6 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	}
 
 	id := state.ID.ValueString()
-	_, etag, err := r.client.GetTask(ctx, id)
-	if err != nil {
-		resp.Diagnostics.AddError("Error reading task for update", err.Error())
-		return
-	}
 
 	name := plan.Name.ValueString()
 	input := client.UpdateTaskInput{
@@ -271,10 +266,23 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		input.HostID = &v
 	}
 
-	task, err := r.client.UpdateTask(ctx, id, etag, input)
-	if err != nil {
-		resp.Diagnostics.AddError("Error updating task", err.Error())
-		return
+	var task *client.Task
+	for attempt := 0; attempt < 3; attempt++ {
+		_, etag, err := r.client.GetTask(ctx, id)
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading task for update", err.Error())
+			return
+		}
+		task, err = r.client.UpdateTask(ctx, id, etag, input)
+		if err != nil {
+			if client.IsPreconditionFailed(err) && attempt < 2 {
+				tflog.Debug(ctx, "ETag mismatch on task update, retrying", map[string]interface{}{"attempt": attempt + 1})
+				continue
+			}
+			resp.Diagnostics.AddError("Error updating task", err.Error())
+			return
+		}
+		break
 	}
 
 	// Handle pause/resume state change

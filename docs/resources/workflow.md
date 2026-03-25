@@ -13,10 +13,22 @@ Manages a FiveNines workflow (automation definition).
 ## Example Usage
 
 ```terraform
+# Basic workflow (metadata only, configure graph in UI)
 resource "fivenines_workflow" "cpu_alert" {
   name             = "High CPU Alert"
   description      = "Alert when CPU exceeds 90% for 5 minutes"
   interval_seconds = 60
+}
+
+# Workflow with execution graph and auto-activation
+resource "fivenines_workflow" "disk_alert" {
+  name             = "Disk Space Alert"
+  description      = "Alert when disk usage exceeds 85%"
+  interval_seconds = 300
+  active           = true
+
+  # Provide the execution graph as JSON — use file() or jsonencode()
+  execution_graph_json = file("${path.module}/disk-alert-graph.json")
 }
 ```
 
@@ -29,7 +41,9 @@ resource "fivenines_workflow" "cpu_alert" {
 
 ### Optional
 
+- `active` (Boolean) Whether the workflow is active. Set to true to activate, false to pause. Requires a published version.
 - `description` (String) Description of the workflow.
+- `execution_graph_json` (String) JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value.
 - `interval_seconds` (Number) Evaluation interval in seconds.
 
 ### Read-Only
@@ -40,6 +54,6 @@ resource "fivenines_workflow" "cpu_alert" {
 - `next_evaluation_at` (String) Next scheduled evaluation time.
 - `published_version_id` (Number) ID of the currently published version.
 - `status` (String) Current status (draft, active, paused, archived).
-- `trigger_type` (String) Type of trigger.
+- `trigger_type` (String) Type of trigger (derived from the execution graph).
 - `trigger_type_label` (String) Human-readable trigger type.
 - `updated_at` (String) Last update timestamp.

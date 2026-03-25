@@ -228,13 +228,6 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
-	// Fetch current to get ETag
-	_, etag, err := r.client.GetInstance(ctx, state.ID.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Error reading instance for update", err.Error())
-		return
-	}
-
 	displayName := plan.DisplayName.ValueString()
 	enabled := plan.Enabled.ValueBool()
 	maintenance := plan.MaintenanceMode.ValueBool()
@@ -244,10 +237,23 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 		MaintenanceMode: &maintenance,
 	}
 
-	instance, err := r.client.UpdateInstance(ctx, state.ID.ValueString(), etag, input)
-	if err != nil {
-		resp.Diagnostics.AddError("Error updating instance", err.Error())
-		return
+	var instance *client.Instance
+	for attempt := 0; attempt < 3; attempt++ {
+		_, etag, err := r.client.GetInstance(ctx, state.ID.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddError("Error reading instance for update", err.Error())
+			return
+		}
+		instance, err = r.client.UpdateInstance(ctx, state.ID.ValueString(), etag, input)
+		if err != nil {
+			if client.IsPreconditionFailed(err) && attempt < 2 {
+				tflog.Debug(ctx, "ETag mismatch on instance update, retrying", map[string]interface{}{"attempt": attempt + 1})
+				continue
+			}
+			resp.Diagnostics.AddError("Error updating instance", err.Error())
+			return
+		}
+		break
 	}
 
 	mapInstanceToState(instance, &plan)

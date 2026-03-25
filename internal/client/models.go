@@ -250,6 +250,22 @@ type Integration struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// Incident represents an alert triggered by a workflow or manually.
+type Incident struct {
+	ID              int64   `json:"id"`
+	Title           string  `json:"title"`
+	Summary         string  `json:"summary"`
+	Status          string  `json:"status"`
+	HostID          *string `json:"host_id"`
+	WorkflowID      *int64  `json:"workflow_id"`
+	TaskID          *string `json:"task_id"`
+	StartedAt       *string `json:"started_at"`
+	EndedAt         *string `json:"ended_at"`
+	DurationSeconds *int64  `json:"duration_seconds"`
+	CreatedAt       string  `json:"created_at"`
+	UpdatedAt       string  `json:"updated_at"`
+}
+
 // APIError represents an error response from the API.
 type APIError struct {
 	StatusCode int

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -585,6 +586,130 @@ func TestClient_RateLimit_Retry(t *testing.T) {
 	}
 	if atomic.LoadInt32(&attempts) != 2 {
 		t.Errorf("expected 2 attempts (1 retry), got %d", atomic.LoadInt32(&attempts))
+	}
+}
+
+// --- ETag 412 Precondition Failed ---
+
+func TestClient_IsPreconditionFailed(t *testing.T) {
+	if IsPreconditionFailed(nil) {
+		t.Error("expected false for nil error")
+	}
+	if IsPreconditionFailed(fmt.Errorf("some error")) {
+		t.Error("expected false for non-API error")
+	}
+	if !IsPreconditionFailed(&APIError{StatusCode: 412}) {
+		t.Error("expected true for 412 error")
+	}
+	if IsPreconditionFailed(&APIError{StatusCode: 409}) {
+		t.Error("expected false for 409 error")
+	}
+}
+
+func TestClient_Update_412_Retry(t *testing.T) {
+	var attempts int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			w.Header().Set("ETag", fmt.Sprintf(`"etag-%d"`, atomic.LoadInt32(&attempts)))
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"instance": map[string]interface{}{
+					"id": "abc-123", "display_name": "test",
+					"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+				},
+			})
+			return
+		}
+		attempt := atomic.AddInt32(&attempts, 1)
+		if attempt == 1 {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "stale ETag"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instance": map[string]interface{}{
+				"id": "abc-123", "display_name": "updated",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	// First update will get 412, caller should retry with fresh ETag
+	name := "updated"
+	_, err := c.UpdateInstance(context.Background(), "abc-123", `"stale"`, UpdateInstanceInput{DisplayName: &name})
+	// This returns the 412 error — the retry logic is in the resource layer
+	if err == nil {
+		t.Fatal("expected 412 error from client (retry is at resource layer)")
+	}
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != 412 {
+		t.Fatalf("expected 412 error, got: %v", err)
+	}
+}
+
+// --- Incidents ---
+
+func TestClient_ListIncidents(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"incidents": []map[string]interface{}{
+				{
+					"id": 1, "title": "High CPU", "status": "triggered",
+					"summary": "CPU above 90%", "created_at": "2026-01-01T00:00:00Z",
+					"updated_at": "2026-01-01T00:00:00Z",
+				},
+				{
+					"id": 2, "title": "Disk Full", "status": "resolved",
+					"summary": "Disk at 95%", "created_at": "2026-01-01T00:00:00Z",
+					"updated_at": "2026-01-02T00:00:00Z",
+				},
+			},
+			"meta": map[string]int{"count": 2, "total": 2, "offset": 0},
+		})
+	})
+
+	incidents, err := c.ListIncidents(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(incidents) != 2 {
+		t.Errorf("expected 2 incidents, got %d", len(incidents))
+	}
+	if incidents[0].Title != "High CPU" {
+		t.Errorf("expected title 'High CPU', got %s", incidents[0].Title)
+	}
+	if incidents[1].Status != "resolved" {
+		t.Errorf("expected status 'resolved', got %s", incidents[1].Status)
+	}
+}
+
+func TestClient_GetIncident(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/incidents/42" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"incident": map[string]interface{}{
+				"id": 42, "title": "High CPU", "status": "acknowledged",
+				"summary": "CPU above 90%", "host_id": "host-uuid",
+				"workflow_id": 10, "duration_seconds": 3600,
+				"started_at": "2026-01-01T00:00:00Z",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	inc, err := c.GetIncident(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if inc.Title != "High CPU" {
+		t.Errorf("expected title 'High CPU', got %s", inc.Title)
+	}
+	if inc.HostID == nil || *inc.HostID != "host-uuid" {
+		t.Errorf("expected host_id 'host-uuid', got %v", inc.HostID)
+	}
+	if inc.DurationSeconds == nil || *inc.DurationSeconds != 3600 {
+		t.Errorf("expected duration_seconds 3600, got %v", inc.DurationSeconds)
 	}
 }
 

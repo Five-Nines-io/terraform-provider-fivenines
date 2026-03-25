@@ -713,6 +713,164 @@ func TestClient_GetIncident(t *testing.T) {
 	}
 }
 
+// --- Network Devices ---
+
+func TestClient_CreateNetworkDevice(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"network_device": map[string]interface{}{
+				"id": "dev-uuid", "name": "Core Switch", "ip_address": "192.168.1.1",
+				"device_type": "switch", "snmp_version": "v2c", "polling_interval": 60,
+				"status": "unknown", "maintenance_mode": false,
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	dev, err := c.CreateNetworkDevice(context.Background(), CreateNetworkDeviceInput{
+		Name: "Core Switch", IPAddress: "192.168.1.1", SNMPVersion: "v2c", SNMPCommunity: "public",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dev.ID != "dev-uuid" {
+		t.Errorf("expected ID dev-uuid, got %s", dev.ID)
+	}
+}
+
+func TestClient_GetNetworkDevice(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/network_devices/dev-uuid" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("ETag", `"dev-etag"`)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"network_device": map[string]interface{}{
+				"id": "dev-uuid", "name": "Core Switch", "ip_address": "192.168.1.1",
+				"device_type": "switch", "snmp_version": "v2c", "polling_interval": 60,
+				"status": "up", "maintenance_mode": false, "vendor": "Cisco", "model": "2960",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	dev, etag, err := c.GetNetworkDevice(context.Background(), "dev-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if etag != `"dev-etag"` {
+		t.Errorf("expected etag %q, got %q", `"dev-etag"`, etag)
+	}
+	if dev.Vendor != "Cisco" {
+		t.Errorf("expected vendor Cisco, got %s", dev.Vendor)
+	}
+}
+
+func TestClient_DeleteNetworkDevice_202(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
+	err := c.DeleteNetworkDevice(context.Background(), "dev-uuid")
+	if err != nil {
+		t.Fatalf("expected no error for 202, got: %v", err)
+	}
+}
+
+func TestClient_EnterMaintenanceNetworkDevice(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/network_devices/dev-uuid/enter_maintenance" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"network_device": map[string]interface{}{"id": "dev-uuid", "maintenance_mode": true},
+		})
+	})
+	err := c.EnterMaintenanceNetworkDevice(context.Background(), "dev-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// --- Status Pages ---
+
+func TestClient_CreateStatusPage(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status_page": map[string]interface{}{
+				"id": 1, "name": "Service Status", "slug": "abc1",
+				"public": true, "uptime": true, "theme_variant": "system",
+				"items":      []interface{}{},
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	pub := true
+	page, err := c.CreateStatusPage(context.Background(), CreateStatusPageInput{
+		Name: "Service Status", Public: &pub,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if page.Slug != "abc1" {
+		t.Errorf("expected slug abc1, got %s", page.Slug)
+	}
+}
+
+func TestClient_GetStatusPage(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/status_pages/1" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("ETag", `"sp-etag"`)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status_page": map[string]interface{}{
+				"id": 1, "name": "Service Status", "slug": "abc1",
+				"public": true, "uptime": true, "theme_variant": "dark",
+				"items": []map[string]interface{}{
+					{"item_type": "Host", "item_id": "host-uuid", "position": 0},
+					{"item_type": "UptimeMonitor", "item_id": "mon-uuid", "position": 1},
+				},
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	page, etag, err := c.GetStatusPage(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if etag != `"sp-etag"` {
+		t.Errorf("expected etag %q, got %q", `"sp-etag"`, etag)
+	}
+	if len(page.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(page.Items))
+	}
+	if page.Items[0].ItemType != "Host" {
+		t.Errorf("expected first item type Host, got %s", page.Items[0].ItemType)
+	}
+	if page.ThemeVariant != "dark" {
+		t.Errorf("expected theme_variant dark, got %s", page.ThemeVariant)
+	}
+}
+
+func TestClient_DeleteStatusPage(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	err := c.DeleteStatusPage(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("expected no error for 204, got: %v", err)
+	}
+}
+
 func TestClient_RateLimit_ContextCancellation(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "60")

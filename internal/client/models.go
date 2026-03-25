@@ -266,6 +266,119 @@ type Incident struct {
 	UpdatedAt       string  `json:"updated_at"`
 }
 
+// NetworkDevice represents a monitored network device (SNMP).
+type NetworkDevice struct {
+	ID                string  `json:"id"` // UUID
+	Name              string  `json:"name"`
+	IPAddress         string  `json:"ip_address"`
+	PollingHostID     *string `json:"polling_host_id"`
+	DeviceType        string  `json:"device_type"`
+	PollingInterval   int     `json:"polling_interval"`
+	SNMPVersion       string  `json:"snmp_version"`
+	SNMPUsername      string  `json:"snmp_username"`
+	SNMPSecurityLevel string  `json:"snmp_security_level"`
+	SNMPAuthProtocol  string  `json:"snmp_auth_protocol"`
+	SNMPPrivProtocol  string  `json:"snmp_priv_protocol"`
+	MaintenanceMode   bool    `json:"maintenance_mode"`
+	Status            string  `json:"status"`
+	Vendor            string  `json:"vendor"`
+	Model             string  `json:"model"`
+	SysName           string  `json:"sys_name"`
+	LastPolledAt      *string `json:"last_polled_at"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
+}
+
+// CreateNetworkDeviceInput is the request body for creating a network device.
+type CreateNetworkDeviceInput struct {
+	Name              string  `json:"name"`
+	IPAddress         string  `json:"ip_address"`
+	PollingHostID     *string `json:"polling_host_id,omitempty"`
+	DeviceType        string  `json:"device_type,omitempty"`
+	PollingInterval   *int    `json:"polling_interval,omitempty"`
+	SNMPVersion       string  `json:"snmp_version,omitempty"`
+	SNMPCommunity     string  `json:"snmp_community,omitempty"`
+	SNMPUsername      string  `json:"snmp_username,omitempty"`
+	SNMPSecurityLevel string  `json:"snmp_security_level,omitempty"`
+	SNMPAuthProtocol  string  `json:"snmp_auth_protocol,omitempty"`
+	SNMPAuthPassword  string  `json:"snmp_auth_password,omitempty"`
+	SNMPPrivProtocol  string  `json:"snmp_priv_protocol,omitempty"`
+	SNMPPrivPassword  string  `json:"snmp_priv_password,omitempty"`
+}
+
+// UpdateNetworkDeviceInput is the request body for updating a network device.
+type UpdateNetworkDeviceInput struct {
+	Name              *string `json:"name,omitempty"`
+	IPAddress         *string `json:"ip_address,omitempty"`
+	PollingHostID     *string `json:"polling_host_id,omitempty"`
+	DeviceType        *string `json:"device_type,omitempty"`
+	PollingInterval   *int    `json:"polling_interval,omitempty"`
+	SNMPVersion       *string `json:"snmp_version,omitempty"`
+	SNMPCommunity     *string `json:"snmp_community,omitempty"`
+	SNMPUsername      *string `json:"snmp_username,omitempty"`
+	SNMPSecurityLevel *string `json:"snmp_security_level,omitempty"`
+	SNMPAuthProtocol  *string `json:"snmp_auth_protocol,omitempty"`
+	SNMPAuthPassword  *string `json:"snmp_auth_password,omitempty"`
+	SNMPPrivProtocol  *string `json:"snmp_priv_protocol,omitempty"`
+	SNMPPrivPassword  *string `json:"snmp_priv_password,omitempty"`
+}
+
+// StatusPage represents a public status page.
+type StatusPage struct {
+	ID                      int64            `json:"id"`
+	Name                    string           `json:"name"`
+	Slug                    string           `json:"slug"`
+	Description             string           `json:"description"`
+	Public                  bool             `json:"public"`
+	Uptime                  bool             `json:"uptime"`
+	CustomDomain            string           `json:"custom_domain"`
+	CustomDomainEnabled     bool             `json:"custom_domain_enabled"`
+	CustomFooter            string           `json:"custom_footer"`
+	CustomFooterEnabled     bool             `json:"custom_footer_enabled"`
+	IncidentsHistoryEnabled bool             `json:"incidents_history_enabled"`
+	ThemeVariant            string           `json:"theme_variant"`
+	Items                   []StatusPageItem `json:"items"`
+	CreatedAt               string           `json:"created_at"`
+	UpdatedAt               string           `json:"updated_at"`
+}
+
+// StatusPageItem represents an item on a status page.
+type StatusPageItem struct {
+	ItemType string `json:"item_type"`
+	ItemID   string `json:"item_id"`
+	Position int    `json:"position"`
+}
+
+// CreateStatusPageInput is the request body for creating a status page.
+type CreateStatusPageInput struct {
+	Name                    string           `json:"name"`
+	Description             string           `json:"description,omitempty"`
+	Public                  *bool            `json:"public,omitempty"`
+	Uptime                  *bool            `json:"uptime,omitempty"`
+	CustomDomain            string           `json:"custom_domain,omitempty"`
+	CustomDomainEnabled     *bool            `json:"custom_domain_enabled,omitempty"`
+	CustomFooter            string           `json:"custom_footer,omitempty"`
+	CustomFooterEnabled     *bool            `json:"custom_footer_enabled,omitempty"`
+	IncidentsHistoryEnabled *bool            `json:"incidents_history_enabled,omitempty"`
+	ThemeVariant            string           `json:"theme_variant,omitempty"`
+	Items                   []StatusPageItem `json:"items,omitempty"`
+}
+
+// UpdateStatusPageInput is the request body for updating a status page.
+type UpdateStatusPageInput struct {
+	Name                    *string          `json:"name,omitempty"`
+	Description             *string          `json:"description,omitempty"`
+	Public                  *bool            `json:"public,omitempty"`
+	Uptime                  *bool            `json:"uptime,omitempty"`
+	CustomDomain            *string          `json:"custom_domain,omitempty"`
+	CustomDomainEnabled     *bool            `json:"custom_domain_enabled,omitempty"`
+	CustomFooter            *string          `json:"custom_footer,omitempty"`
+	CustomFooterEnabled     *bool            `json:"custom_footer_enabled,omitempty"`
+	IncidentsHistoryEnabled *bool            `json:"incidents_history_enabled,omitempty"`
+	ThemeVariant            *string          `json:"theme_variant,omitempty"`
+	Items                   []StatusPageItem `json:"items,omitempty"`
+}
+
 // APIError represents an error response from the API.
 type APIError struct {
 	StatusCode int

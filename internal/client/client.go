@@ -806,6 +806,231 @@ func (c *Client) GetIncident(ctx context.Context, id int64) (*Incident, error) {
 	return &result.Incident, nil
 }
 
+// --- Network Devices ---
+
+func (c *Client) ListNetworkDevices(ctx context.Context) ([]NetworkDevice, error) {
+	var all []NetworkDevice
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/network_devices?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+		var result struct {
+			NetworkDevices []NetworkDevice `json:"network_devices"`
+			Meta           PaginationMeta  `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.NetworkDevices...)
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+func (c *Client) GetNetworkDevice(ctx context.Context, id string) (*NetworkDevice, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/network_devices/"+id, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := resp.Header.Get("ETag")
+	var result struct {
+		NetworkDevice NetworkDevice `json:"network_device"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.NetworkDevice, etag, nil
+}
+
+func (c *Client) CreateNetworkDevice(ctx context.Context, input CreateNetworkDeviceInput) (*NetworkDevice, error) {
+	body := map[string]interface{}{"network_device": input}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/network_devices", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		NetworkDevice NetworkDevice `json:"network_device"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.NetworkDevice, nil
+}
+
+func (c *Client) UpdateNetworkDevice(ctx context.Context, id string, etag string, input UpdateNetworkDeviceInput) (*NetworkDevice, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	body := map[string]interface{}{"network_device": input}
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/network_devices/"+id, body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		NetworkDevice NetworkDevice `json:"network_device"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.NetworkDevice, nil
+}
+
+func (c *Client) DeleteNetworkDevice(ctx context.Context, id string) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/network_devices/"+id, nil, nil)
+	if err != nil {
+		return err
+	}
+	// Delete returns 202 Accepted (async deletion)
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func (c *Client) EnterMaintenanceNetworkDevice(ctx context.Context, id string) error {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/network_devices/%s/enter_maintenance", id), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func (c *Client) ExitMaintenanceNetworkDevice(ctx context.Context, id string) error {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/network_devices/%s/exit_maintenance", id), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// --- Status Pages ---
+
+func (c *Client) ListStatusPages(ctx context.Context) ([]StatusPage, error) {
+	var all []StatusPage
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/status_pages?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+		var result struct {
+			StatusPages []StatusPage   `json:"status_pages"`
+			Meta        PaginationMeta `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.StatusPages...)
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+func (c *Client) GetStatusPage(ctx context.Context, id int64) (*StatusPage, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/status_pages/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := resp.Header.Get("ETag")
+	var result struct {
+		StatusPage StatusPage `json:"status_page"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.StatusPage, etag, nil
+}
+
+func (c *Client) CreateStatusPage(ctx context.Context, input CreateStatusPageInput) (*StatusPage, error) {
+	body := map[string]interface{}{"status_page": input}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/status_pages", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		StatusPage StatusPage `json:"status_page"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.StatusPage, nil
+}
+
+func (c *Client) UpdateStatusPage(ctx context.Context, id int64, etag string, input UpdateStatusPageInput) (*StatusPage, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	body := map[string]interface{}{"status_page": input}
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/status_pages/"+strconv.FormatInt(id, 10), body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		StatusPage StatusPage `json:"status_page"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.StatusPage, nil
+}
+
+func (c *Client) DeleteStatusPage(ctx context.Context, id int64) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/status_pages/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
 func (c *Client) GetIntegration(ctx context.Context, id int64) (*Integration, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v1/integrations/"+strconv.FormatInt(id, 10), nil, nil)
 	if err != nil {

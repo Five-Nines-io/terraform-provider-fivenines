@@ -50,8 +50,17 @@ type uptimeMonitorModel struct {
 	LastError           types.String `tfsdk:"last_error"`
 	NextCheckAt         types.String `tfsdk:"next_check_at"`
 	LastCheckAt         types.String `tfsdk:"last_check_at"`
-	CreatedAt           types.String `tfsdk:"created_at"`
-	UpdatedAt           types.String `tfsdk:"updated_at"`
+	// DNS fields
+	DNSRecordType      types.String `tfsdk:"dns_record_type"`
+	DNSExpectedRecords types.List   `tfsdk:"dns_expected_records"`
+	// Custom HTTP fields
+	CustomHeaders types.Map    `tfsdk:"custom_headers"`
+	CustomBody    types.String `tfsdk:"custom_body"`
+	ContentType   types.String `tfsdk:"content_type"`
+	// Recovery
+	RecoveryCount types.Int64  `tfsdk:"recovery_count"`
+	CreatedAt     types.String `tfsdk:"created_at"`
+	UpdatedAt     types.String `tfsdk:"updated_at"`
 }
 
 func NewUptimeMonitorResource() resource.Resource {
@@ -78,10 +87,10 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Required:    true,
 			},
 			"protocol": schema.StringAttribute{
-				Description: `Protocol: "https", "tcp", or "icmp".`,
+				Description: `Protocol: "https", "tcp", "icmp", "dns", or "custom_http".`,
 				Required:    true,
 				Validators: []validator.String{
-					stringvalidator.OneOf("https", "tcp", "icmp"),
+					stringvalidator.OneOf("https", "tcp", "icmp", "dns", "custom_http"),
 				},
 			},
 			"url": schema.StringAttribute{
@@ -164,6 +173,40 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Optional:    true,
 				Computed:    true,
 				ElementType: types.Int64Type,
+			},
+			"dns_record_type": schema.StringAttribute{
+				Description: `DNS record type to query (required for dns protocol): "A", "AAAA", "CNAME", "MX", "TXT", "NS".`,
+				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("A", "AAAA", "CNAME", "MX", "TXT", "NS"),
+				},
+			},
+			"dns_expected_records": schema.ListAttribute{
+				Description: "Expected DNS record values.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"custom_headers": schema.MapAttribute{
+				Description: "Custom HTTP headers as key-value pairs.",
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"custom_body": schema.StringAttribute{
+				Description: "Request body for POST requests (https/custom_http protocols).",
+				Optional:    true,
+			},
+			"content_type": schema.StringAttribute{
+				Description: `Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain".`,
+				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("application/json", "application/x-www-form-urlencoded", "text/plain"),
+				},
+			},
+			"recovery_count": schema.Int64Attribute{
+				Description: "Number of successful checks required to transition from down to up.",
+				Optional:    true,
+				Computed:    true,
+				Default:     int64default.StaticInt64(1),
 			},
 			"status": schema.StringAttribute{
 				Description: "Current status.",
@@ -277,6 +320,37 @@ func (r *uptimeMonitorResource) Create(ctx context.Context, req resource.CreateR
 			}
 		}
 		input.ProbeRegionIDs = ids
+	}
+	if !plan.DNSRecordType.IsNull() && !plan.DNSRecordType.IsUnknown() {
+		input.DNSRecordType = plan.DNSRecordType.ValueString()
+	}
+	if !plan.DNSExpectedRecords.IsNull() && !plan.DNSExpectedRecords.IsUnknown() {
+		var records []string
+		for _, elem := range plan.DNSExpectedRecords.Elements() {
+			if v, ok := elem.(types.String); ok {
+				records = append(records, v.ValueString())
+			}
+		}
+		input.DNSExpectedRecords = records
+	}
+	if !plan.CustomHeaders.IsNull() && !plan.CustomHeaders.IsUnknown() {
+		headers := make(map[string]string)
+		for k, v := range plan.CustomHeaders.Elements() {
+			if sv, ok := v.(types.String); ok {
+				headers[k] = sv.ValueString()
+			}
+		}
+		input.CustomHeaders = headers
+	}
+	if !plan.CustomBody.IsNull() && !plan.CustomBody.IsUnknown() {
+		input.CustomBody = plan.CustomBody.ValueString()
+	}
+	if !plan.ContentType.IsNull() && !plan.ContentType.IsUnknown() {
+		input.ContentType = plan.ContentType.ValueString()
+	}
+	if !plan.RecoveryCount.IsNull() && !plan.RecoveryCount.IsUnknown() {
+		v := int(plan.RecoveryCount.ValueInt64())
+		input.RecoveryCount = &v
 	}
 
 	tflog.Debug(ctx, "Creating uptime monitor", map[string]interface{}{"name": input.Name})
@@ -399,6 +473,40 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		}
 		input.ProbeRegionIDs = ids
 	}
+	if !plan.DNSRecordType.IsNull() && !plan.DNSRecordType.IsUnknown() {
+		v := plan.DNSRecordType.ValueString()
+		input.DNSRecordType = &v
+	}
+	if !plan.DNSExpectedRecords.IsNull() && !plan.DNSExpectedRecords.IsUnknown() {
+		var records []string
+		for _, elem := range plan.DNSExpectedRecords.Elements() {
+			if sv, ok := elem.(types.String); ok {
+				records = append(records, sv.ValueString())
+			}
+		}
+		input.DNSExpectedRecords = records
+	}
+	if !plan.CustomHeaders.IsNull() && !plan.CustomHeaders.IsUnknown() {
+		headers := make(map[string]string)
+		for k, v := range plan.CustomHeaders.Elements() {
+			if sv, ok := v.(types.String); ok {
+				headers[k] = sv.ValueString()
+			}
+		}
+		input.CustomHeaders = &headers
+	}
+	if !plan.CustomBody.IsNull() && !plan.CustomBody.IsUnknown() {
+		v := plan.CustomBody.ValueString()
+		input.CustomBody = &v
+	}
+	if !plan.ContentType.IsNull() && !plan.ContentType.IsUnknown() {
+		v := plan.ContentType.ValueString()
+		input.ContentType = &v
+	}
+	if !plan.RecoveryCount.IsNull() && !plan.RecoveryCount.IsUnknown() {
+		v := int(plan.RecoveryCount.ValueInt64())
+		input.RecoveryCount = &v
+	}
 
 	monitor, err := r.client.UpdateUptimeMonitor(id, etag, input)
 	if err != nil {
@@ -465,6 +573,41 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	regionsList, d := types.ListValueFrom(ctx, types.Int64Type, m.ProbeRegionIDs)
 	diags.Append(d...)
 	state.ProbeRegionIDs = regionsList
+
+	// DNS fields
+	if m.DNSRecordType != "" {
+		state.DNSRecordType = types.StringValue(m.DNSRecordType)
+	} else {
+		state.DNSRecordType = types.StringNull()
+	}
+	if len(m.DNSExpectedRecords) > 0 {
+		recordsList, d := types.ListValueFrom(ctx, types.StringType, m.DNSExpectedRecords)
+		diags.Append(d...)
+		state.DNSExpectedRecords = recordsList
+	} else {
+		state.DNSExpectedRecords = types.ListNull(types.StringType)
+	}
+
+	// Custom HTTP fields
+	if len(m.CustomHeaders) > 0 {
+		headersMap, d := types.MapValueFrom(ctx, types.StringType, m.CustomHeaders)
+		diags.Append(d...)
+		state.CustomHeaders = headersMap
+	} else {
+		state.CustomHeaders = types.MapNull(types.StringType)
+	}
+	if m.CustomBody != "" {
+		state.CustomBody = types.StringValue(m.CustomBody)
+	} else {
+		state.CustomBody = types.StringNull()
+	}
+	if m.ContentType != "" {
+		state.ContentType = types.StringValue(m.ContentType)
+	} else {
+		state.ContentType = types.StringNull()
+	}
+
+	state.RecoveryCount = types.Int64Value(int64(m.RecoveryCount))
 
 	state.Status = types.StringValue(m.Status)
 	state.SSLExpiresAt = optionalString(m.SSLExpiresAt)

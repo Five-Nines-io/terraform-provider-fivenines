@@ -53,11 +53,16 @@ resource "fivenines_uptime_monitor" "database" {
 ### Required
 
 - `name` (String) Name of the uptime monitor.
-- `protocol` (String) Protocol: "https", "tcp", or "icmp".
+- `protocol` (String) Protocol: "https", "tcp", "icmp", "dns", or "custom_http".
 
 ### Optional
 
 - `confirmation_count` (Number) Number of probe regions that must confirm status (quorum).
+- `content_type` (String) Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain".
+- `custom_body` (String) Request body for POST requests (https/custom_http protocols).
+- `custom_headers` (Map of String) Custom HTTP headers as key-value pairs.
+- `dns_expected_records` (List of String) Expected DNS record values.
+- `dns_record_type` (String) DNS record type to query (required for dns protocol): "A", "AAAA", "CNAME", "MX", "TXT", "NS".
 - `expected_status_codes` (List of Number) Expected HTTP status codes.
 - `follow_redirects` (Boolean) Whether to follow HTTP redirects.
 - `hostname` (String) Hostname to monitor (required for tcp/icmp protocols).
@@ -68,6 +73,7 @@ resource "fivenines_uptime_monitor" "database" {
 - `keyword_absent` (Boolean) If true, alert when the keyword IS found (absent check).
 - `port` (Number) Port to monitor (required for tcp protocol).
 - `probe_region_ids` (List of Number) Probe region IDs to check from. Defaults to all active regions.
+- `recovery_count` (Number) Number of successful checks required to transition from down to up.
 - `timeout_seconds` (Number) Timeout in seconds (max 15).
 - `url` (String) URL to monitor (required for https protocol).
 

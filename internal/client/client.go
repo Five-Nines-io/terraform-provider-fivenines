@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -60,6 +61,44 @@ func (c *Client) doRequest(method, path string, body interface{}, headers map[st
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
+	}
+
+	// Retry on 429 Too Many Requests with exponential backoff
+	for attempt := 0; resp.StatusCode == http.StatusTooManyRequests && attempt < 5; attempt++ {
+		resp.Body.Close()
+
+		// Parse Retry-After header (seconds) or use exponential backoff
+		wait := time.Duration(math.Pow(2, float64(attempt+1))) * time.Second
+		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
+			if secs, err := strconv.Atoi(retryAfter); err == nil {
+				wait = time.Duration(secs) * time.Second
+			}
+		} else if resetAt := resp.Header.Get("X-RateLimit-Reset"); resetAt != "" {
+			if resetTime, err := strconv.ParseInt(resetAt, 10, 64); err == nil {
+				wait = time.Until(time.Unix(resetTime, 0))
+				if wait < time.Second {
+					wait = time.Second
+				}
+			}
+		}
+
+		time.Sleep(wait)
+
+		// Rebuild the request (body may have been consumed)
+		var retryBody io.Reader
+		if body != nil {
+			jsonBody, _ := json.Marshal(body)
+			retryBody = bytes.NewReader(jsonBody)
+		}
+		retryReq, err := http.NewRequest(method, url, retryBody)
+		if err != nil {
+			return nil, fmt.Errorf("creating retry request: %w", err)
+		}
+		retryReq.Header = req.Header
+		resp, err = c.HTTPClient.Do(retryReq)
+		if err != nil {
+			return nil, fmt.Errorf("executing retry request: %w", err)
+		}
 	}
 
 	return resp, nil
@@ -351,6 +390,7 @@ func (c *Client) ListWorkflows() ([]Workflow, error) {
 	var all []Workflow
 	page := 1
 	for {
+		// The API already excludes archived workflows, but filter client-side as well
 		path := fmt.Sprintf("/api/v1/workflows?page=%d&per_page=100", page)
 		resp, err := c.doRequest("GET", path, nil, nil)
 		if err != nil {
@@ -367,7 +407,42 @@ func (c *Client) ListWorkflows() ([]Workflow, error) {
 		if err := decodeResponse(resp, &result); err != nil {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
-		all = append(all, result.Workflows...)
+		for _, w := range result.Workflows {
+			if w.Status != "archived" {
+				all = append(all, w)
+			}
+		}
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+// --- Workflow Runs ---
+
+func (c *Client) ListWorkflowRuns(workflowID int64) ([]WorkflowRun, error) {
+	var all []WorkflowRun
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/workflows/%d/runs?page=%d&per_page=100", workflowID, page)
+		resp, err := c.doRequest("GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+
+		var result struct {
+			Runs []WorkflowRun  `json:"runs"`
+			Meta PaginationMeta `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.Runs...)
 		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
 			break
 		}

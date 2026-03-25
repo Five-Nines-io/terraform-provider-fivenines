@@ -32,3 +32,17 @@ jobs:
       - run: go vet ./...
       - run: |
           test -z "$(gofmt -l .)" || (echo "Files not formatted:" && gofmt -l . && exit 1)
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go install github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs@latest
+      - run: tfplugindocs generate
+      - name: Fail if docs are out of date
+        run: |
+          git diff --exit-code docs/ || (echo "Docs are out of date. Run 'make docs' and commit." && exit 1)

@@ -101,7 +101,7 @@ func (d *workflowRunsDataSource) Read(ctx context.Context, req datasource.ReadRe
 		return
 	}
 
-	runs, err := d.client.ListWorkflowRuns(state.WorkflowID.ValueInt64())
+	runs, err := d.client.ListWorkflowRuns(ctx, state.WorkflowID.ValueInt64())
 	if err != nil {
 		resp.Diagnostics.AddError("Error listing workflow runs", err.Error())
 		return

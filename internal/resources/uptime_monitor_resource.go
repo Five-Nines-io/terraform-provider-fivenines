@@ -364,7 +364,7 @@ func (r *uptimeMonitorResource) Create(ctx context.Context, req resource.CreateR
 
 	tflog.Debug(ctx, "Creating uptime monitor", map[string]interface{}{"name": input.Name})
 
-	monitor, err := r.client.CreateUptimeMonitor(input)
+	monitor, err := r.client.CreateUptimeMonitor(ctx, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating uptime monitor", err.Error())
 		return
@@ -372,7 +372,7 @@ func (r *uptimeMonitorResource) Create(ctx context.Context, req resource.CreateR
 
 	// Handle pause state after creation
 	if !plan.Paused.IsNull() && plan.Paused.ValueBool() {
-		if err := r.client.PauseUptimeMonitor(monitor.ID); err != nil {
+		if err := r.client.PauseUptimeMonitor(ctx, monitor.ID); err != nil {
 			resp.Diagnostics.AddError("Error pausing uptime monitor after creation", err.Error())
 			return
 		}
@@ -390,7 +390,7 @@ func (r *uptimeMonitorResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 
-	monitor, _, err := r.client.GetUptimeMonitor(state.ID.ValueString())
+	monitor, _, err := r.client.GetUptimeMonitor(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -418,7 +418,7 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 	}
 
 	id := state.ID.ValueString()
-	_, etag, err := r.client.GetUptimeMonitor(id)
+	_, etag, err := r.client.GetUptimeMonitor(ctx, id)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading uptime monitor for update", err.Error())
 		return
@@ -526,7 +526,7 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		input.RecoveryCount = &v
 	}
 
-	monitor, err := r.client.UpdateUptimeMonitor(id, etag, input)
+	monitor, err := r.client.UpdateUptimeMonitor(ctx, id, etag, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating uptime monitor", err.Error())
 		return
@@ -537,13 +537,13 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		wantPaused := plan.Paused.ValueBool()
 		isPaused := monitor.Status == "paused"
 		if wantPaused && !isPaused {
-			if err := r.client.PauseUptimeMonitor(id); err != nil {
+			if err := r.client.PauseUptimeMonitor(ctx, id); err != nil {
 				resp.Diagnostics.AddError("Error pausing uptime monitor", err.Error())
 				return
 			}
 			monitor.Status = "paused"
 		} else if !wantPaused && isPaused {
-			if err := r.client.ResumeUptimeMonitor(id); err != nil {
+			if err := r.client.ResumeUptimeMonitor(ctx, id); err != nil {
 				resp.Diagnostics.AddError("Error resuming uptime monitor", err.Error())
 				return
 			}
@@ -564,7 +564,7 @@ func (r *uptimeMonitorResource) Delete(ctx context.Context, req resource.DeleteR
 
 	tflog.Debug(ctx, "Deleting uptime monitor", map[string]interface{}{"id": state.ID.ValueString()})
 
-	err := r.client.DeleteUptimeMonitor(state.ID.ValueString())
+	err := r.client.DeleteUptimeMonitor(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return

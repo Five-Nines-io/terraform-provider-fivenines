@@ -186,7 +186,7 @@ func (r *taskResource) Create(ctx context.Context, req resource.CreateRequest, r
 
 	tflog.Debug(ctx, "Creating task", map[string]interface{}{"name": input.Name})
 
-	task, err := r.client.CreateTask(input)
+	task, err := r.client.CreateTask(ctx, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating task", err.Error())
 		return
@@ -194,7 +194,7 @@ func (r *taskResource) Create(ctx context.Context, req resource.CreateRequest, r
 
 	// Handle pause state after creation
 	if !plan.Paused.IsNull() && plan.Paused.ValueBool() {
-		if err := r.client.PauseTask(task.ID); err != nil {
+		if err := r.client.PauseTask(ctx, task.ID); err != nil {
 			resp.Diagnostics.AddError("Error pausing task after creation", err.Error())
 			return
 		}
@@ -212,7 +212,7 @@ func (r *taskResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		return
 	}
 
-	task, _, err := r.client.GetTask(state.ID.ValueString())
+	task, _, err := r.client.GetTask(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -240,7 +240,7 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	}
 
 	id := state.ID.ValueString()
-	_, etag, err := r.client.GetTask(id)
+	_, etag, err := r.client.GetTask(ctx, id)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading task for update", err.Error())
 		return
@@ -271,7 +271,7 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		input.HostID = &v
 	}
 
-	task, err := r.client.UpdateTask(id, etag, input)
+	task, err := r.client.UpdateTask(ctx, id, etag, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating task", err.Error())
 		return
@@ -282,13 +282,13 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		wantPaused := plan.Paused.ValueBool()
 		isPaused := task.Status == "paused"
 		if wantPaused && !isPaused {
-			if err := r.client.PauseTask(id); err != nil {
+			if err := r.client.PauseTask(ctx, id); err != nil {
 				resp.Diagnostics.AddError("Error pausing task", err.Error())
 				return
 			}
 			task.Status = "paused"
 		} else if !wantPaused && isPaused {
-			if err := r.client.ResumeTask(id); err != nil {
+			if err := r.client.ResumeTask(ctx, id); err != nil {
 				resp.Diagnostics.AddError("Error resuming task", err.Error())
 				return
 			}
@@ -309,7 +309,7 @@ func (r *taskResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 
 	tflog.Debug(ctx, "Deleting task", map[string]interface{}{"id": state.ID.ValueString()})
 
-	err := r.client.DeleteTask(state.ID.ValueString())
+	err := r.client.DeleteTask(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return

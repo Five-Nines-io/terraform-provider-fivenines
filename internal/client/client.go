@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,7 +33,7 @@ func NewClient(baseURL, apiKey string) *Client {
 }
 
 // doRequest executes an HTTP request and returns the response.
-func (c *Client) doRequest(method, path string, body interface{}, headers map[string]string) (*http.Response, error) {
+func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}, headers map[string]string) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		jsonBody, err := json.Marshal(body)
@@ -43,7 +44,7 @@ func (c *Client) doRequest(method, path string, body interface{}, headers map[st
 	}
 
 	url := c.BaseURL + path
-	req, err := http.NewRequest(method, url, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -82,7 +83,11 @@ func (c *Client) doRequest(method, path string, body interface{}, headers map[st
 			}
 		}
 
-		time.Sleep(wait)
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 
 		// Rebuild the request (body may have been consumed)
 		var retryBody io.Reader
@@ -90,7 +95,7 @@ func (c *Client) doRequest(method, path string, body interface{}, headers map[st
 			jsonBody, _ := json.Marshal(body)
 			retryBody = bytes.NewReader(jsonBody)
 		}
-		retryReq, err := http.NewRequest(method, url, retryBody)
+		retryReq, err := http.NewRequestWithContext(ctx, method, url, retryBody)
 		if err != nil {
 			return nil, fmt.Errorf("creating retry request: %w", err)
 		}
@@ -129,12 +134,12 @@ type listResponse struct {
 
 // --- Instances ---
 
-func (c *Client) ListInstances() ([]Instance, error) {
+func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
 	var all []Instance
 	page := 1
 	for {
 		path := fmt.Sprintf("/api/v1/instances?page=%d&per_page=100", page)
-		resp, err := c.doRequest("GET", path, nil, nil)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -158,8 +163,8 @@ func (c *Client) ListInstances() ([]Instance, error) {
 	return all, nil
 }
 
-func (c *Client) GetInstance(id string) (*Instance, string, error) {
-	resp, err := c.doRequest("GET", "/api/v1/instances/"+id, nil, nil)
+func (c *Client) GetInstance(ctx context.Context, id string) (*Instance, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/instances/"+id, nil, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -177,9 +182,9 @@ func (c *Client) GetInstance(id string) (*Instance, string, error) {
 	return &result.Instance, etag, nil
 }
 
-func (c *Client) CreateInstance(input CreateInstanceInput) (*Instance, error) {
+func (c *Client) CreateInstance(ctx context.Context, input CreateInstanceInput) (*Instance, error) {
 	body := map[string]interface{}{"instance": input}
-	resp, err := c.doRequest("POST", "/api/v1/instances", body, nil)
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/instances", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -196,13 +201,13 @@ func (c *Client) CreateInstance(input CreateInstanceInput) (*Instance, error) {
 	return &result.Instance, nil
 }
 
-func (c *Client) UpdateInstance(id string, etag string, input UpdateInstanceInput) (*Instance, error) {
+func (c *Client) UpdateInstance(ctx context.Context, id string, etag string, input UpdateInstanceInput) (*Instance, error) {
 	headers := map[string]string{}
 	if etag != "" {
 		headers["If-Match"] = etag
 	}
 	body := map[string]interface{}{"instance": input}
-	resp, err := c.doRequest("PATCH", "/api/v1/instances/"+id, body, headers)
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/instances/"+id, body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -219,8 +224,8 @@ func (c *Client) UpdateInstance(id string, etag string, input UpdateInstanceInpu
 	return &result.Instance, nil
 }
 
-func (c *Client) DeleteInstance(id string) error {
-	resp, err := c.doRequest("DELETE", "/api/v1/instances/"+id, nil, nil)
+func (c *Client) DeleteInstance(ctx context.Context, id string) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/instances/"+id, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -232,24 +237,24 @@ func (c *Client) DeleteInstance(id string) error {
 	return nil
 }
 
-func (c *Client) EnableInstance(id string) error {
-	return c.instanceAction(id, "enable")
+func (c *Client) EnableInstance(ctx context.Context, id string) error {
+	return c.instanceAction(ctx, id, "enable")
 }
 
-func (c *Client) DisableInstance(id string) error {
-	return c.instanceAction(id, "disable")
+func (c *Client) DisableInstance(ctx context.Context, id string) error {
+	return c.instanceAction(ctx, id, "disable")
 }
 
-func (c *Client) EnterMaintenanceInstance(id string) error {
-	return c.instanceAction(id, "enter_maintenance")
+func (c *Client) EnterMaintenanceInstance(ctx context.Context, id string) error {
+	return c.instanceAction(ctx, id, "enter_maintenance")
 }
 
-func (c *Client) ExitMaintenanceInstance(id string) error {
-	return c.instanceAction(id, "exit_maintenance")
+func (c *Client) ExitMaintenanceInstance(ctx context.Context, id string) error {
+	return c.instanceAction(ctx, id, "exit_maintenance")
 }
 
-func (c *Client) instanceAction(id, action string) error {
-	resp, err := c.doRequest("POST", fmt.Sprintf("/api/v1/instances/%s/%s", id, action), nil, nil)
+func (c *Client) instanceAction(ctx context.Context, id, action string) error {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/instances/%s/%s", id, action), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -262,12 +267,12 @@ func (c *Client) instanceAction(id, action string) error {
 
 // --- Tasks ---
 
-func (c *Client) ListTasks() ([]Task, error) {
+func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 	var all []Task
 	page := 1
 	for {
 		path := fmt.Sprintf("/api/v1/tasks?page=%d&per_page=100", page)
-		resp, err := c.doRequest("GET", path, nil, nil)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -291,8 +296,8 @@ func (c *Client) ListTasks() ([]Task, error) {
 	return all, nil
 }
 
-func (c *Client) GetTask(id string) (*Task, string, error) {
-	resp, err := c.doRequest("GET", "/api/v1/tasks/"+id, nil, nil)
+func (c *Client) GetTask(ctx context.Context, id string) (*Task, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/tasks/"+id, nil, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -310,9 +315,9 @@ func (c *Client) GetTask(id string) (*Task, string, error) {
 	return &result.Task, etag, nil
 }
 
-func (c *Client) CreateTask(input CreateTaskInput) (*Task, error) {
+func (c *Client) CreateTask(ctx context.Context, input CreateTaskInput) (*Task, error) {
 	body := map[string]interface{}{"task": input}
-	resp, err := c.doRequest("POST", "/api/v1/tasks", body, nil)
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/tasks", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -329,13 +334,13 @@ func (c *Client) CreateTask(input CreateTaskInput) (*Task, error) {
 	return &result.Task, nil
 }
 
-func (c *Client) UpdateTask(id string, etag string, input UpdateTaskInput) (*Task, error) {
+func (c *Client) UpdateTask(ctx context.Context, id string, etag string, input UpdateTaskInput) (*Task, error) {
 	headers := map[string]string{}
 	if etag != "" {
 		headers["If-Match"] = etag
 	}
 	body := map[string]interface{}{"task": input}
-	resp, err := c.doRequest("PATCH", "/api/v1/tasks/"+id, body, headers)
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/tasks/"+id, body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -352,8 +357,8 @@ func (c *Client) UpdateTask(id string, etag string, input UpdateTaskInput) (*Tas
 	return &result.Task, nil
 }
 
-func (c *Client) DeleteTask(id string) error {
-	resp, err := c.doRequest("DELETE", "/api/v1/tasks/"+id, nil, nil)
+func (c *Client) DeleteTask(ctx context.Context, id string) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/tasks/"+id, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -364,16 +369,16 @@ func (c *Client) DeleteTask(id string) error {
 	return nil
 }
 
-func (c *Client) PauseTask(id string) error {
-	return c.taskAction(id, "pause")
+func (c *Client) PauseTask(ctx context.Context, id string) error {
+	return c.taskAction(ctx, id, "pause")
 }
 
-func (c *Client) ResumeTask(id string) error {
-	return c.taskAction(id, "resume")
+func (c *Client) ResumeTask(ctx context.Context, id string) error {
+	return c.taskAction(ctx, id, "resume")
 }
 
-func (c *Client) taskAction(id string, action string) error {
-	resp, err := c.doRequest("POST", fmt.Sprintf("/api/v1/tasks/%s/%s", id, action), nil, nil)
+func (c *Client) taskAction(ctx context.Context, id string, action string) error {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/tasks/%s/%s", id, action), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -386,13 +391,13 @@ func (c *Client) taskAction(id string, action string) error {
 
 // --- Workflows ---
 
-func (c *Client) ListWorkflows() ([]Workflow, error) {
+func (c *Client) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 	var all []Workflow
 	page := 1
 	for {
 		// The API already excludes archived workflows, but filter client-side as well
 		path := fmt.Sprintf("/api/v1/workflows?page=%d&per_page=100", page)
-		resp, err := c.doRequest("GET", path, nil, nil)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -422,12 +427,12 @@ func (c *Client) ListWorkflows() ([]Workflow, error) {
 
 // --- Workflow Runs ---
 
-func (c *Client) ListWorkflowRuns(workflowID int64) ([]WorkflowRun, error) {
+func (c *Client) ListWorkflowRuns(ctx context.Context, workflowID int64) ([]WorkflowRun, error) {
 	var all []WorkflowRun
 	page := 1
 	for {
 		path := fmt.Sprintf("/api/v1/workflows/%d/runs?page=%d&per_page=100", workflowID, page)
-		resp, err := c.doRequest("GET", path, nil, nil)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -451,8 +456,8 @@ func (c *Client) ListWorkflowRuns(workflowID int64) ([]WorkflowRun, error) {
 	return all, nil
 }
 
-func (c *Client) GetWorkflow(id int64) (*Workflow, string, error) {
-	resp, err := c.doRequest("GET", "/api/v1/workflows/"+strconv.FormatInt(id, 10), nil, nil)
+func (c *Client) GetWorkflow(ctx context.Context, id int64) (*Workflow, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/workflows/"+strconv.FormatInt(id, 10), nil, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -472,9 +477,9 @@ func (c *Client) GetWorkflow(id int64) (*Workflow, string, error) {
 	return &result.Workflow, etag, nil
 }
 
-func (c *Client) CreateWorkflow(input CreateWorkflowInput) (*Workflow, error) {
+func (c *Client) CreateWorkflow(ctx context.Context, input CreateWorkflowInput) (*Workflow, error) {
 	body := map[string]interface{}{"workflow": input}
-	resp, err := c.doRequest("POST", "/api/v1/workflows", body, nil)
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/workflows", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -491,13 +496,13 @@ func (c *Client) CreateWorkflow(input CreateWorkflowInput) (*Workflow, error) {
 	return &result.Workflow, nil
 }
 
-func (c *Client) UpdateWorkflow(id int64, etag string, input UpdateWorkflowInput) (*Workflow, error) {
+func (c *Client) UpdateWorkflow(ctx context.Context, id int64, etag string, input UpdateWorkflowInput) (*Workflow, error) {
 	headers := map[string]string{}
 	if etag != "" {
 		headers["If-Match"] = etag
 	}
 	body := map[string]interface{}{"workflow": input}
-	resp, err := c.doRequest("PATCH", "/api/v1/workflows/"+strconv.FormatInt(id, 10), body, headers)
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/workflows/"+strconv.FormatInt(id, 10), body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -514,8 +519,8 @@ func (c *Client) UpdateWorkflow(id int64, etag string, input UpdateWorkflowInput
 	return &result.Workflow, nil
 }
 
-func (c *Client) DeleteWorkflow(id int64) error {
-	resp, err := c.doRequest("DELETE", "/api/v1/workflows/"+strconv.FormatInt(id, 10), nil, nil)
+func (c *Client) DeleteWorkflow(ctx context.Context, id int64) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/workflows/"+strconv.FormatInt(id, 10), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -526,16 +531,16 @@ func (c *Client) DeleteWorkflow(id int64) error {
 	return nil
 }
 
-func (c *Client) ActivateWorkflow(id int64) error {
-	return c.workflowAction(id, "activate")
+func (c *Client) ActivateWorkflow(ctx context.Context, id int64) error {
+	return c.workflowAction(ctx, id, "activate")
 }
 
-func (c *Client) PauseWorkflow(id int64) error {
-	return c.workflowAction(id, "pause")
+func (c *Client) PauseWorkflow(ctx context.Context, id int64) error {
+	return c.workflowAction(ctx, id, "pause")
 }
 
-func (c *Client) workflowAction(id int64, action string) error {
-	resp, err := c.doRequest("POST", fmt.Sprintf("/api/v1/workflows/%d/%s", id, action), nil, nil)
+func (c *Client) workflowAction(ctx context.Context, id int64, action string) error {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/workflows/%d/%s", id, action), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -546,10 +551,10 @@ func (c *Client) workflowAction(id int64, action string) error {
 	return nil
 }
 
-func (c *Client) CreateWorkflowVersion(workflowID int64, input CreateWorkflowVersionInput) (*WorkflowVersion, error) {
+func (c *Client) CreateWorkflowVersion(ctx context.Context, workflowID int64, input CreateWorkflowVersionInput) (*WorkflowVersion, error) {
 	body := input
 	path := fmt.Sprintf("/api/v1/workflows/%d/versions", workflowID)
-	resp, err := c.doRequest("POST", path, body, nil)
+	resp, err := c.doRequest(ctx, "POST", path, body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -566,10 +571,10 @@ func (c *Client) CreateWorkflowVersion(workflowID int64, input CreateWorkflowVer
 	return &result.Version, nil
 }
 
-func (c *Client) PublishWorkflowVersion(workflowID int64, versionID int64) error {
+func (c *Client) PublishWorkflowVersion(ctx context.Context, workflowID int64, versionID int64) error {
 	body := map[string]interface{}{"version_id": versionID}
 	path := fmt.Sprintf("/api/v1/workflows/%d/publish", workflowID)
-	resp, err := c.doRequest("POST", path, body, nil)
+	resp, err := c.doRequest(ctx, "POST", path, body, nil)
 	if err != nil {
 		return err
 	}
@@ -582,12 +587,12 @@ func (c *Client) PublishWorkflowVersion(workflowID int64, versionID int64) error
 
 // --- Uptime Monitors ---
 
-func (c *Client) ListUptimeMonitors() ([]UptimeMonitor, error) {
+func (c *Client) ListUptimeMonitors(ctx context.Context) ([]UptimeMonitor, error) {
 	var all []UptimeMonitor
 	page := 1
 	for {
 		path := fmt.Sprintf("/api/v1/uptime_monitors?page=%d&per_page=100", page)
-		resp, err := c.doRequest("GET", path, nil, nil)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -611,8 +616,8 @@ func (c *Client) ListUptimeMonitors() ([]UptimeMonitor, error) {
 	return all, nil
 }
 
-func (c *Client) GetUptimeMonitor(id string) (*UptimeMonitor, string, error) {
-	resp, err := c.doRequest("GET", "/api/v1/uptime_monitors/"+id, nil, nil)
+func (c *Client) GetUptimeMonitor(ctx context.Context, id string) (*UptimeMonitor, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/uptime_monitors/"+id, nil, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -630,9 +635,9 @@ func (c *Client) GetUptimeMonitor(id string) (*UptimeMonitor, string, error) {
 	return &result.UptimeMonitor, etag, nil
 }
 
-func (c *Client) CreateUptimeMonitor(input CreateUptimeMonitorInput) (*UptimeMonitor, error) {
+func (c *Client) CreateUptimeMonitor(ctx context.Context, input CreateUptimeMonitorInput) (*UptimeMonitor, error) {
 	body := map[string]interface{}{"uptime_monitor": input}
-	resp, err := c.doRequest("POST", "/api/v1/uptime_monitors", body, nil)
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/uptime_monitors", body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -649,13 +654,13 @@ func (c *Client) CreateUptimeMonitor(input CreateUptimeMonitorInput) (*UptimeMon
 	return &result.UptimeMonitor, nil
 }
 
-func (c *Client) UpdateUptimeMonitor(id string, etag string, input UpdateUptimeMonitorInput) (*UptimeMonitor, error) {
+func (c *Client) UpdateUptimeMonitor(ctx context.Context, id string, etag string, input UpdateUptimeMonitorInput) (*UptimeMonitor, error) {
 	headers := map[string]string{}
 	if etag != "" {
 		headers["If-Match"] = etag
 	}
 	body := map[string]interface{}{"uptime_monitor": input}
-	resp, err := c.doRequest("PATCH", "/api/v1/uptime_monitors/"+id, body, headers)
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/uptime_monitors/"+id, body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -672,8 +677,8 @@ func (c *Client) UpdateUptimeMonitor(id string, etag string, input UpdateUptimeM
 	return &result.UptimeMonitor, nil
 }
 
-func (c *Client) DeleteUptimeMonitor(id string) error {
-	resp, err := c.doRequest("DELETE", "/api/v1/uptime_monitors/"+id, nil, nil)
+func (c *Client) DeleteUptimeMonitor(ctx context.Context, id string) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/uptime_monitors/"+id, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -684,16 +689,16 @@ func (c *Client) DeleteUptimeMonitor(id string) error {
 	return nil
 }
 
-func (c *Client) PauseUptimeMonitor(id string) error {
-	return c.uptimeMonitorAction(id, "pause")
+func (c *Client) PauseUptimeMonitor(ctx context.Context, id string) error {
+	return c.uptimeMonitorAction(ctx, id, "pause")
 }
 
-func (c *Client) ResumeUptimeMonitor(id string) error {
-	return c.uptimeMonitorAction(id, "resume")
+func (c *Client) ResumeUptimeMonitor(ctx context.Context, id string) error {
+	return c.uptimeMonitorAction(ctx, id, "resume")
 }
 
-func (c *Client) uptimeMonitorAction(id string, action string) error {
-	resp, err := c.doRequest("POST", fmt.Sprintf("/api/v1/uptime_monitors/%s/%s", id, action), nil, nil)
+func (c *Client) uptimeMonitorAction(ctx context.Context, id string, action string) error {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/uptime_monitors/%s/%s", id, action), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -706,8 +711,8 @@ func (c *Client) uptimeMonitorAction(id string, action string) error {
 
 // --- Probe Regions ---
 
-func (c *Client) ListProbeRegions() ([]ProbeRegion, error) {
-	resp, err := c.doRequest("GET", "/api/v1/probe_regions", nil, nil)
+func (c *Client) ListProbeRegions(ctx context.Context) ([]ProbeRegion, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/probe_regions", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -726,8 +731,8 @@ func (c *Client) ListProbeRegions() ([]ProbeRegion, error) {
 
 // --- Integrations ---
 
-func (c *Client) ListIntegrations() ([]Integration, error) {
-	resp, err := c.doRequest("GET", "/api/v1/integrations", nil, nil)
+func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/integrations", nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -744,8 +749,8 @@ func (c *Client) ListIntegrations() ([]Integration, error) {
 	return result.Integrations, nil
 }
 
-func (c *Client) GetIntegration(id int64) (*Integration, error) {
-	resp, err := c.doRequest("GET", "/api/v1/integrations/"+strconv.FormatInt(id, 10), nil, nil)
+func (c *Client) GetIntegration(ctx context.Context, id int64) (*Integration, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/integrations/"+strconv.FormatInt(id, 10), nil, nil)
 	if err != nil {
 		return nil, err
 	}

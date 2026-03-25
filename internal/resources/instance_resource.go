@@ -184,7 +184,7 @@ func (r *instanceResource) Create(ctx context.Context, req resource.CreateReques
 
 	tflog.Debug(ctx, "Creating instance", map[string]interface{}{"display_name": input.DisplayName})
 
-	instance, err := r.client.CreateInstance(input)
+	instance, err := r.client.CreateInstance(ctx, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating instance", err.Error())
 		return
@@ -201,7 +201,7 @@ func (r *instanceResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
-	instance, _, err := r.client.GetInstance(state.ID.ValueString())
+	instance, _, err := r.client.GetInstance(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -229,7 +229,7 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 	}
 
 	// Fetch current to get ETag
-	_, etag, err := r.client.GetInstance(state.ID.ValueString())
+	_, etag, err := r.client.GetInstance(ctx, state.ID.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading instance for update", err.Error())
 		return
@@ -244,7 +244,7 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 		MaintenanceMode: &maintenance,
 	}
 
-	instance, err := r.client.UpdateInstance(state.ID.ValueString(), etag, input)
+	instance, err := r.client.UpdateInstance(ctx, state.ID.ValueString(), etag, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating instance", err.Error())
 		return
@@ -263,7 +263,7 @@ func (r *instanceResource) Delete(ctx context.Context, req resource.DeleteReques
 
 	tflog.Debug(ctx, "Deleting instance", map[string]interface{}{"id": state.ID.ValueString()})
 
-	err := r.client.DeleteInstance(state.ID.ValueString())
+	err := r.client.DeleteInstance(ctx, state.ID.ValueString())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return

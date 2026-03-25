@@ -141,7 +141,7 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 
 	tflog.Debug(ctx, "Creating workflow", map[string]interface{}{"name": input.Name})
 
-	workflow, err := r.client.CreateWorkflow(input)
+	workflow, err := r.client.CreateWorkflow(ctx, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error creating workflow", err.Error())
 		return
@@ -158,7 +158,7 @@ func (r *workflowResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 
-	workflow, _, err := r.client.GetWorkflow(state.ID.ValueInt64())
+	workflow, _, err := r.client.GetWorkflow(ctx, state.ID.ValueInt64())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			resp.State.RemoveResource(ctx)
@@ -186,7 +186,7 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 	}
 
 	id := state.ID.ValueInt64()
-	_, etag, err := r.client.GetWorkflow(id)
+	_, etag, err := r.client.GetWorkflow(ctx, id)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading workflow for update", err.Error())
 		return
@@ -205,7 +205,7 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 		input.IntervalSeconds = &v
 	}
 
-	workflow, err := r.client.UpdateWorkflow(id, etag, input)
+	workflow, err := r.client.UpdateWorkflow(ctx, id, etag, input)
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating workflow", err.Error())
 		return
@@ -224,7 +224,7 @@ func (r *workflowResource) Delete(ctx context.Context, req resource.DeleteReques
 
 	tflog.Debug(ctx, "Deleting workflow", map[string]interface{}{"id": state.ID.ValueInt64()})
 
-	err := r.client.DeleteWorkflow(state.ID.ValueInt64())
+	err := r.client.DeleteWorkflow(ctx, state.ID.ValueInt64())
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return

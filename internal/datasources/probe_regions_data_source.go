@@ -80,7 +80,7 @@ func (d *probeRegionsDataSource) Configure(_ context.Context, req datasource.Con
 }
 
 func (d *probeRegionsDataSource) Read(ctx context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {
-	regions, err := d.client.ListProbeRegions()
+	regions, err := d.client.ListProbeRegions(ctx)
 	if err != nil {
 		resp.Diagnostics.AddError("Error listing probe regions", err.Error())
 		return

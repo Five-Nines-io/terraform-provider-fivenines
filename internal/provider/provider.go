@@ -41,7 +41,7 @@ func (p *fiveninesProvider) Schema(_ context.Context, _ provider.SchemaRequest, 
 				Sensitive:   true,
 			},
 			"base_url": schema.StringAttribute{
-				Description: "FiveNines API base URL. Defaults to https://app.fivenines.io. Can also be set via FIVENINES_BASE_URL environment variable.",
+				Description: "FiveNines API base URL. Defaults to https://fivenines.io. Can also be set via FIVENINES_BASE_URL environment variable.",
 				Optional:    true,
 			},
 		},
@@ -74,7 +74,7 @@ func (p *fiveninesProvider) Configure(ctx context.Context, req provider.Configur
 		baseURL = os.Getenv("FIVENINES_BASE_URL")
 	}
 	if baseURL == "" {
-		baseURL = "https://app.fivenines.io"
+		baseURL = "https://fivenines.io"
 	}
 
 	c := client.NewClient(baseURL, apiKey)

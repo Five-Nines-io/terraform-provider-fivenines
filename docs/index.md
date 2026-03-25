@@ -23,7 +23,7 @@ terraform {
 
 provider "fivenines" {
   api_key = var.fivenines_api_key
-  # base_url = "https://app.fivenines.io" # optional
+  # base_url = "https://fivenines.io" # optional
 }
 
 variable "fivenines_api_key" {
@@ -38,4 +38,4 @@ variable "fivenines_api_key" {
 ### Optional
 
 - `api_key` (String, Sensitive) FiveNines API key (starts with fn_). Can also be set via FIVENINES_API_KEY environment variable.
-- `base_url` (String) FiveNines API base URL. Defaults to https://app.fivenines.io. Can also be set via FIVENINES_BASE_URL environment variable.
+- `base_url` (String) FiveNines API base URL. Defaults to https://fivenines.io. Can also be set via FIVENINES_BASE_URL environment variable.

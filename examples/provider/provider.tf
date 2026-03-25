@@ -9,7 +9,7 @@ terraform {
 
 provider "fivenines" {
   api_key = var.fivenines_api_key
-  # base_url = "https://app.fivenines.io" # optional
+  # base_url = "https://fivenines.io" # optional
 }
 
 variable "fivenines_api_key" {

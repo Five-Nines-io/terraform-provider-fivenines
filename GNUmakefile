@@ -16,4 +16,7 @@ testacc:
 fmt:
 	go fmt ./...
 
-.PHONY: default build install test testacc fmt
+docs:
+	tfplugindocs generate
+
+.PHONY: default build install test testacc fmt docs

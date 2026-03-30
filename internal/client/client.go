@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -109,6 +110,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	return resp, nil
 }
 
+// sanitizeETag strips the "-gzip" suffix that Nginx/reverse proxies append
+// to strong ETags when gzip-compressing the response body.
+func sanitizeETag(etag string) string {
+	return strings.Replace(etag, "-gzip\"", "\"", 1)
+}
+
 // IsPreconditionFailed returns true if the error is a 412 Precondition Failed.
 func IsPreconditionFailed(err error) bool {
 	if apiErr, ok := err.(*APIError); ok {
@@ -180,7 +187,7 @@ func (c *Client) GetInstance(ctx context.Context, id string) (*Instance, string,
 		return nil, "", parseError(resp)
 	}
 
-	etag := resp.Header.Get("ETag")
+	etag := sanitizeETag(resp.Header.Get("ETag"))
 	var result struct {
 		Instance Instance `json:"instance"`
 	}
@@ -313,7 +320,7 @@ func (c *Client) GetTask(ctx context.Context, id string) (*Task, string, error) 
 		return nil, "", parseError(resp)
 	}
 
-	etag := resp.Header.Get("ETag")
+	etag := sanitizeETag(resp.Header.Get("ETag"))
 	var result struct {
 		Task Task `json:"task"`
 	}
@@ -473,7 +480,7 @@ func (c *Client) GetWorkflow(ctx context.Context, id int64) (*Workflow, string, 
 		return nil, "", parseError(resp)
 	}
 
-	etag := resp.Header.Get("ETag")
+	etag := sanitizeETag(resp.Header.Get("ETag"))
 	var result struct {
 		Workflow Workflow          `json:"workflow"`
 		Versions []WorkflowVersion `json:"versions"`
@@ -633,7 +640,7 @@ func (c *Client) GetUptimeMonitor(ctx context.Context, id string) (*UptimeMonito
 		return nil, "", parseError(resp)
 	}
 
-	etag := resp.Header.Get("ETag")
+	etag := sanitizeETag(resp.Header.Get("ETag"))
 	var result struct {
 		UptimeMonitor UptimeMonitor `json:"uptime_monitor"`
 	}
@@ -844,7 +851,7 @@ func (c *Client) GetNetworkDevice(ctx context.Context, id string) (*NetworkDevic
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", parseError(resp)
 	}
-	etag := resp.Header.Get("ETag")
+	etag := sanitizeETag(resp.Header.Get("ETag"))
 	var result struct {
 		NetworkDevice NetworkDevice `json:"network_device"`
 	}
@@ -969,7 +976,7 @@ func (c *Client) GetStatusPage(ctx context.Context, id int64) (*StatusPage, stri
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", parseError(resp)
 	}
-	etag := resp.Header.Get("ETag")
+	etag := sanitizeETag(resp.Header.Get("ETag"))
 	var result struct {
 		StatusPage StatusPage `json:"status_page"`
 	}

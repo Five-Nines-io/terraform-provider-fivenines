@@ -648,14 +648,14 @@ func TestIntegration_StatusPage_TerraformUpdateSimulation(t *testing.T) {
 	_, etag, _ := c.GetStatusPage(ctx, pageID)
 
 	// This is what the Terraform resource's Update() would build:
-	name := readPage.Name        // from plan (user's config, unchanged)
-	desc := readPage.Description // from plan (state value, user didn't specify)
-	pub := readPage.Public       // from plan (default false)
-	upt := readPage.Uptime       // from plan (default true)
-	cdEnabled := readPage.CustomDomainEnabled   // from plan (default false)
-	cfEnabled := readPage.CustomFooterEnabled   // from plan (default false)
+	name := readPage.Name                         // from plan (user's config, unchanged)
+	desc := readPage.Description                  // from plan (state value, user didn't specify)
+	pub := readPage.Public                        // from plan (default false)
+	upt := readPage.Uptime                        // from plan (default true)
+	cdEnabled := readPage.CustomDomainEnabled     // from plan (default false)
+	cfEnabled := readPage.CustomFooterEnabled     // from plan (default false)
 	ihEnabled := readPage.IncidentsHistoryEnabled // from plan (default false)
-	theme := "dark" // THE CHANGE the user made
+	theme := "dark"                               // THE CHANGE the user made
 
 	updateInput := UpdateStatusPageInput{
 		Name:                    &name,

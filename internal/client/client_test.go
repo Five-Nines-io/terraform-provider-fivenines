@@ -53,12 +53,12 @@ func TestSanitizeETag(t *testing.T) {
 	tests := []struct {
 		input, want string
 	}{
-		{`"abc123"`, `"abc123"`},                       // normal ETag, no change
-		{`"abc123-gzip"`, `"abc123"`},                  // Nginx gzip suffix stripped
-		{"", ""},                                        // empty
-		{`abc123`, `abc123`},                            // no quotes, no change
-		{`W/"abc123"`, `W/"abc123"`},                   // weak ETag, no change
-		{`"abc-gzip-gzip"`, `"abc-gzip"`},              // only last -gzip" stripped
+		{`"abc123"`, `"abc123"`},          // normal ETag, no change
+		{`"abc123-gzip"`, `"abc123"`},     // Nginx gzip suffix stripped
+		{"", ""},                          // empty
+		{`abc123`, `abc123`},              // no quotes, no change
+		{`W/"abc123"`, `W/"abc123"`},      // weak ETag, no change
+		{`"abc-gzip-gzip"`, `"abc-gzip"`}, // only last -gzip" stripped
 	}
 	for _, tt := range tests {
 		got := sanitizeETag(tt.input)
@@ -899,8 +899,8 @@ func TestClient_UpdateStatusPage(t *testing.T) {
 				"id": 1, "name": "Updated Page", "slug": "abc1",
 				"description": "new desc", "public": true, "uptime": true,
 				"theme_variant": "dark",
-				"items":      []interface{}{},
-				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+				"items":         []interface{}{},
+				"created_at":    "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
 			},
 		})
 	})

@@ -49,6 +49,25 @@ func TestClient_UserAgent(t *testing.T) {
 	}
 }
 
+func TestSanitizeETag(t *testing.T) {
+	tests := []struct {
+		input, want string
+	}{
+		{`"abc123"`, `"abc123"`},          // normal ETag, no change
+		{`"abc123-gzip"`, `"abc123"`},     // Nginx gzip suffix stripped
+		{"", ""},                          // empty
+		{`abc123`, `abc123`},              // no quotes, no change
+		{`W/"abc123"`, `W/"abc123"`},      // weak ETag, no change
+		{`"abc-gzip-gzip"`, `"abc-gzip"`}, // only last -gzip" stripped
+	}
+	for _, tt := range tests {
+		got := sanitizeETag(tt.input)
+		if got != tt.want {
+			t.Errorf("sanitizeETag(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 // --- Instances ---
 
 func TestClient_GetInstance(t *testing.T) {

@@ -20,8 +20,9 @@ import (
 )
 
 var (
-	_ resource.Resource                = &uptimeMonitorResource{}
-	_ resource.ResourceWithImportState = &uptimeMonitorResource{}
+	_ resource.Resource                     = &uptimeMonitorResource{}
+	_ resource.ResourceWithImportState      = &uptimeMonitorResource{}
+	_ resource.ResourceWithConfigValidators = &uptimeMonitorResource{}
 )
 
 type uptimeMonitorResource struct {
@@ -246,6 +247,16 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Computed:    true,
 			},
 		},
+	}
+}
+
+// ConfigValidators mirrors the per-protocol requirements the API enforces so a
+// monitor missing its target fails at plan time rather than mid-apply.
+func (r *uptimeMonitorResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		requiredWhen(path.Root("protocol"), "https", path.Root("url")),
+		requiredWhen(path.Root("protocol"), "tcp", path.Root("hostname"), path.Root("port")),
+		requiredWhen(path.Root("protocol"), "dns", path.Root("dns_record_type")),
 	}
 }
 

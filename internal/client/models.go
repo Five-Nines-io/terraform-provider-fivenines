@@ -10,22 +10,25 @@ type PaginationMeta struct {
 }
 
 // Instance represents a monitored server (Host).
+//
+// Fields the API documents as nullable are pointers so a null round-trips to
+// types.StringNull()/types.Int64Null() instead of collapsing to "" or 0.
 type Instance struct {
 	ID                  string  `json:"id"` // UUID
 	DisplayName         string  `json:"display_name"`
-	Hostname            string  `json:"hostname"`
+	Hostname            *string `json:"hostname"`
 	Enabled             bool    `json:"enabled"`
 	MaintenanceMode     bool    `json:"maintenance_mode"`
-	OperatingSystemName string  `json:"operating_system_name"`
-	KernelVersion       string  `json:"kernel_version"`
-	CPUArchitecture     string  `json:"cpu_architecture"`
-	CPUModel            string  `json:"cpu_model"`
-	CPUCount            int     `json:"cpu_count"`
-	MemorySize          int64   `json:"memory_size"`
-	IPv4                string  `json:"ipv4"`
-	IPv6                string  `json:"ipv6"`
-	Source              string  `json:"source"`
-	ClientVersion       string  `json:"client_version"`
+	OperatingSystemName *string `json:"operating_system_name"`
+	KernelVersion       *string `json:"kernel_version"`
+	CPUArchitecture     *string `json:"cpu_architecture"`
+	CPUModel            *string `json:"cpu_model"`
+	CPUCount            *int    `json:"cpu_count"`
+	MemorySize          *int64  `json:"memory_size"`
+	IPv4                *string `json:"ipv4"`
+	IPv6                *string `json:"ipv6"`
+	Source              *string `json:"source"`
+	ClientVersion       *string `json:"client_version"`
 	Status              string  `json:"status"`
 	LastSyncAt          *string `json:"last_sync_at"`
 	FirstSyncAt         *string `json:"first_sync_at"`
@@ -44,10 +47,10 @@ type CreateInstanceInput struct {
 
 // UpdateInstanceInput is the request body for updating an instance.
 type UpdateInstanceInput struct {
-	DisplayName     *string `json:"display_name,omitempty"`
-	Description     *string `json:"description,omitempty"`
-	Enabled         *bool   `json:"enabled,omitempty"`
-	MaintenanceMode *bool   `json:"maintenance_mode,omitempty"`
+	DisplayName     *string           `json:"display_name,omitempty"`
+	Description     *Nullable[string] `json:"description,omitempty"`
+	Enabled         *bool             `json:"enabled,omitempty"`
+	MaintenanceMode *bool             `json:"maintenance_mode,omitempty"`
 }
 
 // Task represents a cron/heartbeat monitor.
@@ -55,9 +58,9 @@ type Task struct {
 	ID                 string  `json:"id"` // UUID
 	Name               string  `json:"name"`
 	ScheduleType       string  `json:"schedule_type"`
-	Schedule           string  `json:"schedule"`
+	Schedule           *string `json:"schedule"`
 	IntervalSeconds    *int64  `json:"interval_seconds"`
-	TimeZone           string  `json:"time_zone"`
+	TimeZone           *string `json:"time_zone"`
 	GracePeriodMinutes int     `json:"grace_period_minutes"`
 	Status             string  `json:"status"`
 	MonitoringStatus   string  `json:"monitoring_status"`
@@ -82,25 +85,31 @@ type CreateTaskInput struct {
 }
 
 // UpdateTaskInput is the request body for updating a task.
+//
+// host_id is Optional-only in the schema, so the provider owns it: a null in the
+// plan is sent as an explicit null to clear the association rather than being
+// silently dropped. schedule/interval_seconds are Optional+Computed — the API
+// keeps the counterpart it already stored across a schedule_type switch (#8) —
+// so they are omitted instead.
 type UpdateTaskInput struct {
-	Name               *string `json:"name,omitempty"`
-	ScheduleType       *string `json:"schedule_type,omitempty"`
-	Schedule           *string `json:"schedule,omitempty"`
-	IntervalSeconds    *int64  `json:"interval_seconds,omitempty"`
-	GracePeriodMinutes *int    `json:"grace_period_minutes,omitempty"`
-	TimeZone           *string `json:"time_zone,omitempty"`
-	HostID             *string `json:"host_id,omitempty"`
+	Name               *string           `json:"name,omitempty"`
+	ScheduleType       *string           `json:"schedule_type,omitempty"`
+	Schedule           *string           `json:"schedule,omitempty"`
+	IntervalSeconds    *int64            `json:"interval_seconds,omitempty"`
+	GracePeriodMinutes *int              `json:"grace_period_minutes,omitempty"`
+	TimeZone           *string           `json:"time_zone,omitempty"`
+	HostID             *Nullable[string] `json:"host_id,omitempty"`
 }
 
 // Workflow represents an automation definition.
 type Workflow struct {
 	ID                 int64             `json:"id"`
 	Name               string            `json:"name"`
-	Description        string            `json:"description"`
+	Description        *string           `json:"description"`
 	Status             string            `json:"status"`
 	IntervalSeconds    *int64            `json:"interval_seconds"`
-	TriggerType        string            `json:"trigger_type"`
-	TriggerTypeLabel   string            `json:"trigger_type_label"`
+	TriggerType        *string           `json:"trigger_type"`
+	TriggerTypeLabel   *string           `json:"trigger_type_label"`
 	PublishedVersionID *int64            `json:"published_version_id"`
 	NextEvaluationAt   *string           `json:"next_evaluation_at"`
 	LastEvaluationAt   *string           `json:"last_evaluation_at"`
@@ -152,26 +161,26 @@ type UptimeMonitor struct {
 	Name                string  `json:"name"`
 	Protocol            string  `json:"protocol"`
 	Status              string  `json:"status"`
-	URL                 string  `json:"url"`
-	Hostname            string  `json:"hostname"`
+	URL                 *string `json:"url"`
+	Hostname            *string `json:"hostname"`
 	Port                *int    `json:"port"`
-	HTTPMethod          string  `json:"http_method"`
-	IPVersion           string  `json:"ip_version"`
+	HTTPMethod          *string `json:"http_method"`
+	IPVersion           *string `json:"ip_version"`
 	IntervalSeconds     int     `json:"interval_seconds"`
 	TimeoutSeconds      int     `json:"timeout_seconds"`
 	ConfirmationCount   int     `json:"confirmation_count"`
-	Keyword             string  `json:"keyword"`
+	Keyword             *string `json:"keyword"`
 	KeywordAbsent       bool    `json:"keyword_absent"`
 	FollowRedirects     bool    `json:"follow_redirects"`
 	ExpectedStatusCodes []int   `json:"expected_status_codes"`
 	ProbeRegionIDs      []int64 `json:"probe_region_ids"`
 	// DNS protocol fields
-	DNSRecordType      string   `json:"dns_record_type"`
+	DNSRecordType      *string  `json:"dns_record_type"`
 	DNSExpectedRecords []string `json:"dns_expected_records"`
 	// Custom HTTP fields
 	CustomHeaders map[string]string `json:"custom_headers"`
-	CustomBody    string            `json:"custom_body"`
-	ContentType   string            `json:"content_type"`
+	CustomBody    *string           `json:"custom_body"`
+	ContentType   *string           `json:"content_type"`
 	// Recovery
 	RecoveryCount int `json:"recovery_count"`
 	// Read-only
@@ -209,27 +218,34 @@ type CreateUptimeMonitorInput struct {
 }
 
 // UpdateUptimeMonitorInput is the request body for updating an uptime monitor.
+//
+// url/hostname are Optional+Computed (the server fills them per protocol), so
+// they are omitted when unset. The Optional-only fields below are owned by the
+// provider and cleared with an explicit null. dns_expected_records accepts an
+// explicit [] — the server normalises it to null — which is the only way to
+// drop a pinned expectation; expected_status_codes keeps `omitempty` because
+// the API rejects [] with 422.
 type UpdateUptimeMonitorInput struct {
-	Name                *string            `json:"name,omitempty"`
-	URL                 *string            `json:"url,omitempty"`
-	Hostname            *string            `json:"hostname,omitempty"`
-	Port                *int               `json:"port,omitempty"`
-	HTTPMethod          *string            `json:"http_method,omitempty"`
-	IPVersion           *string            `json:"ip_version,omitempty"`
-	IntervalSeconds     *int               `json:"interval_seconds,omitempty"`
-	TimeoutSeconds      *int               `json:"timeout_seconds,omitempty"`
-	ConfirmationCount   *int               `json:"confirmation_count,omitempty"`
-	Keyword             *string            `json:"keyword,omitempty"`
-	KeywordAbsent       *bool              `json:"keyword_absent,omitempty"`
-	FollowRedirects     *bool              `json:"follow_redirects,omitempty"`
-	ExpectedStatusCodes []int              `json:"expected_status_codes,omitempty"`
-	ProbeRegionIDs      []int64            `json:"probe_region_ids,omitempty"`
-	DNSRecordType       *string            `json:"dns_record_type,omitempty"`
-	DNSExpectedRecords  []string           `json:"dns_expected_records,omitempty"`
-	CustomHeaders       *map[string]string `json:"custom_headers,omitempty"`
-	CustomBody          *string            `json:"custom_body,omitempty"`
-	ContentType         *string            `json:"content_type,omitempty"`
-	RecoveryCount       *int               `json:"recovery_count,omitempty"`
+	Name                *string                      `json:"name,omitempty"`
+	URL                 *string                      `json:"url,omitempty"`
+	Hostname            *string                      `json:"hostname,omitempty"`
+	Port                *Nullable[int]               `json:"port,omitempty"`
+	HTTPMethod          *string                      `json:"http_method,omitempty"`
+	IPVersion           *string                      `json:"ip_version,omitempty"`
+	IntervalSeconds     *int                         `json:"interval_seconds,omitempty"`
+	TimeoutSeconds      *int                         `json:"timeout_seconds,omitempty"`
+	ConfirmationCount   *int                         `json:"confirmation_count,omitempty"`
+	Keyword             *Nullable[string]            `json:"keyword,omitempty"`
+	KeywordAbsent       *bool                        `json:"keyword_absent,omitempty"`
+	FollowRedirects     *bool                        `json:"follow_redirects,omitempty"`
+	ExpectedStatusCodes []int                        `json:"expected_status_codes,omitempty"`
+	ProbeRegionIDs      []int64                      `json:"probe_region_ids,omitempty"`
+	DNSRecordType       *Nullable[string]            `json:"dns_record_type,omitempty"`
+	DNSExpectedRecords  *Nullable[[]string]          `json:"dns_expected_records,omitempty"`
+	CustomHeaders       *Nullable[map[string]string] `json:"custom_headers,omitempty"`
+	CustomBody          *Nullable[string]            `json:"custom_body,omitempty"`
+	ContentType         *Nullable[string]            `json:"content_type,omitempty"`
+	RecoveryCount       *int                         `json:"recovery_count,omitempty"`
 }
 
 // ProbeRegion represents a monitoring probe region.
@@ -273,18 +289,18 @@ type NetworkDevice struct {
 	Name              string  `json:"name"`
 	IPAddress         string  `json:"ip_address"`
 	PollingHostID     *string `json:"polling_host_id"`
-	DeviceType        string  `json:"device_type"`
+	DeviceType        *string `json:"device_type"`
 	PollingInterval   int     `json:"polling_interval"`
-	SNMPVersion       string  `json:"snmp_version"`
-	SNMPUsername      string  `json:"snmp_username"`
-	SNMPSecurityLevel string  `json:"snmp_security_level"`
-	SNMPAuthProtocol  string  `json:"snmp_auth_protocol"`
-	SNMPPrivProtocol  string  `json:"snmp_priv_protocol"`
+	SNMPVersion       *string `json:"snmp_version"`
+	SNMPUsername      *string `json:"snmp_username"`
+	SNMPSecurityLevel *string `json:"snmp_security_level"`
+	SNMPAuthProtocol  *string `json:"snmp_auth_protocol"`
+	SNMPPrivProtocol  *string `json:"snmp_priv_protocol"`
 	MaintenanceMode   bool    `json:"maintenance_mode"`
-	Status            string  `json:"status"`
-	Vendor            string  `json:"vendor"`
-	Model             string  `json:"model"`
-	SysName           string  `json:"sys_name"`
+	Status            *string `json:"status"`
+	Vendor            *string `json:"vendor"`
+	Model             *string `json:"model"`
+	SysName           *string `json:"sys_name"`
 	LastPolledAt      *string `json:"last_polled_at"`
 	CreatedAt         string  `json:"created_at"`
 	UpdatedAt         string  `json:"updated_at"`
@@ -308,20 +324,24 @@ type CreateNetworkDeviceInput struct {
 }
 
 // UpdateNetworkDeviceInput is the request body for updating a network device.
+//
+// The SNMP credentials are write-only: the API never returns them and treats a
+// blank value as "keep what is stored", so they are omitted when the plan has
+// no value rather than being cleared.
 type UpdateNetworkDeviceInput struct {
-	Name              *string `json:"name,omitempty"`
-	IPAddress         *string `json:"ip_address,omitempty"`
-	PollingHostID     *string `json:"polling_host_id,omitempty"`
-	DeviceType        *string `json:"device_type,omitempty"`
-	PollingInterval   *int    `json:"polling_interval,omitempty"`
-	SNMPVersion       *string `json:"snmp_version,omitempty"`
-	SNMPCommunity     *string `json:"snmp_community,omitempty"`
-	SNMPUsername      *string `json:"snmp_username,omitempty"`
-	SNMPSecurityLevel *string `json:"snmp_security_level,omitempty"`
-	SNMPAuthProtocol  *string `json:"snmp_auth_protocol,omitempty"`
-	SNMPAuthPassword  *string `json:"snmp_auth_password,omitempty"`
-	SNMPPrivProtocol  *string `json:"snmp_priv_protocol,omitempty"`
-	SNMPPrivPassword  *string `json:"snmp_priv_password,omitempty"`
+	Name              *string           `json:"name,omitempty"`
+	IPAddress         *string           `json:"ip_address,omitempty"`
+	PollingHostID     *Nullable[string] `json:"polling_host_id,omitempty"`
+	DeviceType        *string           `json:"device_type,omitempty"`
+	PollingInterval   *int              `json:"polling_interval,omitempty"`
+	SNMPVersion       *string           `json:"snmp_version,omitempty"`
+	SNMPCommunity     *string           `json:"snmp_community,omitempty"`
+	SNMPUsername      *Nullable[string] `json:"snmp_username,omitempty"`
+	SNMPSecurityLevel *string           `json:"snmp_security_level,omitempty"`
+	SNMPAuthProtocol  *string           `json:"snmp_auth_protocol,omitempty"`
+	SNMPAuthPassword  *string           `json:"snmp_auth_password,omitempty"`
+	SNMPPrivProtocol  *string           `json:"snmp_priv_protocol,omitempty"`
+	SNMPPrivPassword  *string           `json:"snmp_priv_password,omitempty"`
 }
 
 // StatusPage represents a public status page.
@@ -329,15 +349,15 @@ type StatusPage struct {
 	ID                      int64            `json:"id"`
 	Name                    string           `json:"name"`
 	Slug                    string           `json:"slug"`
-	Description             string           `json:"description"`
+	Description             *string          `json:"description"`
 	Public                  bool             `json:"public"`
 	Uptime                  bool             `json:"uptime"`
-	CustomDomain            string           `json:"custom_domain"`
+	CustomDomain            *string          `json:"custom_domain"`
 	CustomDomainEnabled     bool             `json:"custom_domain_enabled"`
-	CustomFooter            string           `json:"custom_footer"`
+	CustomFooter            *string          `json:"custom_footer"`
 	CustomFooterEnabled     bool             `json:"custom_footer_enabled"`
 	IncidentsHistoryEnabled bool             `json:"incidents_history_enabled"`
-	ThemeVariant            string           `json:"theme_variant"`
+	ThemeVariant            *string          `json:"theme_variant"`
 	Items                   []StatusPageItem `json:"items"`
 	CreatedAt               string           `json:"created_at"`
 	UpdatedAt               string           `json:"updated_at"`
@@ -366,18 +386,22 @@ type CreateStatusPageInput struct {
 }
 
 // UpdateStatusPageInput is the request body for updating a status page.
+//
+// Items is a Nullable slice because emptying a page needs an explicit []: with
+// `omitempty` an empty plan list marshals to nothing, which the API reads as
+// "preserve the current items".
 type UpdateStatusPageInput struct {
-	Name                    *string          `json:"name,omitempty"`
-	Description             *string          `json:"description,omitempty"`
-	Public                  *bool            `json:"public,omitempty"`
-	Uptime                  *bool            `json:"uptime,omitempty"`
-	CustomDomain            *string          `json:"custom_domain,omitempty"`
-	CustomDomainEnabled     *bool            `json:"custom_domain_enabled,omitempty"`
-	CustomFooter            *string          `json:"custom_footer,omitempty"`
-	CustomFooterEnabled     *bool            `json:"custom_footer_enabled,omitempty"`
-	IncidentsHistoryEnabled *bool            `json:"incidents_history_enabled,omitempty"`
-	ThemeVariant            *string          `json:"theme_variant,omitempty"`
-	Items                   []StatusPageItem `json:"items,omitempty"`
+	Name                    *string                     `json:"name,omitempty"`
+	Description             *string                     `json:"description,omitempty"`
+	Public                  *bool                       `json:"public,omitempty"`
+	Uptime                  *bool                       `json:"uptime,omitempty"`
+	CustomDomain            *string                     `json:"custom_domain,omitempty"`
+	CustomDomainEnabled     *bool                       `json:"custom_domain_enabled,omitempty"`
+	CustomFooter            *string                     `json:"custom_footer,omitempty"`
+	CustomFooterEnabled     *bool                       `json:"custom_footer_enabled,omitempty"`
+	IncidentsHistoryEnabled *bool                       `json:"incidents_history_enabled,omitempty"`
+	ThemeVariant            *string                     `json:"theme_variant,omitempty"`
+	Items                   *Nullable[[]StatusPageItem] `json:"items,omitempty"`
 }
 
 // APIError represents an error response from the API.

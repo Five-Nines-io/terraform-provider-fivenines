@@ -274,48 +274,22 @@ func (r *statusPageResource) Update(ctx context.Context, req resource.UpdateRequ
 
 	id := state.ID.ValueInt64()
 
-	name := plan.Name.ValueString()
+	// Every field here is either Required or Optional+Computed, so a null plan
+	// value means "keep the server value" and the key is omitted. items is the
+	// exception: Terraform owns the list, and the API needs an explicit [] to
+	// empty a page, so null and empty both send [].
 	input := client.UpdateStatusPageInput{
-		Name: &name,
-	}
-	if !plan.Description.IsNull() && !plan.Description.IsUnknown() {
-		v := plan.Description.ValueString()
-		input.Description = &v
-	}
-	if !plan.Public.IsNull() {
-		v := plan.Public.ValueBool()
-		input.Public = &v
-	}
-	if !plan.Uptime.IsNull() {
-		v := plan.Uptime.ValueBool()
-		input.Uptime = &v
-	}
-	if !plan.CustomDomain.IsNull() && !plan.CustomDomain.IsUnknown() {
-		v := plan.CustomDomain.ValueString()
-		input.CustomDomain = &v
-	}
-	if !plan.CustomDomainEnabled.IsNull() {
-		v := plan.CustomDomainEnabled.ValueBool()
-		input.CustomDomainEnabled = &v
-	}
-	if !plan.CustomFooter.IsNull() && !plan.CustomFooter.IsUnknown() {
-		v := plan.CustomFooter.ValueString()
-		input.CustomFooter = &v
-	}
-	if !plan.CustomFooterEnabled.IsNull() {
-		v := plan.CustomFooterEnabled.ValueBool()
-		input.CustomFooterEnabled = &v
-	}
-	if !plan.IncidentsHistoryEnabled.IsNull() {
-		v := plan.IncidentsHistoryEnabled.ValueBool()
-		input.IncidentsHistoryEnabled = &v
-	}
-	if !plan.ThemeVariant.IsNull() && !plan.ThemeVariant.IsUnknown() {
-		v := plan.ThemeVariant.ValueString()
-		input.ThemeVariant = &v
-	}
-	if !plan.Items.IsNull() && !plan.Items.IsUnknown() {
-		input.Items = planItemsToClient(plan.Items)
+		Name:                    preserveString(plan.Name),
+		Description:             preserveString(plan.Description),
+		Public:                  preserveBool(plan.Public),
+		Uptime:                  preserveBool(plan.Uptime),
+		CustomDomain:            preserveString(plan.CustomDomain),
+		CustomDomainEnabled:     preserveBool(plan.CustomDomainEnabled),
+		CustomFooter:            preserveString(plan.CustomFooter),
+		CustomFooterEnabled:     preserveBool(plan.CustomFooterEnabled),
+		IncidentsHistoryEnabled: preserveBool(plan.IncidentsHistoryEnabled),
+		ThemeVariant:            preserveString(plan.ThemeVariant),
+		Items:                   planItemsToUpdateInput(plan.Items),
 	}
 
 	// ETag retry loop
@@ -373,19 +347,21 @@ func mapStatusPageToState(p *client.StatusPage, state *statusPageModel) {
 	state.ID = types.Int64Value(p.ID)
 	state.Name = types.StringValue(p.Name)
 	state.Slug = types.StringValue(p.Slug)
-	state.Description = types.StringValue(p.Description)
+	state.Description = optionalString(p.Description)
 	state.Public = types.BoolValue(p.Public)
 	state.Uptime = types.BoolValue(p.Uptime)
-	state.CustomDomain = types.StringValue(p.CustomDomain)
+	state.CustomDomain = optionalString(p.CustomDomain)
 	state.CustomDomainEnabled = types.BoolValue(p.CustomDomainEnabled)
-	state.CustomFooter = types.StringValue(p.CustomFooter)
+	state.CustomFooter = optionalString(p.CustomFooter)
 	state.CustomFooterEnabled = types.BoolValue(p.CustomFooterEnabled)
 	state.IncidentsHistoryEnabled = types.BoolValue(p.IncidentsHistoryEnabled)
-	state.ThemeVariant = types.StringValue(p.ThemeVariant)
+	state.ThemeVariant = stringOrKeep(p.ThemeVariant, state.ThemeVariant)
 	state.CreatedAt = types.StringValue(p.CreatedAt)
 	state.UpdatedAt = types.StringValue(p.UpdatedAt)
 
-	if len(p.Items) > 0 {
+	itemType := types.ObjectType{AttrTypes: statusPageItemAttrTypes}
+	switch {
+	case len(p.Items) > 0:
 		items := make([]attr.Value, len(p.Items))
 		for i, item := range p.Items {
 			items[i], _ = types.ObjectValue(statusPageItemAttrTypes, map[string]attr.Value{
@@ -393,10 +369,25 @@ func mapStatusPageToState(p *client.StatusPage, state *statusPageModel) {
 				"item_id":   types.StringValue(item.ItemID),
 			})
 		}
-		state.Items, _ = types.ListValue(types.ObjectType{AttrTypes: statusPageItemAttrTypes}, items)
-	} else {
-		state.Items = types.ListNull(types.ObjectType{AttrTypes: statusPageItemAttrTypes})
+		state.Items, _ = types.ListValue(itemType, items)
+	case !state.Items.IsNull() && !state.Items.IsUnknown() && len(state.Items.Elements()) == 0:
+		// The plan said "items = []"; keep it so the empty list round-trips.
+	default:
+		state.Items = types.ListNull(itemType)
 	}
+}
+
+// planItemsToUpdateInput turns the planned item list into an update value.
+// Unknown omits the key; null and empty both send an explicit [], which is the
+// only thing the API accepts as "remove every item".
+func planItemsToUpdateInput(itemsList types.List) *client.Nullable[[]client.StatusPageItem] {
+	if itemsList.IsUnknown() {
+		return nil
+	}
+	if itemsList.IsNull() {
+		return client.Set([]client.StatusPageItem{})
+	}
+	return client.Set(planItemsToClient(itemsList))
 }
 
 func planItemsToClient(itemsList types.List) []client.StatusPageItem {

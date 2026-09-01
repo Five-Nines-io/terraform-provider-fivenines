@@ -622,8 +622,8 @@ func TestClient_CreateUptimeMonitor_DNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if mon.DNSRecordType != "A" {
-		t.Errorf("expected dns_record_type A, got %s", mon.DNSRecordType)
+	if mon.DNSRecordType == nil || *mon.DNSRecordType != "A" {
+		t.Errorf("expected dns_record_type A, got %v", mon.DNSRecordType)
 	}
 	// Verify body includes DNS fields
 	monitor := gotBody["uptime_monitor"].(map[string]interface{})
@@ -928,8 +928,8 @@ func TestClient_GetNetworkDevice(t *testing.T) {
 	if etag != `"dev-etag"` {
 		t.Errorf("expected etag %q, got %q", `"dev-etag"`, etag)
 	}
-	if dev.Vendor != "Cisco" {
-		t.Errorf("expected vendor Cisco, got %s", dev.Vendor)
+	if dev.Vendor == nil || *dev.Vendor != "Cisco" {
+		t.Errorf("expected vendor Cisco, got %v", dev.Vendor)
 	}
 }
 
@@ -1017,8 +1017,8 @@ func TestClient_GetStatusPage(t *testing.T) {
 	if page.Items[0].ItemType != "Host" {
 		t.Errorf("expected first item type Host, got %s", page.Items[0].ItemType)
 	}
-	if page.ThemeVariant != "dark" {
-		t.Errorf("expected theme_variant dark, got %s", page.ThemeVariant)
+	if page.ThemeVariant == nil || *page.ThemeVariant != "dark" {
+		t.Errorf("expected theme_variant dark, got %v", page.ThemeVariant)
 	}
 }
 

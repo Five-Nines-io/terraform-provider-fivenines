@@ -21,6 +21,13 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+func derefOr[T any](v *T, fallback T) T {
+	if v == nil {
+		return fallback
+	}
+	return *v
+}
+
 func skipIfNoAPIKey(t *testing.T) {
 	t.Helper()
 	if testAPIKey == "" {
@@ -52,7 +59,7 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 		t.Skip("No existing page with items found")
 	}
 
-	t.Logf("Target page: id=%d name=%q theme=%q items=%d", targetPage.ID, targetPage.Name, targetPage.ThemeVariant, len(targetPage.Items))
+	t.Logf("Target page: id=%d name=%q theme=%q items=%d", targetPage.ID, targetPage.Name, derefOr(targetPage.ThemeVariant, ""), len(targetPage.Items))
 
 	// Step 1: GET to get ETag (exactly what the terraform Update() does)
 	t.Log("=== Step 1: GET for ETag ===")
@@ -66,14 +73,14 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 	// Step 2: PATCH with a theme change, keeping items
 	t.Log("=== Step 2: PATCH (theme change, keep items) ===")
 	newTheme := "dark"
-	if readPage.ThemeVariant == "dark" {
+	if derefOr(readPage.ThemeVariant, "") == "dark" {
 		newTheme = "light"
 	}
 	name := readPage.Name
 	updateInput := UpdateStatusPageInput{
 		Name:         &name,
 		ThemeVariant: &newTheme,
-		Items:        readPage.Items,
+		Items:        Set(readPage.Items),
 	}
 	reqJSON, _ := json.MarshalIndent(map[string]interface{}{"status_page": updateInput}, "", "  ")
 	t.Logf("PATCH body:\n%s", string(reqJSON))
@@ -82,16 +89,16 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateStatusPage FAILED: %v", err)
 	}
-	t.Logf("Update succeeded: theme=%q", updatedPage.ThemeVariant)
+	t.Logf("Update succeeded: theme=%q", derefOr(updatedPage.ThemeVariant, ""))
 
 	// Step 3: Revert the theme back
 	t.Log("=== Step 3: Revert theme ===")
 	_, etag2, _ := c.GetStatusPage(ctx, targetPage.ID)
-	revertTheme := readPage.ThemeVariant
+	revertTheme := derefOr(readPage.ThemeVariant, "")
 	revertInput := UpdateStatusPageInput{
 		Name:         &name,
 		ThemeVariant: &revertTheme,
-		Items:        readPage.Items,
+		Items:        Set(readPage.Items),
 	}
 	_, err = c.UpdateStatusPage(ctx, targetPage.ID, etag2, revertInput)
 	if err != nil {

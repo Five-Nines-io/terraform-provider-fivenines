@@ -300,31 +300,18 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 
 	id := state.ID.ValueString()
 
-	name := plan.Name.ValueString()
-	scheduleType := plan.ScheduleType.ValueString()
+	// schedule/interval_seconds are Optional+Computed since #8 — the API keeps
+	// the counterpart it already stored when you switch schedule_type — so they
+	// are omitted rather than cleared when the plan has no value. host_id is
+	// Optional-only and provider-owned: dropping it has to clear it server-side.
 	input := client.UpdateTaskInput{
-		Name:         &name,
-		ScheduleType: &scheduleType,
-	}
-	if !plan.Schedule.IsNull() && !plan.Schedule.IsUnknown() {
-		v := plan.Schedule.ValueString()
-		input.Schedule = &v
-	}
-	if !plan.IntervalSeconds.IsNull() && !plan.IntervalSeconds.IsUnknown() {
-		v := plan.IntervalSeconds.ValueInt64()
-		input.IntervalSeconds = &v
-	}
-	if !plan.GracePeriodMinutes.IsNull() && !plan.GracePeriodMinutes.IsUnknown() {
-		v := int(plan.GracePeriodMinutes.ValueInt64())
-		input.GracePeriodMinutes = &v
-	}
-	if !plan.TimeZone.IsNull() && !plan.TimeZone.IsUnknown() {
-		v := plan.TimeZone.ValueString()
-		input.TimeZone = &v
-	}
-	if !plan.HostID.IsNull() && !plan.HostID.IsUnknown() {
-		v := plan.HostID.ValueString()
-		input.HostID = &v
+		Name:               preserveString(plan.Name),
+		ScheduleType:       preserveString(plan.ScheduleType),
+		Schedule:           preserveString(plan.Schedule),
+		IntervalSeconds:    preserveInt64(plan.IntervalSeconds),
+		GracePeriodMinutes: preserveInt(plan.GracePeriodMinutes),
+		TimeZone:           preserveString(plan.TimeZone),
+		HostID:             clearString(plan.HostID),
 	}
 
 	var task *client.Task
@@ -398,18 +385,12 @@ func mapTaskToState(t *client.Task, state *taskModel) {
 	state.Name = types.StringValue(t.Name)
 	state.ScheduleType = types.StringValue(t.ScheduleType)
 	state.Paused = types.BoolValue(t.Status == "paused")
-	if t.Schedule != "" {
-		state.Schedule = types.StringValue(t.Schedule)
-	} else {
-		state.Schedule = types.StringNull()
-	}
-	if t.IntervalSeconds != nil {
-		state.IntervalSeconds = types.Int64Value(*t.IntervalSeconds)
-	} else {
-		state.IntervalSeconds = types.Int64Null()
-	}
+	// The API answers null for the schedule of an interval task, and has been
+	// seen to answer "" — both mean "no cron expression".
+	state.Schedule = optionalNonEmptyString(t.Schedule)
+	state.IntervalSeconds = optionalInt64(t.IntervalSeconds)
 	state.GracePeriodMinutes = types.Int64Value(int64(t.GracePeriodMinutes))
-	state.TimeZone = types.StringValue(t.TimeZone)
+	state.TimeZone = stringOrKeep(t.TimeZone, state.TimeZone)
 	state.HostID = optionalString(t.HostID)
 	state.Status = types.StringValue(t.Status)
 	state.MonitoringStatus = types.StringValue(t.MonitoringStatus)

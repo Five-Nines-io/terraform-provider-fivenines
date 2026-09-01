@@ -228,13 +228,10 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
-	displayName := plan.DisplayName.ValueString()
-	enabled := plan.Enabled.ValueBool()
-	maintenance := plan.MaintenanceMode.ValueBool()
 	input := client.UpdateInstanceInput{
-		DisplayName:     &displayName,
-		Enabled:         &enabled,
-		MaintenanceMode: &maintenance,
+		DisplayName:     preserveString(plan.DisplayName),
+		Enabled:         preserveBool(plan.Enabled),
+		MaintenanceMode: preserveBool(plan.MaintenanceMode),
 	}
 
 	var instance *client.Instance
@@ -287,28 +284,22 @@ func mapInstanceToState(i *client.Instance, state *instanceModel) {
 	state.DisplayName = types.StringValue(i.DisplayName)
 	state.Enabled = types.BoolValue(i.Enabled)
 	state.MaintenanceMode = types.BoolValue(i.MaintenanceMode)
-	state.Hostname = types.StringValue(i.Hostname)
-	state.OperatingSystemName = types.StringValue(i.OperatingSystemName)
-	state.KernelVersion = types.StringValue(i.KernelVersion)
-	state.CPUArchitecture = types.StringValue(i.CPUArchitecture)
-	state.CPUModel = types.StringValue(i.CPUModel)
-	state.CPUCount = types.Int64Value(int64(i.CPUCount))
-	state.MemorySize = types.Int64Value(i.MemorySize)
-	state.IPv4 = types.StringValue(i.IPv4)
-	state.IPv6 = types.StringValue(i.IPv6)
-	state.Source = types.StringValue(i.Source)
-	state.ClientVersion = types.StringValue(i.ClientVersion)
+	// Everything the agent reports is null until it first syncs.
+	state.Hostname = optionalString(i.Hostname)
+	state.OperatingSystemName = optionalString(i.OperatingSystemName)
+	state.KernelVersion = optionalString(i.KernelVersion)
+	state.CPUArchitecture = optionalString(i.CPUArchitecture)
+	state.CPUModel = optionalString(i.CPUModel)
+	state.CPUCount = optionalInt(i.CPUCount)
+	state.MemorySize = optionalInt64(i.MemorySize)
+	state.IPv4 = optionalString(i.IPv4)
+	state.IPv6 = optionalString(i.IPv6)
+	state.Source = optionalString(i.Source)
+	state.ClientVersion = optionalString(i.ClientVersion)
 	state.Status = types.StringValue(i.Status)
 	state.FirstSyncAt = optionalString(i.FirstSyncAt)
 	state.LastSyncAt = optionalString(i.LastSyncAt)
 	state.LastRequestAt = optionalString(i.LastRequestAt)
 	state.CreatedAt = types.StringValue(i.CreatedAt)
 	state.UpdatedAt = types.StringValue(i.UpdatedAt)
-}
-
-func optionalString(s *string) types.String {
-	if s == nil {
-		return types.StringNull()
-	}
-	return types.StringValue(*s)
 }

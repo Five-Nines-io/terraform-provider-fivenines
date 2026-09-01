@@ -312,45 +312,13 @@ func (r *uptimeMonitorResource) Create(ctx context.Context, req resource.CreateR
 		v := plan.FollowRedirects.ValueBool()
 		input.FollowRedirects = &v
 	}
-	if !plan.ExpectedStatusCodes.IsNull() && !plan.ExpectedStatusCodes.IsUnknown() {
-		var codes []int
-		for _, elem := range plan.ExpectedStatusCodes.Elements() {
-			if v, ok := elem.(types.Int64); ok {
-				codes = append(codes, int(v.ValueInt64()))
-			}
-		}
-		input.ExpectedStatusCodes = codes
-	}
-	if !plan.ProbeRegionIDs.IsNull() && !plan.ProbeRegionIDs.IsUnknown() {
-		var ids []int64
-		for _, elem := range plan.ProbeRegionIDs.Elements() {
-			if v, ok := elem.(types.Int64); ok {
-				ids = append(ids, v.ValueInt64())
-			}
-		}
-		input.ProbeRegionIDs = ids
-	}
+	input.ExpectedStatusCodes = elementsAsInt(ctx, plan.ExpectedStatusCodes, &resp.Diagnostics)
+	input.ProbeRegionIDs = elementsAsInt64(ctx, plan.ProbeRegionIDs, &resp.Diagnostics)
 	if !plan.DNSRecordType.IsNull() && !plan.DNSRecordType.IsUnknown() {
 		input.DNSRecordType = plan.DNSRecordType.ValueString()
 	}
-	if !plan.DNSExpectedRecords.IsNull() && !plan.DNSExpectedRecords.IsUnknown() {
-		var records []string
-		for _, elem := range plan.DNSExpectedRecords.Elements() {
-			if v, ok := elem.(types.String); ok {
-				records = append(records, v.ValueString())
-			}
-		}
-		input.DNSExpectedRecords = records
-	}
-	if !plan.CustomHeaders.IsNull() && !plan.CustomHeaders.IsUnknown() {
-		headers := make(map[string]string)
-		for k, v := range plan.CustomHeaders.Elements() {
-			if sv, ok := v.(types.String); ok {
-				headers[k] = sv.ValueString()
-			}
-		}
-		input.CustomHeaders = headers
-	}
+	input.DNSExpectedRecords = elementsAsString(ctx, plan.DNSExpectedRecords, &resp.Diagnostics)
+	input.CustomHeaders = elementsAsStringMap(ctx, plan.CustomHeaders, &resp.Diagnostics)
 	if !plan.CustomBody.IsNull() && !plan.CustomBody.IsUnknown() {
 		input.CustomBody = plan.CustomBody.ValueString()
 	}
@@ -360,6 +328,10 @@ func (r *uptimeMonitorResource) Create(ctx context.Context, req resource.CreateR
 	if !plan.RecoveryCount.IsNull() && !plan.RecoveryCount.IsUnknown() {
 		v := int(plan.RecoveryCount.ValueInt64())
 		input.RecoveryCount = &v
+	}
+
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	tflog.Debug(ctx, "Creating uptime monitor", map[string]interface{}{"name": input.Name})
@@ -419,106 +391,35 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 
 	id := state.ID.ValueString()
 
-	input := client.UpdateUptimeMonitorInput{}
-	if !plan.Name.IsNull() {
-		v := plan.Name.ValueString()
-		input.Name = &v
+	// Optional-only attributes are owned by the provider: dropping them from the
+	// config sends an explicit null so the server clears them. url/hostname are
+	// Optional+Computed (the server derives them per protocol), so they are only
+	// sent when the plan has a known value. expected_status_codes stays omitted
+	// when empty — the API rejects [] with 422.
+	input := client.UpdateUptimeMonitorInput{
+		Name:                preserveString(plan.Name),
+		URL:                 preserveString(plan.URL),
+		Hostname:            preserveString(plan.Hostname),
+		Port:                clearInt(plan.Port),
+		HTTPMethod:          preserveString(plan.HTTPMethod),
+		IPVersion:           preserveString(plan.IPVersion),
+		IntervalSeconds:     preserveInt(plan.IntervalSeconds),
+		TimeoutSeconds:      preserveInt(plan.TimeoutSeconds),
+		ConfirmationCount:   preserveInt(plan.ConfirmationCount),
+		Keyword:             clearString(plan.Keyword),
+		KeywordAbsent:       preserveBool(plan.KeywordAbsent),
+		FollowRedirects:     preserveBool(plan.FollowRedirects),
+		ExpectedStatusCodes: elementsAsInt(ctx, plan.ExpectedStatusCodes, &resp.Diagnostics),
+		ProbeRegionIDs:      elementsAsInt64(ctx, plan.ProbeRegionIDs, &resp.Diagnostics),
+		DNSRecordType:       clearString(plan.DNSRecordType),
+		DNSExpectedRecords:  clearStringList(ctx, plan.DNSExpectedRecords, &resp.Diagnostics),
+		CustomHeaders:       clearStringMap(ctx, plan.CustomHeaders, &resp.Diagnostics),
+		CustomBody:          clearString(plan.CustomBody),
+		ContentType:         clearString(plan.ContentType),
+		RecoveryCount:       preserveInt(plan.RecoveryCount),
 	}
-	if !plan.URL.IsNull() && !plan.URL.IsUnknown() {
-		v := plan.URL.ValueString()
-		input.URL = &v
-	}
-	if !plan.Hostname.IsNull() && !plan.Hostname.IsUnknown() {
-		v := plan.Hostname.ValueString()
-		input.Hostname = &v
-	}
-	if !plan.Port.IsNull() && !plan.Port.IsUnknown() {
-		v := int(plan.Port.ValueInt64())
-		input.Port = &v
-	}
-	if !plan.HTTPMethod.IsNull() && !plan.HTTPMethod.IsUnknown() {
-		v := plan.HTTPMethod.ValueString()
-		input.HTTPMethod = &v
-	}
-	if !plan.IPVersion.IsNull() && !plan.IPVersion.IsUnknown() {
-		v := plan.IPVersion.ValueString()
-		input.IPVersion = &v
-	}
-	if !plan.IntervalSeconds.IsNull() && !plan.IntervalSeconds.IsUnknown() {
-		v := int(plan.IntervalSeconds.ValueInt64())
-		input.IntervalSeconds = &v
-	}
-	if !plan.TimeoutSeconds.IsNull() && !plan.TimeoutSeconds.IsUnknown() {
-		v := int(plan.TimeoutSeconds.ValueInt64())
-		input.TimeoutSeconds = &v
-	}
-	if !plan.ConfirmationCount.IsNull() && !plan.ConfirmationCount.IsUnknown() {
-		v := int(plan.ConfirmationCount.ValueInt64())
-		input.ConfirmationCount = &v
-	}
-	if !plan.Keyword.IsNull() && !plan.Keyword.IsUnknown() {
-		v := plan.Keyword.ValueString()
-		input.Keyword = &v
-	}
-	if !plan.KeywordAbsent.IsNull() && !plan.KeywordAbsent.IsUnknown() {
-		v := plan.KeywordAbsent.ValueBool()
-		input.KeywordAbsent = &v
-	}
-	if !plan.FollowRedirects.IsNull() && !plan.FollowRedirects.IsUnknown() {
-		v := plan.FollowRedirects.ValueBool()
-		input.FollowRedirects = &v
-	}
-	if !plan.ExpectedStatusCodes.IsNull() && !plan.ExpectedStatusCodes.IsUnknown() {
-		var codes []int
-		for _, elem := range plan.ExpectedStatusCodes.Elements() {
-			if v, ok := elem.(types.Int64); ok {
-				codes = append(codes, int(v.ValueInt64()))
-			}
-		}
-		input.ExpectedStatusCodes = codes
-	}
-	if !plan.ProbeRegionIDs.IsNull() && !plan.ProbeRegionIDs.IsUnknown() {
-		var ids []int64
-		for _, elem := range plan.ProbeRegionIDs.Elements() {
-			if v, ok := elem.(types.Int64); ok {
-				ids = append(ids, v.ValueInt64())
-			}
-		}
-		input.ProbeRegionIDs = ids
-	}
-	if !plan.DNSRecordType.IsNull() && !plan.DNSRecordType.IsUnknown() {
-		v := plan.DNSRecordType.ValueString()
-		input.DNSRecordType = &v
-	}
-	if !plan.DNSExpectedRecords.IsNull() && !plan.DNSExpectedRecords.IsUnknown() {
-		var records []string
-		for _, elem := range plan.DNSExpectedRecords.Elements() {
-			if sv, ok := elem.(types.String); ok {
-				records = append(records, sv.ValueString())
-			}
-		}
-		input.DNSExpectedRecords = records
-	}
-	if !plan.CustomHeaders.IsNull() && !plan.CustomHeaders.IsUnknown() {
-		headers := make(map[string]string)
-		for k, v := range plan.CustomHeaders.Elements() {
-			if sv, ok := v.(types.String); ok {
-				headers[k] = sv.ValueString()
-			}
-		}
-		input.CustomHeaders = &headers
-	}
-	if !plan.CustomBody.IsNull() && !plan.CustomBody.IsUnknown() {
-		v := plan.CustomBody.ValueString()
-		input.CustomBody = &v
-	}
-	if !plan.ContentType.IsNull() && !plan.ContentType.IsUnknown() {
-		v := plan.ContentType.ValueString()
-		input.ContentType = &v
-	}
-	if !plan.RecoveryCount.IsNull() && !plan.RecoveryCount.IsUnknown() {
-		v := int(plan.RecoveryCount.ValueInt64())
-		input.RecoveryCount = &v
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	var monitor *client.UptimeMonitor
@@ -590,19 +491,15 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	state.Name = types.StringValue(m.Name)
 	state.Protocol = types.StringValue(m.Protocol)
 	state.Paused = types.BoolValue(m.Status == "paused")
-	state.URL = types.StringValue(m.URL)
-	state.Hostname = types.StringValue(m.Hostname)
-	if m.Port != nil {
-		state.Port = types.Int64Value(int64(*m.Port))
-	} else {
-		state.Port = types.Int64Null()
-	}
-	state.HTTPMethod = types.StringValue(m.HTTPMethod)
-	state.IPVersion = types.StringValue(m.IPVersion)
+	state.URL = optionalString(m.URL)
+	state.Hostname = optionalString(m.Hostname)
+	state.Port = optionalInt(m.Port)
+	state.HTTPMethod = stringOrKeep(m.HTTPMethod, state.HTTPMethod)
+	state.IPVersion = stringOrKeep(m.IPVersion, state.IPVersion)
 	state.IntervalSeconds = types.Int64Value(int64(m.IntervalSeconds))
 	state.TimeoutSeconds = types.Int64Value(int64(m.TimeoutSeconds))
 	state.ConfirmationCount = types.Int64Value(int64(m.ConfirmationCount))
-	state.Keyword = types.StringValue(m.Keyword)
+	state.Keyword = optionalString(m.Keyword)
 	state.KeywordAbsent = types.BoolValue(m.KeywordAbsent)
 	state.FollowRedirects = types.BoolValue(m.FollowRedirects)
 
@@ -620,38 +517,16 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	diags.Append(d...)
 	state.ProbeRegionIDs = regionsList
 
-	// DNS fields
-	if m.DNSRecordType != "" {
-		state.DNSRecordType = types.StringValue(m.DNSRecordType)
-	} else {
-		state.DNSRecordType = types.StringNull()
-	}
-	if len(m.DNSExpectedRecords) > 0 {
-		recordsList, d := types.ListValueFrom(ctx, types.StringType, m.DNSExpectedRecords)
-		diags.Append(d...)
-		state.DNSExpectedRecords = recordsList
-	} else {
-		state.DNSExpectedRecords = types.ListNull(types.StringType)
-	}
+	// DNS fields. The API normalises an empty dns_expected_records to null, so
+	// keep an explicitly empty plan list as-is rather than reporting a null the
+	// user never asked for.
+	state.DNSRecordType = optionalString(m.DNSRecordType)
+	state.DNSExpectedRecords = listOrKeepEmpty(ctx, types.StringType, m.DNSExpectedRecords, state.DNSExpectedRecords, diags)
 
 	// Custom HTTP fields
-	if len(m.CustomHeaders) > 0 {
-		headersMap, d := types.MapValueFrom(ctx, types.StringType, m.CustomHeaders)
-		diags.Append(d...)
-		state.CustomHeaders = headersMap
-	} else {
-		state.CustomHeaders = types.MapNull(types.StringType)
-	}
-	if m.CustomBody != "" {
-		state.CustomBody = types.StringValue(m.CustomBody)
-	} else {
-		state.CustomBody = types.StringNull()
-	}
-	if m.ContentType != "" {
-		state.ContentType = types.StringValue(m.ContentType)
-	} else {
-		state.ContentType = types.StringNull()
-	}
+	state.CustomHeaders = mapOrKeepEmpty(ctx, m.CustomHeaders, state.CustomHeaders, diags)
+	state.CustomBody = optionalString(m.CustomBody)
+	state.ContentType = optionalString(m.ContentType)
 
 	state.RecoveryCount = types.Int64Value(int64(m.RecoveryCount))
 

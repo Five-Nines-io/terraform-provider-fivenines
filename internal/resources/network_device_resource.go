@@ -309,56 +309,22 @@ func (r *networkDeviceResource) Update(ctx context.Context, req resource.UpdateR
 
 	id := state.ID.ValueString()
 
-	// Build update input
-	name := plan.Name.ValueString()
-	ipAddr := plan.IPAddress.ValueString()
+	// The SNMP credentials are write-only and blank-means-keep server-side, so
+	// they are omitted when the plan has no value rather than cleared.
 	input := client.UpdateNetworkDeviceInput{
-		Name:      &name,
-		IPAddress: &ipAddr,
-	}
-	if !plan.PollingHostID.IsNull() {
-		v := plan.PollingHostID.ValueString()
-		input.PollingHostID = &v
-	}
-	if !plan.DeviceType.IsNull() {
-		v := plan.DeviceType.ValueString()
-		input.DeviceType = &v
-	}
-	if !plan.PollingInterval.IsNull() {
-		v := int(plan.PollingInterval.ValueInt64())
-		input.PollingInterval = &v
-	}
-	if !plan.SNMPVersion.IsNull() {
-		v := plan.SNMPVersion.ValueString()
-		input.SNMPVersion = &v
-	}
-	if !plan.SNMPCommunity.IsNull() {
-		v := plan.SNMPCommunity.ValueString()
-		input.SNMPCommunity = &v
-	}
-	if !plan.SNMPUsername.IsNull() {
-		v := plan.SNMPUsername.ValueString()
-		input.SNMPUsername = &v
-	}
-	if !plan.SNMPSecurityLevel.IsNull() {
-		v := plan.SNMPSecurityLevel.ValueString()
-		input.SNMPSecurityLevel = &v
-	}
-	if !plan.SNMPAuthProtocol.IsNull() {
-		v := plan.SNMPAuthProtocol.ValueString()
-		input.SNMPAuthProtocol = &v
-	}
-	if !plan.SNMPAuthPassword.IsNull() {
-		v := plan.SNMPAuthPassword.ValueString()
-		input.SNMPAuthPassword = &v
-	}
-	if !plan.SNMPPrivProtocol.IsNull() {
-		v := plan.SNMPPrivProtocol.ValueString()
-		input.SNMPPrivProtocol = &v
-	}
-	if !plan.SNMPPrivPassword.IsNull() {
-		v := plan.SNMPPrivPassword.ValueString()
-		input.SNMPPrivPassword = &v
+		Name:              preserveString(plan.Name),
+		IPAddress:         preserveString(plan.IPAddress),
+		PollingHostID:     clearString(plan.PollingHostID),
+		DeviceType:        preserveString(plan.DeviceType),
+		PollingInterval:   preserveInt(plan.PollingInterval),
+		SNMPVersion:       preserveString(plan.SNMPVersion),
+		SNMPCommunity:     preserveString(plan.SNMPCommunity),
+		SNMPUsername:      clearString(plan.SNMPUsername),
+		SNMPSecurityLevel: preserveString(plan.SNMPSecurityLevel),
+		SNMPAuthProtocol:  preserveString(plan.SNMPAuthProtocol),
+		SNMPAuthPassword:  preserveString(plan.SNMPAuthPassword),
+		SNMPPrivProtocol:  preserveString(plan.SNMPPrivProtocol),
+		SNMPPrivPassword:  preserveString(plan.SNMPPrivPassword),
 	}
 
 	// ETag retry loop
@@ -432,26 +398,23 @@ func mapNetworkDeviceToState(d *client.NetworkDevice, state *networkDeviceModel)
 	state.ID = types.StringValue(d.ID)
 	state.Name = types.StringValue(d.Name)
 	state.IPAddress = types.StringValue(d.IPAddress)
-	if d.PollingHostID != nil {
-		state.PollingHostID = types.StringValue(*d.PollingHostID)
-	} else {
-		state.PollingHostID = types.StringNull()
-	}
-	state.DeviceType = types.StringValue(d.DeviceType)
+	state.PollingHostID = optionalString(d.PollingHostID)
+	// Attributes with a schema default keep the planned value when the API
+	// leaves them null, so a v2c device doesn't wipe its defaults to null.
+	state.DeviceType = stringOrKeep(d.DeviceType, state.DeviceType)
 	state.PollingInterval = types.Int64Value(int64(d.PollingInterval))
-	state.SNMPVersion = types.StringValue(d.SNMPVersion)
-	// snmp_username is returned by API (not sensitive)
-	state.SNMPUsername = types.StringValue(d.SNMPUsername)
-	state.SNMPSecurityLevel = types.StringValue(d.SNMPSecurityLevel)
-	state.SNMPAuthProtocol = types.StringValue(d.SNMPAuthProtocol)
-	state.SNMPPrivProtocol = types.StringValue(d.SNMPPrivProtocol)
+	state.SNMPVersion = stringOrKeep(d.SNMPVersion, state.SNMPVersion)
+	state.SNMPUsername = stringOrKeep(d.SNMPUsername, state.SNMPUsername)
+	state.SNMPSecurityLevel = stringOrKeep(d.SNMPSecurityLevel, state.SNMPSecurityLevel)
+	state.SNMPAuthProtocol = stringOrKeep(d.SNMPAuthProtocol, state.SNMPAuthProtocol)
+	state.SNMPPrivProtocol = stringOrKeep(d.SNMPPrivProtocol, state.SNMPPrivProtocol)
 	// Write-only fields (community, auth_password, priv_password) are NOT
 	// returned by the API, so we preserve whatever the user set in config.
 	state.MaintenanceMode = types.BoolValue(d.MaintenanceMode)
-	state.Status = types.StringValue(d.Status)
-	state.Vendor = types.StringValue(d.Vendor)
-	state.Model = types.StringValue(d.Model)
-	state.SysName = types.StringValue(d.SysName)
+	state.Status = optionalString(d.Status)
+	state.Vendor = optionalString(d.Vendor)
+	state.Model = optionalString(d.Model)
+	state.SysName = optionalString(d.SysName)
 	state.LastPolledAt = optionalString(d.LastPolledAt)
 	state.CreatedAt = types.StringValue(d.CreatedAt)
 	state.UpdatedAt = types.StringValue(d.UpdatedAt)

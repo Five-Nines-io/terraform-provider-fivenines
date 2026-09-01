@@ -226,17 +226,10 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 	id := state.ID.ValueInt64()
 
 	// Update metadata with ETag retry on 412
-	name := plan.Name.ValueString()
 	input := client.UpdateWorkflowInput{
-		Name: &name,
-	}
-	if !plan.Description.IsNull() && !plan.Description.IsUnknown() {
-		v := plan.Description.ValueString()
-		input.Description = &v
-	}
-	if !plan.IntervalSeconds.IsNull() && !plan.IntervalSeconds.IsUnknown() {
-		v := plan.IntervalSeconds.ValueInt64()
-		input.IntervalSeconds = &v
+		Name:            preserveString(plan.Name),
+		Description:     preserveString(plan.Description),
+		IntervalSeconds: preserveInt64(plan.IntervalSeconds),
 	}
 
 	var workflow *client.Workflow
@@ -349,21 +342,14 @@ func (r *workflowResource) publishGraph(ctx context.Context, workflowID int64, g
 func mapWorkflowToState(w *client.Workflow, state *workflowModel) {
 	state.ID = types.Int64Value(w.ID)
 	state.Name = types.StringValue(w.Name)
-	state.Description = types.StringValue(w.Description)
-	if w.IntervalSeconds != nil {
-		state.IntervalSeconds = types.Int64Value(*w.IntervalSeconds)
-	} else {
-		state.IntervalSeconds = types.Int64Null()
-	}
+	state.Description = optionalString(w.Description)
+	state.IntervalSeconds = optionalInt64(w.IntervalSeconds)
 	state.Status = types.StringValue(w.Status)
 	state.Active = types.BoolValue(w.Status == "active")
-	state.TriggerType = types.StringValue(w.TriggerType)
-	state.TriggerTypeLabel = types.StringValue(w.TriggerTypeLabel)
-	if w.PublishedVersionID != nil {
-		state.PublishedVersionID = types.Int64Value(*w.PublishedVersionID)
-	} else {
-		state.PublishedVersionID = types.Int64Null()
-	}
+	// Both are derived from the published graph, so a draft has neither.
+	state.TriggerType = optionalString(w.TriggerType)
+	state.TriggerTypeLabel = optionalString(w.TriggerTypeLabel)
+	state.PublishedVersionID = optionalInt64(w.PublishedVersionID)
 	state.NextEvaluationAt = optionalString(w.NextEvaluationAt)
 	state.LastEvaluationAt = optionalString(w.LastEvaluationAt)
 	state.CreatedAt = types.StringValue(w.CreatedAt)

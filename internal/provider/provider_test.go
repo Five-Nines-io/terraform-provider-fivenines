@@ -72,9 +72,11 @@ func checkDestroyed(resourceType string, get func(ctx context.Context, id string
 	}
 }
 
-// regexpMissingRequired matches the plan-time diagnostic the cross-field config
-// validators raise, so the tests assert the failure happens before any apply.
-var regexpMissingRequired = regexp.MustCompile(`Missing Required Attribute`)
+// regexpMissingRequired matches the plan-time diagnostic the cross-field checks
+// raise, so the tests assert the failure happens before any apply. Case
+// insensitive: tasks go through ValidateConfig (#8) and uptime monitors through
+// ConfigValidators, and the two word their summary differently.
+var regexpMissingRequired = regexp.MustCompile(`(?i)missing required attribute`)
 
 // providerConfig prefixes every test configuration. The API key comes from the
 // environment so it never reaches a test fixture.

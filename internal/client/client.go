@@ -171,14 +171,16 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 	for {
 		done, err := gone(pollCtx)
 		switch {
+		// A successful "it is gone" wins even if the deadline expired on the
+		// same tick: the deletion did finish.
+		case err == nil && done:
+			return nil
 		case ctx.Err() != nil:
 			return ctx.Err()
 		case pollCtx.Err() != nil:
 			return fmt.Errorf("timed out after %s waiting for the deletion to complete", timeout)
 		case err != nil:
 			return err
-		case done:
-			return nil
 		}
 
 		select {

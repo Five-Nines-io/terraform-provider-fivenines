@@ -384,24 +384,38 @@ func (c *Client) DeleteTask(ctx context.Context, id string) error {
 	return nil
 }
 
-func (c *Client) PauseTask(ctx context.Context, id string) error {
+func (c *Client) PauseTask(ctx context.Context, id string) (*Task, error) {
 	return c.taskAction(ctx, id, "pause")
 }
 
-func (c *Client) ResumeTask(ctx context.Context, id string) error {
+func (c *Client) ResumeTask(ctx context.Context, id string) (*Task, error) {
 	return c.taskAction(ctx, id, "resume")
 }
 
-func (c *Client) taskAction(ctx context.Context, id string, action string) error {
+// taskAction posts to a task action endpoint and returns the task the API renders
+// back. Resume recomputes expected_ping_at server-side, so the response body is the
+// only accurate view of the task afterwards.
+func (c *Client) taskAction(ctx context.Context, id string, action string) (*Task, error) {
 	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/tasks/%s/%s", id, action), nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return parseError(resp)
+		return nil, parseError(resp)
 	}
-	resp.Body.Close()
-	return nil
+
+	var result struct {
+		Task Task `json:"task"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	// A 200 that decodes to an empty or mismatched task would otherwise be written
+	// straight to state, blanking the resource ID.
+	if result.Task.ID != id {
+		return nil, fmt.Errorf("task %s returned an unexpected task id %q", action, result.Task.ID)
+	}
+	return &result.Task, nil
 }
 
 // --- Workflows ---

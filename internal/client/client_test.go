@@ -282,17 +282,159 @@ func TestClient_CreateTask(t *testing.T) {
 	}
 }
 
+func TestClient_UpdateTask_ScheduleType(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PATCH" || r.URL.Path != "/api/v1/tasks/task-uuid" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decoding request body: %v", err)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"task": map[string]interface{}{
+				"id":               "task-uuid",
+				"name":             "nightly-backup",
+				"schedule_type":    "interval",
+				"interval_seconds": 300,
+				"status":           "active",
+				"created_at":       "2026-01-01T00:00:00Z",
+				"updated_at":       "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	scheduleType := "interval"
+	interval := int64(300)
+	task, err := c.UpdateTask(context.Background(), "task-uuid", `"task-etag"`, UpdateTaskInput{
+		ScheduleType:    &scheduleType,
+		IntervalSeconds: &interval,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gotBody["task"]["schedule_type"]; got != "interval" {
+		t.Errorf("expected schedule_type interval in request body, got %v", got)
+	}
+	if task.ScheduleType != "interval" {
+		t.Errorf("expected schedule_type interval, got %s", task.ScheduleType)
+	}
+}
+
+// A nil ScheduleType must stay out of the PATCH body entirely — sending an empty
+// schedule_type would fail the API's enum validation on an unrelated update.
+func TestClient_UpdateTask_OmitsUnsetScheduleType(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decoding request body: %v", err)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"task": map[string]interface{}{
+				"id":            "task-uuid",
+				"name":          "renamed",
+				"schedule_type": "cron",
+				"schedule":      "0 2 * * *",
+				"status":        "active",
+				"created_at":    "2026-01-01T00:00:00Z",
+				"updated_at":    "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	name := "renamed"
+	if _, err := c.UpdateTask(context.Background(), "task-uuid", "", UpdateTaskInput{Name: &name}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, present := gotBody["task"]["schedule_type"]; present {
+		t.Errorf("expected schedule_type to be omitted, got %v", gotBody["task"]["schedule_type"])
+	}
+}
+
 func TestClient_PauseTask(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || r.URL.Path != "/api/v1/tasks/task-uuid/pause" {
 			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
 		}
-		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"task": map[string]interface{}{
+				"id":            "task-uuid",
+				"name":          "nightly-backup",
+				"schedule_type": "cron",
+				"schedule":      "0 2 * * *",
+				"status":        "paused",
+				"created_at":    "2026-01-01T00:00:00Z",
+				"updated_at":    "2026-01-01T00:00:00Z",
+			},
+		})
 	})
 
-	err := c.PauseTask(context.Background(), "task-uuid")
+	task, err := c.PauseTask(context.Background(), "task-uuid")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status != "paused" {
+		t.Errorf("expected status paused, got %s", task.Status)
+	}
+}
+
+// A 200 whose body is empty or names a different task must not reach state — writing
+// it would blank the resource ID and lose Terraform's handle on the live task.
+func TestClient_TaskAction_RejectsMismatchedTask(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body map[string]interface{}
+	}{
+		{"null task", map[string]interface{}{"task": nil}},
+		{"empty object", map[string]interface{}{}},
+		{"different id", map[string]interface{}{"task": map[string]interface{}{"id": "someone-elses-task"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(tc.body)
+			})
+
+			task, err := c.PauseTask(context.Background(), "task-uuid")
+			if err == nil {
+				t.Fatalf("expected an error, got task %+v", task)
+			}
+			if task != nil {
+				t.Errorf("expected nil task alongside the error, got %+v", task)
+			}
+		})
+	}
+}
+
+// Resume recomputes expected_ping_at server-side. The client must return the
+// rendered task so state does not keep the pre-resume deadline.
+func TestClient_ResumeTask_ReturnsRecomputedTask(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/tasks/task-uuid/resume" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"task": map[string]interface{}{
+				"id":               "task-uuid",
+				"name":             "nightly-backup",
+				"schedule_type":    "cron",
+				"schedule":         "0 2 * * *",
+				"status":           "active",
+				"expected_ping_at": "2026-02-01T02:00:00Z",
+				"created_at":       "2026-01-01T00:00:00Z",
+				"updated_at":       "2026-02-01T00:00:00Z",
+			},
+		})
+	})
+
+	task, err := c.ResumeTask(context.Background(), "task-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if task.Status != "active" {
+		t.Errorf("expected status active, got %s", task.Status)
+	}
+	if task.ExpectedPingAt == nil || *task.ExpectedPingAt != "2026-02-01T02:00:00Z" {
+		t.Errorf("expected recomputed expected_ping_at from the resume response, got %v", task.ExpectedPingAt)
 	}
 }
 

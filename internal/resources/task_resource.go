@@ -3,7 +3,9 @@ package resources
 import (
 	"context"
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -16,8 +18,9 @@ import (
 )
 
 var (
-	_ resource.Resource                = &taskResource{}
-	_ resource.ResourceWithImportState = &taskResource{}
+	_ resource.Resource                   = &taskResource{}
+	_ resource.ResourceWithImportState    = &taskResource{}
+	_ resource.ResourceWithValidateConfig = &taskResource{}
 )
 
 type taskResource struct {
@@ -68,13 +71,10 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Required:    true,
 			},
 			"schedule_type": schema.StringAttribute{
-				Description: `Schedule type: "cron" or "interval". Changing this forces recreation.`,
+				Description: `Schedule type: "cron" or "interval".`,
 				Required:    true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("cron", "interval"),
-				},
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"paused": schema.BoolAttribute{
@@ -83,12 +83,20 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Computed:    true,
 			},
 			"schedule": schema.StringAttribute{
-				Description: "Cron expression (required when schedule_type is cron).",
+				Description: `Cron expression. Required while schedule_type is "cron". Once schedule_type is "interval" you may drop it, but the API keeps the last value rather than clearing it.`,
 				Optional:    true,
+				Computed:    true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"interval_seconds": schema.Int64Attribute{
-				Description: "Interval in seconds (required when schedule_type is interval).",
+				Description: `Interval in seconds. Required while schedule_type is "interval". Once schedule_type is "cron" you may drop it, but the API keeps the last value rather than clearing it.`,
 				Optional:    true,
+				Computed:    true,
+				Validators: []validator.Int64{
+					int64validator.AtLeast(1),
+				},
 			},
 			"grace_period_minutes": schema.Int64Attribute{
 				Description: "Grace period in minutes before marking as missed.",
@@ -155,6 +163,48 @@ func (r *taskResource) Configure(_ context.Context, req resource.ConfigureReques
 	r.client = c
 }
 
+func (r *taskResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var config taskModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(validateTaskSchedule(config)...)
+}
+
+// validateTaskSchedule enforces the schedule_type-specific required fields.
+// schedule_type is updatable in place, so a config can move between the two shapes
+// and each half has to bring its own field along.
+func validateTaskSchedule(config taskModel) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	// Unknown values only resolve at apply time, so leave them to the API.
+	if config.ScheduleType.IsNull() || config.ScheduleType.IsUnknown() {
+		return diags
+	}
+
+	switch config.ScheduleType.ValueString() {
+	case "cron":
+		if config.Schedule.IsNull() {
+			diags.AddAttributeError(
+				path.Root("schedule"),
+				"Missing required attribute",
+				`"schedule" is required when "schedule_type" is "cron".`,
+			)
+		}
+	case "interval":
+		if config.IntervalSeconds.IsNull() {
+			diags.AddAttributeError(
+				path.Root("interval_seconds"),
+				"Missing required attribute",
+				`"interval_seconds" is required when "schedule_type" is "interval".`,
+			)
+		}
+	}
+
+	return diags
+}
+
 func (r *taskResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan taskModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -194,11 +244,20 @@ func (r *taskResource) Create(ctx context.Context, req resource.CreateRequest, r
 
 	// Handle pause state after creation
 	if !plan.Paused.IsNull() && plan.Paused.ValueBool() {
-		if err := r.client.PauseTask(ctx, task.ID); err != nil {
-			resp.Diagnostics.AddError("Error pausing task after creation", err.Error())
+		paused, err := r.client.PauseTask(ctx, task.ID)
+		if err != nil {
+			// The task already exists server-side. Terraform taints a resource whose
+			// Create errors with state set, so the next apply replaces it — that still
+			// beats writing no state, which would leak this task and create a second
+			// one on the next apply.
+			mapTaskToState(task, &plan)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+			resp.Diagnostics.AddError("Error pausing task after creation",
+				"The task was created but could not be paused. It is recorded as tainted, so the next apply "+
+					"will destroy and recreate it (issuing a new ping_key).\n\n"+err.Error())
 			return
 		}
-		task.Status = "paused"
+		task = paused
 	}
 
 	mapTaskToState(task, &plan)
@@ -242,8 +301,10 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	id := state.ID.ValueString()
 
 	name := plan.Name.ValueString()
+	scheduleType := plan.ScheduleType.ValueString()
 	input := client.UpdateTaskInput{
-		Name: &name,
+		Name:         &name,
+		ScheduleType: &scheduleType,
 	}
 	if !plan.Schedule.IsNull() && !plan.Schedule.IsUnknown() {
 		v := plan.Schedule.ValueString()
@@ -290,17 +351,19 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		wantPaused := plan.Paused.ValueBool()
 		isPaused := task.Status == "paused"
 		if wantPaused && !isPaused {
-			if err := r.client.PauseTask(ctx, id); err != nil {
+			paused, err := r.client.PauseTask(ctx, id)
+			if err != nil {
 				resp.Diagnostics.AddError("Error pausing task", err.Error())
 				return
 			}
-			task.Status = "paused"
+			task = paused
 		} else if !wantPaused && isPaused {
-			if err := r.client.ResumeTask(ctx, id); err != nil {
+			resumed, err := r.client.ResumeTask(ctx, id)
+			if err != nil {
 				resp.Diagnostics.AddError("Error resuming task", err.Error())
 				return
 			}
-			task.Status = "active"
+			task = resumed
 		}
 	}
 
@@ -335,7 +398,11 @@ func mapTaskToState(t *client.Task, state *taskModel) {
 	state.Name = types.StringValue(t.Name)
 	state.ScheduleType = types.StringValue(t.ScheduleType)
 	state.Paused = types.BoolValue(t.Status == "paused")
-	state.Schedule = types.StringValue(t.Schedule)
+	if t.Schedule != "" {
+		state.Schedule = types.StringValue(t.Schedule)
+	} else {
+		state.Schedule = types.StringNull()
+	}
 	if t.IntervalSeconds != nil {
 		state.IntervalSeconds = types.Int64Value(*t.IntervalSeconds)
 	} else {

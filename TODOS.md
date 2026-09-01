@@ -1,41 +1,10 @@
 # Terraform Provider TODOs
 
 > API-parity work (the 2026-09 server catch-up) lives on GitHub — issues #5–#26,
-> tracking in #27. This file keeps only the cross-cutting engineering debt that
-> isn't tied to a single parity issue.
-
-## P0 — Must fix
-
-### Unset semantics / nil vs empty
-- `omitempty` + nil suppression means users can't reliably clear optional fields;
-  reads normalize API null to `""` → plan drift
-- The 2026-09 API made this contractual instead of incidental:
-  - Status page items: explicit `null` CLEARS a label, omission preserves it — the
-    spec warns Go clients specifically. And `Items []StatusPageItem ... omitempty`
-    makes emptying a page impossible (#12)
-  - `dns_expected_records`: `[]` normalises to null server-side, but `omitempty`
-    can never send it (#9)
-  - Instance secrets: blank-means-keep + `_set` booleans (#7)
-- Fix: pointer types + explicit-empty handling per field, map API null →
-  `types.StringNull()`
-
-### JSON execution_graph canonicalization
-- `execution_graph_json` is a raw string attribute. Harmless *today* only because
-  Read never fetches the graph back, so state always holds the user's own string
-- Becomes an active false-diff bug the moment #10 lands (Read will return
-  server-normalized JSON vs the user's formatting)
-- Fix: semantic-equality JSON type (`jsontypes.Normalized` from
-  terraform-plugin-framework-jsontypes), shipped with or before #10
+> tracking in #27. Cross-cutting engineering debt is tracked in #29. This file
+> keeps what neither of those owns.
 
 ## P1 — Should fix
-
-### Acceptance tests (TF_ACC)
-- Zero end-to-end coverage; unit fixtures encode API shapes and drift silently
-  with the server
-- Proof it matters: the pagination meta rename (#5) passed unit tests for months —
-  the fixtures still speak `count`/`total`/`offset`
-- Needs: dedicated staging org + `FIVENINES_API_KEY` in GitHub Secrets,
-  terraform-plugin-testing full CRUD lifecycle tests
 
 ### Uptime monitor pause/resume discards the API response
 - `uptimeMonitorAction` closes the body and returns only `error`, then
@@ -46,22 +15,28 @@
   response instead of patching Status
 - Found by: /ship pre-landing review, 2026-09-01
 
-### Instance delete 202 handling
-- `DELETE /instances` returns 202 (async); provider drops state immediately
-  without polling
-- Fix: poll `GET /instances/:id` until 404 or timeout (matters for
-  delete-then-recreate of the same host)
+## Blocked on infrastructure
 
-## P2 — Nice to have
+### Enable the acceptance test workflow
 
-### Cross-field validation
-- Tasks are done (#8): `ValidateConfig` in `task_resource.go` enforces cron ⇒ `schedule`
-  and interval ⇒ `interval_seconds`, plus `interval_seconds >= 1` to match the model
-- Uptime monitors still have none: https ⇒ `url`, tcp ⇒ `hostname`+`port`,
-  dns ⇒ `dns_record_type`
-- The API 422s cleanly, so this is UX only: fail at plan time, not apply time
+The suite (`internal/provider/*_test.go`) and its CI job
+(`.github/workflows/acceptance.yml`) are in place, but they need somewhere to
+run:
 
-### ping_key security model
-- Task `ping_key` is Computed + Sensitive but persisted in state; the API still
-  returns it on every read
-- Decide: acceptable for the threat model, or move to write-only/ephemeral
+- [ ] Create a dedicated staging organisation — the tests create and destroy
+      real instances, monitors, tasks, devices, status pages and workflows
+- [ ] Add its key as the `FIVENINES_API_KEY` GitHub secret; optionally set the
+      `FIVENINES_BASE_URL` repository variable to target a non-production API
+
+Until the secret exists the workflow reports that it skipped instead of
+failing, so nothing is red in the meantime — but nothing is covered either, and
+that is exactly how the pagination meta drift (#5) survived for months.
+
+## Closed
+
+The six cross-cutting items this file used to carry (#29) are done and live in
+git history rather than here: unset/null semantics, `execution_graph` JSON
+canonicalization, the acceptance suite, async 202 delete handling, cross-field
+config validators — the task half via #8's `ValidateConfig`, uptime monitors via
+`ConfigValidators` — and the `ping_key` security model (decided: it stays in
+state, documented under "Secrets in state" in the README).

@@ -19,13 +19,13 @@
   - Instance secrets: blank-means-keep + `_set` booleans (#7)
 - Fix: pointer types + explicit-empty handling per field, map API null →
   `types.StringNull()`
-- Newly load-bearing on uptime monitors: #9 made `protocol` updatable, so switching
-  protocol leaves the previous protocol's attributes stale server-side. Optional-only
-  attributes (`port`, `keyword`, `dns_record_type`, `custom_body`, `content_type`,
-  `custom_headers`) are never cleared, so the API keeps echoing a value the plan says
-  is null → "Provider produced inconsistent result after apply" on, say, dns ⇒ https.
-  Fix alongside the audit above, ideally by sending explicit nulls for attributes the
-  target protocol does not use
+- ~~Protocol switches leave the old protocol's attributes stale~~: fixed in #9 — the
+  seven protocol-scoped fields on `UpdateUptimeMonitorInput` lost `omitempty`, so a nil
+  pointer marshals as JSON null and the server clears them. Residual: those attributes
+  are Optional-only and cannot absorb a server-side null, so `protocolForbidden` rejects
+  a leftover attribute at plan time rather than letting the apply fail with "Provider
+  produced inconsistent result after apply". The create-side half of the asymmetry is
+  still open under "Create and Update disagree about protocol-scoped fields" (P1)
 
 ### JSON execution_graph canonicalization
 - `execution_graph_json` is a raw string attribute. Harmless *today* only because
@@ -40,8 +40,9 @@
 ### Acceptance tests (TF_ACC)
 - Zero end-to-end coverage; unit fixtures encode API shapes and drift silently
   with the server
-- Proof it matters: the pagination meta rename (#5) passed unit tests for months —
-  the fixtures still speak `count`/`total`/`offset`
+- Proof it matters: the pagination meta rename (#5) passed unit tests for months
+  because the fixtures still spoke `count`/`total`/`offset`. #9 rewrote them, but
+  nothing stops the next rename doing exactly the same thing
 - The `UptimeMonitorStatus` payload shape landed in #9 unverified against a live
   API (no spec in-repo, no key in CI) — decoding is defensive, but only an
   acceptance test proves the field names
@@ -74,6 +75,19 @@
   holds a known null — the same inconsistent-result error, on the first apply
 - Unverified either way; needs one live create to confirm before changing
 - Found by: /ship adversarial review, 2026-09-01
+
+### probe_region_ids is clearable on the wire but not in state
+- `buildUpdateInput` makes `ProbeRegionIDs` non-nil even when empty (#9), so
+  `probe_region_ids = []` reaches the API. `mapToState` then maps it with a plain
+  `types.ListValueFrom` and has none of the pinned-empty handling every other
+  clearable attribute got — `dns_expected_records`, `custom_headers`, `keyword`,
+  `custom_body` and `content_type` all switch on `isEmptyList` / `isEmptyMap` /
+  `isKnownEmptyString`
+- If the API echoes null for a monitor with no regions, the plan holds a known `[]`
+  while state takes null → "Provider produced inconsistent result after apply"
+- Unverified against a live API; no acceptance test covers it. Fix: give it the same
+  three-way switch as `dns_expected_records`
+- Found by: /document-release doc review, 2026-09-01
 
 ### Index filters are trusted without verification
 - The data source forwards `status`/`protocol`/`q`/`updated_since`/`order`/
@@ -134,8 +148,8 @@
 - **Pagination truncated every list at 100** (most of #5) — fixed in #9.
   `PaginationMeta` now decodes the real envelope (`current_page` / `total_pages` /
   `total_count` / `per_page`); all 8 list loops route through one `morePages`
-  helper that stops on an empty page FIRST and only trusts the counters when
-  `total_pages > 0`, so the next envelope rename over-fetches by one page instead
+  helper that trusts the counters only when `total_pages > 0` and otherwise walks
+  until an empty page, so an unreadable envelope over-fetches by one page instead
   of silently dropping rows. Fixtures were rewritten to the real shape — the old
   ones encoded the old envelope, which is how this stayed green for months.
   **Still open in #5: `ListIntegrations` is a single un-paginated GET, so

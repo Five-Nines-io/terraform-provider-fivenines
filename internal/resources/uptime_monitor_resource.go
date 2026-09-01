@@ -151,7 +151,7 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Computed:    true,
 			},
 			"port": schema.Int64Attribute{
-				Description: "Port to monitor (required for tcp protocol).",
+				Description: "Port to monitor (required for tcp protocol). 1-65535.",
 				Optional:    true,
 				Validators: []validator.Int64{
 					int64validator.Between(1, 65535),
@@ -197,7 +197,7 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Default:     int64default.StaticInt64(1),
 			},
 			"keyword": schema.StringAttribute{
-				Description: "Keyword that must be present in the response body.",
+				Description: "Keyword that must be present in the response body. https only: the other protocols reject it at plan time.",
 				Optional:    true,
 			},
 			"keyword_absent": schema.BoolAttribute{
@@ -249,20 +249,22 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				},
 			},
 			"custom_headers": schema.MapAttribute{
-				Description: "Custom HTTP headers as key-value pairs. Marked sensitive: this is where " +
-					"an Authorization header for the monitored endpoint goes.",
+				Description: "Custom HTTP headers as key-value pairs. https only: the other protocols " +
+					"reject it at plan time. Marked sensitive: this is where an Authorization " +
+					"header for the monitored endpoint goes.",
 				Optional:    true,
 				Sensitive:   true,
 				ElementType: types.StringType,
 			},
 			"custom_body": schema.StringAttribute{
-				Description: "Request body for POST requests (https/custom_http protocols).",
+				Description: "Request body for POST requests. https only: the other protocols reject it at plan time.",
 				Optional:    true,
 				Sensitive:   true,
 			},
 			"content_type": schema.StringAttribute{
-				Description: `Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain".`,
-				Optional:    true,
+				Description: `Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain". ` +
+					`https only: the other protocols reject it at plan time.`,
+				Optional: true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("application/json", "application/x-www-form-urlencoded", "text/plain"),
 				},
@@ -274,7 +276,7 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Default:     int64default.StaticInt64(1),
 			},
 			"status": schema.StringAttribute{
-				Description: "Current status.",
+				Description: `Current status: "unknown", "up", "down", "paused" or "recovering".`,
 				Computed:    true,
 			},
 			"ssl_expires_at": schema.StringAttribute{

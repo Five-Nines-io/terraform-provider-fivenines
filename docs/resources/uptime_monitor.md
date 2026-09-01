@@ -84,9 +84,9 @@ resource "fivenines_uptime_monitor" "staging" {
 ### Optional
 
 - `confirmation_count` (Number) Number of probe regions that must confirm status (quorum).
-- `content_type` (String) Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain".
-- `custom_body` (String, Sensitive) Request body for POST requests (https/custom_http protocols).
-- `custom_headers` (Map of String, Sensitive) Custom HTTP headers as key-value pairs. Marked sensitive: this is where an Authorization header for the monitored endpoint goes.
+- `content_type` (String) Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain". https only: the other protocols reject it at plan time.
+- `custom_body` (String, Sensitive) Request body for POST requests. https only: the other protocols reject it at plan time.
+- `custom_headers` (Map of String, Sensitive) Custom HTTP headers as key-value pairs. https only: the other protocols reject it at plan time. Marked sensitive: this is where an Authorization header for the monitored endpoint goes.
 - `dns_expected_records` (List of String) Expected DNS record values. Up to 50 records of at most 2048 characters each. Set to an empty list to pin no expectation.
 - `dns_record_type` (String) DNS record type to query (required for dns protocol): "A", "AAAA", "CNAME", "MX", "TXT", "NS".
 - `expected_status_codes` (List of Number) Expected HTTP status codes. 1-50 codes, each between 100 and 599. An empty list is rejected because it would match nothing. Defaults to [200] on create; because the value is computed, removing it later keeps the last applied codes rather than resetting to the default.
@@ -95,10 +95,10 @@ resource "fivenines_uptime_monitor" "staging" {
 - `http_method` (String) HTTP method: "GET", "HEAD", or "POST".
 - `interval_seconds` (Number) Check interval in seconds.
 - `ip_version` (String) IP version: "auto", "ipv4", or "ipv6".
-- `keyword` (String) Keyword that must be present in the response body.
+- `keyword` (String) Keyword that must be present in the response body. https only: the other protocols reject it at plan time.
 - `keyword_absent` (Boolean) If true, alert when the keyword IS found (absent check).
 - `paused` (Boolean) Whether the monitor is paused.
-- `port` (Number) Port to monitor (required for tcp protocol).
+- `port` (Number) Port to monitor (required for tcp protocol). 1-65535.
 - `probe_region_ids` (List of Number) Probe region IDs to check from. Defaults to all active regions.
 - `recovery_count` (Number) Number of successful checks required to transition from down to up.
 - `timeout_seconds` (Number) Timeout in seconds (max 15).
@@ -112,5 +112,5 @@ resource "fivenines_uptime_monitor" "staging" {
 - `last_error` (String) Last error message.
 - `next_check_at` (String) Next scheduled check time.
 - `ssl_expires_at` (String) SSL certificate expiration date.
-- `status` (String) Current status.
+- `status` (String) Current status: "unknown", "up", "down", "paused" or "recovering".
 - `updated_at` (String) Last update timestamp.

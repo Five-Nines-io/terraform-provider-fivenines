@@ -264,14 +264,26 @@ func (r *instanceResource) Delete(ctx context.Context, req resource.DeleteReques
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting instance", map[string]interface{}{"id": state.ID.ValueString()})
+	id := state.ID.ValueString()
+	tflog.Debug(ctx, "Deleting instance", map[string]interface{}{"id": id})
 
-	err := r.client.DeleteInstance(ctx, state.ID.ValueString())
+	accepted, err := r.client.DeleteInstance(ctx, id)
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting instance", err.Error())
+		return
+	}
+
+	// A 202 means the host is only queued for deletion. Returning here would
+	// drop it from state while it still exists, which breaks replacing a host
+	// in a single apply.
+	if accepted {
+		tflog.Debug(ctx, "Waiting for asynchronous instance deletion", map[string]interface{}{"id": id})
+		if err := r.client.WaitForInstanceDeletion(ctx, id, client.AsyncDeletionTimeout); err != nil {
+			resp.Diagnostics.AddError("Error waiting for instance deletion", err.Error())
+		}
 	}
 }
 

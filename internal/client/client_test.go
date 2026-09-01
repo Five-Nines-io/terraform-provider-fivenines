@@ -3,11 +3,14 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // newTestServer creates a test HTTP server with the given handler.
@@ -165,9 +168,12 @@ func TestClient_DeleteInstance_202(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
-	err := c.DeleteInstance(context.Background(), "abc-123")
+	accepted, err := c.DeleteInstance(context.Background(), "abc-123")
 	if err != nil {
 		t.Fatalf("expected no error for 202, got: %v", err)
+	}
+	if !accepted {
+		t.Error("expected 202 to report an asynchronous deletion")
 	}
 }
 
@@ -176,9 +182,90 @@ func TestClient_DeleteInstance_204(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	err := c.DeleteInstance(context.Background(), "abc-123")
+	accepted, err := c.DeleteInstance(context.Background(), "abc-123")
 	if err != nil {
 		t.Fatalf("expected no error for 204, got: %v", err)
+	}
+	if accepted {
+		t.Error("expected 204 to report a completed deletion")
+	}
+}
+
+func TestClient_WaitForInstanceDeletion(t *testing.T) {
+	var gets int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Still there for the first two polls, gone afterwards.
+		if atomic.AddInt32(&gets, 1) <= 2 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"instance": map[string]interface{}{
+					"id":         "abc-123",
+					"created_at": "2026-01-01T00:00:00Z",
+					"updated_at": "2026-01-01T00:00:00Z",
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not found"})
+	})
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := atomic.LoadInt32(&gets); got != 3 {
+		t.Errorf("expected to poll until the 404, got %d requests", got)
+	}
+}
+
+func TestClient_WaitForInstanceDeletion_Timeout(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instance": map[string]interface{}{
+				"id":         "abc-123",
+				"created_at": "2026-01-01T00:00:00Z",
+				"updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected a timeout error while the instance still exists")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected a timeout error, got: %v", err)
+	}
+}
+
+func TestClient_WaitForInstanceDeletion_PropagatesErrors(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "boom"})
+	})
+
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second)
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("expected the 500 to surface, got: %v", err)
+	}
+}
+
+func TestClient_WaitForInstanceDeletion_HonoursCancellation(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instance": map[string]interface{}{
+				"id":         "abc-123",
+				"created_at": "2026-01-01T00:00:00Z",
+				"updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := c.WaitForInstanceDeletion(ctx, "abc-123", 30*time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
 	}
 }
 
@@ -937,9 +1024,12 @@ func TestClient_DeleteNetworkDevice_202(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 	})
-	err := c.DeleteNetworkDevice(context.Background(), "dev-uuid")
+	accepted, err := c.DeleteNetworkDevice(context.Background(), "dev-uuid")
 	if err != nil {
 		t.Fatalf("expected no error for 202, got: %v", err)
+	}
+	if !accepted {
+		t.Error("expected 202 to report an asynchronous deletion")
 	}
 }
 

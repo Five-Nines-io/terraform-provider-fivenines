@@ -379,14 +379,24 @@ func (r *networkDeviceResource) Delete(ctx context.Context, req resource.DeleteR
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting network device", map[string]interface{}{"id": state.ID.ValueString()})
+	id := state.ID.ValueString()
+	tflog.Debug(ctx, "Deleting network device", map[string]interface{}{"id": id})
 
-	err := r.client.DeleteNetworkDevice(ctx, state.ID.ValueString())
+	accepted, err := r.client.DeleteNetworkDevice(ctx, id)
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting network device", err.Error())
+		return
+	}
+
+	// Device deletion is asynchronous too (202).
+	if accepted {
+		tflog.Debug(ctx, "Waiting for asynchronous network device deletion", map[string]interface{}{"id": id})
+		if err := r.client.WaitForNetworkDeviceDeletion(ctx, id, client.AsyncDeletionTimeout); err != nil {
+			resp.Diagnostics.AddError("Error waiting for network device deletion", err.Error())
+		}
 	}
 }
 

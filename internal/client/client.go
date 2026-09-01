@@ -142,6 +142,60 @@ func decodeResponse(resp *http.Response, target interface{}) error {
 	return json.NewDecoder(resp.Body).Decode(target)
 }
 
+// AsyncDeletionTimeout bounds the wait for a 202-accepted deletion to complete.
+const AsyncDeletionTimeout = 5 * time.Minute
+
+// deletionDone turns the result of a "does it still exist?" GET into a poll
+// verdict: a 404 means the record is gone, anything else is a real error.
+func deletionDone(err error) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
+		return true, nil
+	}
+	return false, err
+}
+
+// waitForDeletion polls gone until it reports the record has disappeared,
+// backing off between attempts. Deletions that answer 202 are asynchronous: the
+// record outlives the response, so returning early breaks a delete followed by
+// a recreate of the same host in one apply.
+func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(context.Context) (bool, error)) error {
+	pollCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	const maxInterval = 5 * time.Second
+	interval := 500 * time.Millisecond
+
+	for {
+		done, err := gone(pollCtx)
+		switch {
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case pollCtx.Err() != nil:
+			return fmt.Errorf("timed out after %s waiting for the deletion to complete", timeout)
+		case err != nil:
+			return err
+		case done:
+			return nil
+		}
+
+		select {
+		case <-time.After(interval):
+		case <-pollCtx.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("timed out after %s waiting for the deletion to complete", timeout)
+		}
+
+		if interval *= 2; interval > maxInterval {
+			interval = maxInterval
+		}
+	}
+}
+
 // listResponse is a generic list response envelope.
 type listResponse struct {
 	Meta PaginationMeta `json:"meta"`
@@ -239,17 +293,28 @@ func (c *Client) UpdateInstance(ctx context.Context, id string, etag string, inp
 	return &result.Instance, nil
 }
 
-func (c *Client) DeleteInstance(ctx context.Context, id string) error {
+// DeleteInstance deletes an instance. It reports whether the API accepted the
+// deletion asynchronously (202), in which case the host still exists until the
+// backend finishes tearing it down — see WaitForInstanceDeletion.
+func (c *Client) DeleteInstance(ctx context.Context, id string) (accepted bool, err error) {
 	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/instances/"+id, nil, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// 202 Accepted (async) or 204 No Content
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
-		return parseError(resp)
+		return false, parseError(resp)
 	}
 	resp.Body.Close()
-	return nil
+	return resp.StatusCode == http.StatusAccepted, nil
+}
+
+// WaitForInstanceDeletion polls the instance until the API 404s it.
+func (c *Client) WaitForInstanceDeletion(ctx context.Context, id string, timeout time.Duration) error {
+	return waitForDeletion(ctx, timeout, func(ctx context.Context) (bool, error) {
+		_, _, err := c.GetInstance(ctx, id)
+		return deletionDone(err)
+	})
 }
 
 func (c *Client) EnableInstance(ctx context.Context, id string) error {
@@ -915,17 +980,26 @@ func (c *Client) UpdateNetworkDevice(ctx context.Context, id string, etag string
 	return &result.NetworkDevice, nil
 }
 
-func (c *Client) DeleteNetworkDevice(ctx context.Context, id string) error {
+// DeleteNetworkDevice deletes a network device. Like instances, the API tears
+// devices down asynchronously and answers 202 — see WaitForNetworkDeviceDeletion.
+func (c *Client) DeleteNetworkDevice(ctx context.Context, id string) (accepted bool, err error) {
 	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/network_devices/"+id, nil, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
-	// Delete returns 202 Accepted (async deletion)
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
-		return parseError(resp)
+		return false, parseError(resp)
 	}
 	resp.Body.Close()
-	return nil
+	return resp.StatusCode == http.StatusAccepted, nil
+}
+
+// WaitForNetworkDeviceDeletion polls the device until the API 404s it.
+func (c *Client) WaitForNetworkDeviceDeletion(ctx context.Context, id string, timeout time.Duration) error {
+	return waitForDeletion(ctx, timeout, func(ctx context.Context) (bool, error) {
+		_, _, err := c.GetNetworkDevice(ctx, id)
+		return deletionDone(err)
+	})
 }
 
 func (c *Client) EnterMaintenanceNetworkDevice(ctx context.Context, id string) error {

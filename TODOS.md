@@ -76,18 +76,6 @@
 - Unverified either way; needs one live create to confirm before changing
 - Found by: /ship adversarial review, 2026-09-01
 
-### probe_region_ids is clearable on the wire but not in state
-- `buildUpdateInput` makes `ProbeRegionIDs` non-nil even when empty (#9), so
-  `probe_region_ids = []` reaches the API. `mapToState` then maps it with a plain
-  `types.ListValueFrom` and has none of the pinned-empty handling every other
-  clearable attribute got — `dns_expected_records`, `custom_headers`, `keyword`,
-  `custom_body` and `content_type` all switch on `isEmptyList` / `isEmptyMap` /
-  `isKnownEmptyString`
-- If the API echoes null for a monitor with no regions, the plan holds a known `[]`
-  while state takes null → "Provider produced inconsistent result after apply"
-- Unverified against a live API; no acceptance test covers it. Fix: give it the same
-  three-way switch as `dns_expected_records`
-- Found by: /document-release doc review, 2026-09-01
 
 ### Index filters are trusted without verification
 - The data source forwards `status`/`protocol`/`q`/`updated_since`/`order`/

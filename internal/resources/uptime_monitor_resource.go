@@ -808,9 +808,18 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	state.ExpectedStatusCodes = codesList
 
 	// Convert probe_region_ids
-	regionsList, d := types.ListValueFrom(ctx, types.Int64Type, m.ProbeRegionIDs)
-	diags.Append(d...)
-	state.ProbeRegionIDs = regionsList
+	switch {
+	case len(m.ProbeRegionIDs) > 0:
+		regionsList, d := types.ListValueFrom(ctx, types.Int64Type, m.ProbeRegionIDs)
+		diags.Append(d...)
+		state.ProbeRegionIDs = regionsList
+	case isEmptyList(state.ProbeRegionIDs):
+		// probe_region_ids became explicitly clearable alongside the other
+		// protocol-scoped attributes, so it needs the same pinned-empty rule they
+		// got: a config of [] must not read back as null.
+	default:
+		state.ProbeRegionIDs = types.ListNull(types.Int64Type)
+	}
 
 	// DNS fields
 	if m.DNSRecordType != "" {

@@ -584,3 +584,19 @@ func TestMapUptimeMonitorToState_KeywordEmptyVsNull(t *testing.T) {
 		t.Errorf("expected healthy, got %q", state.Keyword.ValueString())
 	}
 }
+
+func TestMapUptimeMonitorToState_ProbeRegionIDsPinnedEmpty(t *testing.T) {
+	// Sending [] is only half of clearable; the read side has to preserve it too,
+	// or the plan re-proposes [] and every apply fails.
+	state := &uptimeMonitorModel{ProbeRegionIDs: types.ListValueMust(types.Int64Type, []attr.Value{})}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid"}, state)
+	if state.ProbeRegionIDs.IsNull() {
+		t.Error("an explicitly empty probe_region_ids must stay [], not become null")
+	}
+
+	state = &uptimeMonitorModel{ProbeRegionIDs: types.ListNull(types.Int64Type)}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", ProbeRegionIDs: []int64{1, 2}}, state)
+	if len(state.ProbeRegionIDs.Elements()) != 2 {
+		t.Errorf("expected 2 regions, got %v", state.ProbeRegionIDs.Elements())
+	}
+}

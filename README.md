@@ -151,10 +151,29 @@ terraform import fivenines_status_page.public <status-page-id>
 ```bash
 make build      # compile the provider
 make test       # run unit tests
-make testacc    # run acceptance tests (requires API key)
+make testacc    # run acceptance tests (requires API key, see below)
 make install    # install locally for testing
 make docs       # regenerate registry documentation
 ```
+
+### Acceptance tests
+
+Unit tests pin the shapes the provider *believes* the API has. Only the
+acceptance tests notice when the API changes underneath it, so they drive real
+Terraform plans and applies against a live organisation:
+
+```bash
+TF_ACC=1 FIVENINES_API_KEY=fn_live_... make testacc
+```
+
+They need the `terraform` CLI on `PATH`, and they skip entirely without
+`TF_ACC` — `make test` stays offline and fast. **Point them at a dedicated
+staging organisation**: every test creates and destroys real instances,
+monitors, tasks, devices, status pages and workflows. Resource names are
+randomised with a `tf-acc-` prefix so parallel runs do not collide.
+
+CI runs them nightly and on pushes to `main` (never on pull requests — a fork
+must not see the key) via `.github/workflows/acceptance.yml`.
 
 ## Publishing
 
@@ -173,3 +192,7 @@ This triggers GoReleaser to build cross-platform binaries, sign checksums with G
 |--------|-------------|
 | `GPG_PRIVATE_KEY` | ASCII-armored GPG private key for signing releases |
 | `GPG_PASSPHRASE` | Passphrase for the GPG key |
+| `FIVENINES_API_KEY` | API key for the staging organisation the acceptance tests run against. Until it is set, the acceptance workflow reports that it skipped instead of failing. |
+
+An optional `FIVENINES_BASE_URL` repository *variable* points the acceptance
+tests at a non-production API.

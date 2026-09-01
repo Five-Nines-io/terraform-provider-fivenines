@@ -12,3 +12,11 @@ resource "fivenines_task" "heartbeat" {
   interval_seconds     = 300
   grace_period_minutes = 10
 }
+
+# Pausing suspends alerting without destroying the task or rotating its ping key.
+resource "fivenines_task" "seasonal_import" {
+  name             = "Seasonal Import"
+  schedule_type    = "interval"
+  interval_seconds = 3600
+  paused           = true
+}

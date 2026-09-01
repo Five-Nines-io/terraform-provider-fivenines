@@ -3,10 +3,14 @@
 ## P0 — Must fix (Codex + Eng Review findings)
 
 ### Immutable fields need RequiresReplace
-- `schedule_type` on tasks and `protocol` on uptime monitors are configurable in schema but not in the Update input models
-- Changing them in .tf files currently no-ops or causes infinite drift
-- Fix: add `stringplanmodifier.RequiresReplace()` to these fields
+- `protocol` on uptime monitors is configurable in schema but not in the Update input model
+- Changing it in .tf files currently no-ops or causes infinite drift
+- Fix: confirm whether the API permits `protocol` on PATCH. If it does, wire it into
+  `UpdateUptimeMonitorInput` (as was done for task `schedule_type`); if not, add
+  `stringplanmodifier.RequiresReplace()`
 - Found by: Codex outside voice review, 2026-03-25
+- Task `schedule_type` half resolved 2026-09-01: the API shares its permit list between
+  create and update, so it is now updatable in place (#8)
 
 ### JSON execution_graph canonicalization
 - Raw JSON string attribute will produce false diffs on every plan due to key ordering/whitespace
@@ -31,6 +35,15 @@
 - Use terraform-plugin-testing framework for full CRUD lifecycle tests
 - Priority: HIGH — Codex flagged deferring these as the wrong call
 
+### Uptime monitor pause/resume discards the API response
+- `uptimeMonitorAction` (client.go) closes the body and returns only `error`, then
+  `uptime_monitor_resource.go` hand-patches `monitor.Status`
+- The server renders the updated monitor back from both `pause!` and `resume!`, so state
+  keeps stale computed fields until the next refresh
+- Fix: mirror what `taskAction` now does — return `(*UptimeMonitor, error)` and assign the
+  response instead of patching Status
+- Found by: /ship pre-landing review, 2026-09-01 (task-side equivalent fixed in #8)
+
 ### Instance delete 202 handling
 - `DELETE /instances` returns 202 Accepted (async deletion)
 - Provider drops state immediately without polling for completion
@@ -39,9 +52,9 @@
 ## P2 — Nice to have
 
 ### Cross-field validation
-- No validation for schedule_type-specific required fields (cron needs schedule, interval needs interval_seconds)
 - No protocol-specific required field validation on uptime monitors (dns needs dns_record_type, etc.)
-- Fix: implement `ConfigValidators` on each resource
+- Fix: implement `ValidateConfig` on the resource, as `task_resource.go` now does for
+  schedule_type (cron needs schedule, interval needs interval_seconds)
 
 ### ping_key security model
 - Task ping_key is marked `Sensitive: true` but persisted in state file

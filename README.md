@@ -111,6 +111,28 @@ The API key can be provided in three ways (in order of precedence):
 2. Environment variable: `export FIVENINES_API_KEY="fn_live_..."`
 3. Terraform variable: `var.fivenines_api_key`
 
+## Secrets in state
+
+Terraform stores every attribute it manages in the state file, including the
+sensitive ones. `Sensitive: true` only redacts a value in CLI output; it does
+not keep it out of state. Treat the state file as a secret and use a backend
+that encrypts it and restricts who can read it.
+
+What ends up there:
+
+| Attribute | Why it is in state |
+|-----------|--------------------|
+| `fivenines_task.ping_key` / `ping_url` | Server-generated; the API returns the key on every read, and `ping_url` embeds it. This is what you feed to the job that pings the task, so it has to be readable as an output. |
+| `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
+
+`ping_key` is deliberately kept in state rather than made write-only or
+ephemeral. It is a Computed value: Terraform's write-only arguments apply to
+values the practitioner supplies, not to ones the server generates, so there is
+no mechanism that would let the provider expose a usable `ping_url` without
+persisting it. The exposure is bounded — the key authenticates heartbeat pings
+for a single task and grants no read access and no ability to change
+configuration. If a key leaks, replace the task to issue a new one.
+
 ## Importing existing resources
 
 Import resources created outside of Terraform:

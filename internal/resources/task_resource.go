@@ -122,13 +122,14 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Computed:    true,
 			},
 			"ping_key": schema.StringAttribute{
-				Description: "Ping key for sending heartbeats.",
+				Description: "Ping key for sending heartbeats. Server-generated, and stored in Terraform state — treat the state file as a secret. The key only authenticates heartbeats for this one task; replace the task to issue a new one.",
 				Computed:    true,
 				Sensitive:   true,
 			},
 			"ping_url": schema.StringAttribute{
-				Description: "URL to send heartbeat pings to.",
+				Description: "URL to send heartbeat pings to. Embeds ping_key, so it carries the same secret and the same state-file caveat.",
 				Computed:    true,
+				Sensitive:   true,
 			},
 			"expected_ping_at": schema.StringAttribute{
 				Description: "Next expected ping time.",

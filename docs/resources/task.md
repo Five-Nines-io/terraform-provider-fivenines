@@ -61,7 +61,7 @@ resource "fivenines_task" "seasonal_import" {
 - `id` (String) Unique identifier (UUID).
 - `last_ping_at` (String) Last ping received time.
 - `monitoring_status` (String) Monitoring status.
-- `ping_key` (String, Sensitive) Ping key for sending heartbeats.
-- `ping_url` (String) URL to send heartbeat pings to.
+- `ping_key` (String, Sensitive) Ping key for sending heartbeats. Server-generated, and stored in Terraform state — treat the state file as a secret. The key only authenticates heartbeats for this one task; replace the task to issue a new one.
+- `ping_url` (String, Sensitive) URL to send heartbeat pings to. Embeds ping_key, so it carries the same secret and the same state-file caveat.
 - `status` (String) Current status.
 - `updated_at` (String) Last update timestamp.

@@ -21,6 +21,8 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_integrations` | Configured notification integrations |
 | `fivenines_workflow_runs` | Workflow execution history |
 | `fivenines_incidents` | Incidents triggered by workflows |
+| `fivenines_uptime_monitors` | Uptime monitors, filterable by status, protocol, search text and update time |
+| `fivenines_uptime_monitor_status` | Lightweight current status of a single uptime monitor |
 
 ## Quick Start
 

@@ -84,6 +84,7 @@ type CreateTaskInput struct {
 // UpdateTaskInput is the request body for updating a task.
 type UpdateTaskInput struct {
 	Name               *string `json:"name,omitempty"`
+	ScheduleType       *string `json:"schedule_type,omitempty"`
 	Schedule           *string `json:"schedule,omitempty"`
 	IntervalSeconds    *int64  `json:"interval_seconds,omitempty"`
 	GracePeriodMinutes *int    `json:"grace_period_minutes,omitempty"`

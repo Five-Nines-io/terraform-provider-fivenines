@@ -143,6 +143,107 @@ func TestMapTaskToState_NilIntervalSeconds(t *testing.T) {
 	}
 }
 
+func TestMapTaskToState_EmptyScheduleIsNull(t *testing.T) {
+	interval := int64(300)
+	task := &client.Task{
+		ID:              "task-uuid",
+		Name:            "interval-task",
+		ScheduleType:    "interval",
+		Status:          "active",
+		Schedule:        "",
+		IntervalSeconds: &interval,
+		CreatedAt:       "2026-01-01T00:00:00Z",
+		UpdatedAt:       "2026-01-01T00:00:00Z",
+	}
+
+	state := &taskModel{}
+	mapTaskToState(task, state)
+
+	if !state.Schedule.IsNull() {
+		t.Errorf("expected schedule to be null for interval task, got %v", state.Schedule)
+	}
+}
+
+// --- validateTaskSchedule ---
+
+func TestValidateTaskSchedule_CronRequiresSchedule(t *testing.T) {
+	diags := validateTaskSchedule(taskModel{
+		ScheduleType: types.StringValue("cron"),
+		Schedule:     types.StringNull(),
+	})
+
+	if !diags.HasError() {
+		t.Fatal("expected an error when schedule_type is cron without schedule")
+	}
+	if got := diags.Errors()[0].Detail(); got != `"schedule" is required when "schedule_type" is "cron".` {
+		t.Errorf("unexpected detail: %s", got)
+	}
+}
+
+func TestValidateTaskSchedule_IntervalRequiresIntervalSeconds(t *testing.T) {
+	diags := validateTaskSchedule(taskModel{
+		ScheduleType:    types.StringValue("interval"),
+		IntervalSeconds: types.Int64Null(),
+	})
+
+	if !diags.HasError() {
+		t.Fatal("expected an error when schedule_type is interval without interval_seconds")
+	}
+}
+
+func TestValidateTaskSchedule_Valid(t *testing.T) {
+	cron := validateTaskSchedule(taskModel{
+		ScheduleType: types.StringValue("cron"),
+		Schedule:     types.StringValue("0 2 * * *"),
+	})
+	if cron.HasError() {
+		t.Errorf("expected no error for a valid cron task, got %v", cron.Errors())
+	}
+
+	interval := validateTaskSchedule(taskModel{
+		ScheduleType:    types.StringValue("interval"),
+		IntervalSeconds: types.Int64Value(300),
+	})
+	if interval.HasError() {
+		t.Errorf("expected no error for a valid interval task, got %v", interval.Errors())
+	}
+}
+
+func TestValidateTaskSchedule_NullScheduleType(t *testing.T) {
+	diags := validateTaskSchedule(taskModel{})
+	if diags.HasError() {
+		t.Errorf("expected no error for a null schedule_type, got %v", diags.Errors())
+	}
+}
+
+// A schedule sourced from another resource is unknown at validate time; the API
+// gets the last word rather than the plan failing outright.
+func TestValidateTaskSchedule_UnknownValuesDeferred(t *testing.T) {
+	unknownType := validateTaskSchedule(taskModel{
+		ScheduleType: types.StringUnknown(),
+		Schedule:     types.StringNull(),
+	})
+	if unknownType.HasError() {
+		t.Errorf("expected no error for unknown schedule_type, got %v", unknownType.Errors())
+	}
+
+	unknownSchedule := validateTaskSchedule(taskModel{
+		ScheduleType: types.StringValue("cron"),
+		Schedule:     types.StringUnknown(),
+	})
+	if unknownSchedule.HasError() {
+		t.Errorf("expected no error for unknown schedule, got %v", unknownSchedule.Errors())
+	}
+
+	unknownInterval := validateTaskSchedule(taskModel{
+		ScheduleType:    types.StringValue("interval"),
+		IntervalSeconds: types.Int64Unknown(),
+	})
+	if unknownInterval.HasError() {
+		t.Errorf("expected no error for unknown interval_seconds, got %v", unknownInterval.Errors())
+	}
+}
+
 // --- mapWorkflowToState ---
 
 func TestMapWorkflowToState(t *testing.T) {

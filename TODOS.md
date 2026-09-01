@@ -37,6 +37,15 @@
 - Needs: dedicated staging org + `FIVENINES_API_KEY` in GitHub Secrets,
   terraform-plugin-testing full CRUD lifecycle tests
 
+### Uptime monitor pause/resume discards the API response
+- `uptimeMonitorAction` closes the body and returns only `error`, then
+  `uptime_monitor_resource.go` hand-patches `monitor.Status`
+- The server renders the updated monitor back from both `pause!` and `resume!`, so
+  state keeps stale computed fields until the next refresh
+- Fix: mirror `taskAction` (#8) — return `(*UptimeMonitor, error)` and assign the
+  response instead of patching Status
+- Found by: /ship pre-landing review, 2026-09-01
+
 ### Instance delete 202 handling
 - `DELETE /instances` returns 202 (async); provider drops state immediately
   without polling
@@ -46,8 +55,10 @@
 ## P2 — Nice to have
 
 ### Cross-field validation
-- No `ConfigValidators` anywhere: cron ⇒ `schedule`, interval ⇒ `interval_seconds`,
-  https ⇒ `url`, tcp ⇒ `hostname`+`port`, dns ⇒ `dns_record_type`
+- Tasks are done (#8): `ValidateConfig` in `task_resource.go` enforces cron ⇒ `schedule`
+  and interval ⇒ `interval_seconds`, plus `interval_seconds >= 1` to match the model
+- Uptime monitors still have none: https ⇒ `url`, tcp ⇒ `hostname`+`port`,
+  dns ⇒ `dns_record_type`
 - The API 422s cleanly, so this is UX only: fail at plan time, not apply time
 
 ### ping_key security model

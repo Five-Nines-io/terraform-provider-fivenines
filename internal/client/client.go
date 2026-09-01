@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -133,6 +134,12 @@ func parseError(resp *http.Response) error {
 	if err := json.Unmarshal(body, apiErr); err != nil {
 		apiErr.Message = string(body)
 	}
+	// A body keyed differently ({"message": ...}, {"detail": ...}) unmarshals
+	// without error and leaves both fields empty, which renders as a diagnostic
+	// with no reason at all. Fall back to the raw body.
+	if apiErr.Message == "" && len(apiErr.Errors) == 0 {
+		apiErr.Message = strings.TrimSpace(string(body))
+	}
 	return apiErr
 }
 
@@ -145,6 +152,37 @@ func decodeResponse(resp *http.Response, target interface{}) error {
 // listResponse is a generic list response envelope.
 type listResponse struct {
 	Meta PaginationMeta `json:"meta"`
+}
+
+// maxListPages bounds every paginated walk, so a server that never stops
+// returning full pages degrades to an error rather than an unbounded request
+// stream inside a terraform plan.
+const maxListPages = 1000
+
+// morePages reports whether a walk should continue after a page that returned n
+// items. n is the page size as served, before any client-side filtering — a page
+// of entirely filtered-out records still means there is more to fetch.
+//
+// The empty-page check comes first deliberately: it is the only guard that
+// survives a change to the meta envelope. The last such change renamed every
+// field, the old struct decoded to zeros, `count+offset >= total` became
+// `0 >= 0`, and all eight list loops truncated at 100 rows while their unit
+// tests stayed green. Requiring TotalPages > 0 before trusting the counters
+// means an unrecognised meta now over-fetches by one page instead of silently
+// dropping data.
+func morePages(n int, meta PaginationMeta, page int) (bool, error) {
+	if page >= maxListPages {
+		return false, fmt.Errorf("pagination exceeded %d pages; the index meta looks inconsistent", maxListPages)
+	}
+	if meta.TotalPages > 0 {
+		// A recognised meta is authoritative, including across an empty middle
+		// page: stopping early would return a short list with no error, and wrong
+		// data is worse than an extra round trip.
+		return meta.CurrentPage < meta.TotalPages, nil
+	}
+	// Unrecognised envelope — every field decoded to zero. Walk until an empty
+	// page rather than trusting counters we clearly cannot read.
+	return n > 0, nil
 }
 
 // --- Instances ---
@@ -170,7 +208,11 @@ func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Instances...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Instances), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -303,7 +345,11 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Tasks...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Tasks), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -446,7 +492,11 @@ func (c *Client) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 				all = append(all, w)
 			}
 		}
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Workflows), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -477,7 +527,11 @@ func (c *Client) ListWorkflowRuns(ctx context.Context, workflowID int64) ([]Work
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Runs...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Runs), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -616,11 +670,15 @@ func (c *Client) PublishWorkflowVersion(ctx context.Context, workflowID int64, v
 
 // --- Uptime Monitors ---
 
-func (c *Client) ListUptimeMonitors(ctx context.Context) ([]UptimeMonitor, error) {
+func (c *Client) ListUptimeMonitors(ctx context.Context, opts *ListUptimeMonitorsOptions) ([]UptimeMonitor, error) {
+	query := uptimeMonitorFilters(opts)
+	query.Set("per_page", "100")
+
 	var all []UptimeMonitor
 	page := 1
 	for {
-		path := fmt.Sprintf("/api/v1/uptime_monitors?page=%d&per_page=100", page)
+		query.Set("page", strconv.Itoa(page))
+		path := "/api/v1/uptime_monitors?" + query.Encode()
 		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 		if err != nil {
 			return nil, err
@@ -637,7 +695,11 @@ func (c *Client) ListUptimeMonitors(ctx context.Context) ([]UptimeMonitor, error
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.UptimeMonitors...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.UptimeMonitors), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -646,7 +708,7 @@ func (c *Client) ListUptimeMonitors(ctx context.Context) ([]UptimeMonitor, error
 }
 
 func (c *Client) GetUptimeMonitor(ctx context.Context, id string) (*UptimeMonitor, string, error) {
-	resp, err := c.doRequest(ctx, "GET", "/api/v1/uptime_monitors/"+id, nil, nil)
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/uptime_monitors/"+url.PathEscape(id), nil, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -689,7 +751,7 @@ func (c *Client) UpdateUptimeMonitor(ctx context.Context, id string, etag string
 		headers["If-Match"] = etag
 	}
 	body := map[string]interface{}{"uptime_monitor": input}
-	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/uptime_monitors/"+id, body, headers)
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/uptime_monitors/"+url.PathEscape(id), body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -707,7 +769,7 @@ func (c *Client) UpdateUptimeMonitor(ctx context.Context, id string, etag string
 }
 
 func (c *Client) DeleteUptimeMonitor(ctx context.Context, id string) error {
-	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/uptime_monitors/"+id, nil, nil)
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/uptime_monitors/"+url.PathEscape(id), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -718,24 +780,111 @@ func (c *Client) DeleteUptimeMonitor(ctx context.Context, id string) error {
 	return nil
 }
 
-func (c *Client) PauseUptimeMonitor(ctx context.Context, id string) error {
+// PauseUptimeMonitor suspends checks for a monitor. It is idempotent: pausing an
+// already paused monitor succeeds and returns it unchanged.
+func (c *Client) PauseUptimeMonitor(ctx context.Context, id string) (*UptimeMonitor, error) {
 	return c.uptimeMonitorAction(ctx, id, "pause")
 }
 
-func (c *Client) ResumeUptimeMonitor(ctx context.Context, id string) error {
+// ResumeUptimeMonitor restarts checks for a paused monitor. It is idempotent.
+func (c *Client) ResumeUptimeMonitor(ctx context.Context, id string) (*UptimeMonitor, error) {
 	return c.uptimeMonitorAction(ctx, id, "resume")
 }
 
-func (c *Client) uptimeMonitorAction(ctx context.Context, id string, action string) error {
-	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/uptime_monitors/%s/%s", id, action), nil, nil)
+func (c *Client) uptimeMonitorAction(ctx context.Context, id string, action string) (*UptimeMonitor, error) {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/uptime_monitors/%s/%s", url.PathEscape(id), action), nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return parseError(resp)
+		return nil, parseError(resp)
 	}
-	resp.Body.Close()
-	return nil
+
+	var result struct {
+		UptimeMonitor UptimeMonitor `json:"uptime_monitor"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	// A 200 that decodes to an empty or mismatched monitor would otherwise be
+	// written straight to state, blanking the resource ID.
+	if result.UptimeMonitor.ID != id {
+		return nil, fmt.Errorf("uptime monitor %s returned an unexpected monitor id %q", action, result.UptimeMonitor.ID)
+	}
+	return &result.UptimeMonitor, nil
+}
+
+// GetUptimeMonitorStatus fetches the lightweight status payload for a monitor.
+func (c *Client) GetUptimeMonitorStatus(ctx context.Context, id string) (*UptimeMonitorStatus, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/uptime_monitors/"+url.PathEscape(id)+"/status", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	var status UptimeMonitorStatus
+	if err := json.Unmarshal(unwrapEnvelope(body, "uptime_monitor_status", "uptime_monitor"), &status); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	// Unknown fields decode silently, so a shape we do not recognise would yield a
+	// zero-valued status that reads downstream as a healthy, unpaused monitor.
+	// Refuse it instead: a loud error beats a wrong status in Terraform state.
+	// Both fields empty means nothing was recognised; a null status alone is a
+	// legitimate payload and stays the API's to report.
+	if status.ID == "" && status.Status == "" {
+		return nil, fmt.Errorf("unrecognized status payload for uptime monitor %s", id)
+	}
+	if status.ID != "" && status.ID != id {
+		return nil, fmt.Errorf("status for uptime monitor %s returned an unexpected monitor id %q", id, status.ID)
+	}
+	return &status, nil
+}
+
+// unwrapEnvelope returns the object nested under the first of keys present in
+// body, or body itself when it is already the bare object. The status endpoint
+// is newer than the rest of the API and its wrapper key is not pinned by the
+// published spec, so accept either shape. A body that matches neither falls
+// through to the caller, which rejects it rather than decoding an empty value.
+func unwrapEnvelope(body []byte, keys ...string) []byte {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body
+	}
+	for _, key := range keys {
+		if v, ok := envelope[key]; ok && len(v) > 0 && v[0] == '{' {
+			return v
+		}
+	}
+	return body
+}
+
+// uptimeMonitorFilters renders the index filter options as query parameters.
+func uptimeMonitorFilters(opts *ListUptimeMonitorsOptions) url.Values {
+	query := url.Values{}
+	if opts == nil {
+		return query
+	}
+	for key, value := range map[string]string{
+		"status":        opts.Status,
+		"protocol":      opts.Protocol,
+		"q":             opts.Query,
+		"updated_since": opts.UpdatedSince,
+		"order":         opts.Order,
+		"direction":     opts.Direction,
+	} {
+		if value != "" {
+			query.Set(key, value)
+		}
+	}
+	return query
 }
 
 // --- Probe Regions ---
@@ -801,7 +950,11 @@ func (c *Client) ListIncidents(ctx context.Context) ([]Incident, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Incidents...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Incidents), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -849,7 +1002,11 @@ func (c *Client) ListNetworkDevices(ctx context.Context) ([]NetworkDevice, error
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.NetworkDevices...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.NetworkDevices), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -974,7 +1131,11 @@ func (c *Client) ListStatusPages(ctx context.Context) ([]StatusPage, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.StatusPages...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.StatusPages), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++

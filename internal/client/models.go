@@ -3,10 +3,17 @@ package client
 import "fmt"
 
 // PaginationMeta represents pagination metadata in list responses.
+//
+// These are the current field names. The envelope used to be count/total/offset;
+// when it changed, the old struct decoded to all zeros and the `count+offset >=
+// total` exit condition read `0 >= 0`, so every list in the provider silently
+// stopped after one page. See morePages for the guard that keeps a future rename
+// from truncating instead of erroring.
 type PaginationMeta struct {
-	Count  int `json:"count"`
-	Total  int `json:"total"`
-	Offset int `json:"offset"`
+	CurrentPage int `json:"current_page"`
+	TotalPages  int `json:"total_pages"`
+	TotalCount  int `json:"total_count"`
+	PerPage     int `json:"per_page"`
 }
 
 // Instance represents a monitored server (Host).
@@ -146,6 +153,11 @@ type CreateWorkflowVersionInput struct {
 	ExecutionGraph map[string]interface{} `json:"execution_graph"`
 }
 
+// StatusPaused is the status both tasks and uptime monitors report while their
+// checks are suspended. Uptime monitors report one of: unknown, up, down,
+// paused, recovering.
+const StatusPaused = "paused"
+
 // UptimeMonitor represents an uptime monitoring check.
 type UptimeMonitor struct {
 	ID                  string  `json:"id"` // UUID
@@ -209,27 +221,78 @@ type CreateUptimeMonitorInput struct {
 }
 
 // UpdateUptimeMonitorInput is the request body for updating an uptime monitor.
+//
+// The protocol-scoped fields below deliberately carry NO omitempty: they are
+// always serialised, and a nil pointer marshals as an explicit JSON null, which
+// the API reads as "clear this". That is what makes `protocol` updatable in
+// place — switching an https monitor to tcp has to actively clear `keyword` and
+// `content_type`, or the server keeps echoing values the Terraform plan says are
+// null and every apply fails with "Provider produced inconsistent result after
+// apply". Terraform resolves Optional-only attributes before calling Update, so
+// the plan value is always known by the time it reaches this struct.
+//
+// The remaining fields keep omitempty: they are Computed or defaulted, so the
+// plan always carries a concrete value and there is nothing to clear.
 type UpdateUptimeMonitorInput struct {
-	Name                *string            `json:"name,omitempty"`
-	URL                 *string            `json:"url,omitempty"`
-	Hostname            *string            `json:"hostname,omitempty"`
-	Port                *int               `json:"port,omitempty"`
-	HTTPMethod          *string            `json:"http_method,omitempty"`
-	IPVersion           *string            `json:"ip_version,omitempty"`
-	IntervalSeconds     *int               `json:"interval_seconds,omitempty"`
-	TimeoutSeconds      *int               `json:"timeout_seconds,omitempty"`
-	ConfirmationCount   *int               `json:"confirmation_count,omitempty"`
-	Keyword             *string            `json:"keyword,omitempty"`
-	KeywordAbsent       *bool              `json:"keyword_absent,omitempty"`
-	FollowRedirects     *bool              `json:"follow_redirects,omitempty"`
-	ExpectedStatusCodes []int              `json:"expected_status_codes,omitempty"`
-	ProbeRegionIDs      []int64            `json:"probe_region_ids,omitempty"`
-	DNSRecordType       *string            `json:"dns_record_type,omitempty"`
-	DNSExpectedRecords  []string           `json:"dns_expected_records,omitempty"`
-	CustomHeaders       *map[string]string `json:"custom_headers,omitempty"`
-	CustomBody          *string            `json:"custom_body,omitempty"`
-	ContentType         *string            `json:"content_type,omitempty"`
-	RecoveryCount       *int               `json:"recovery_count,omitempty"`
+	Name                *string `json:"name,omitempty"`
+	Protocol            *string `json:"protocol,omitempty"`
+	URL                 *string `json:"url,omitempty"`
+	Hostname            *string `json:"hostname,omitempty"`
+	HTTPMethod          *string `json:"http_method,omitempty"`
+	IPVersion           *string `json:"ip_version,omitempty"`
+	IntervalSeconds     *int    `json:"interval_seconds,omitempty"`
+	TimeoutSeconds      *int    `json:"timeout_seconds,omitempty"`
+	ConfirmationCount   *int    `json:"confirmation_count,omitempty"`
+	KeywordAbsent       *bool   `json:"keyword_absent,omitempty"`
+	FollowRedirects     *bool   `json:"follow_redirects,omitempty"`
+	ExpectedStatusCodes []int   `json:"expected_status_codes,omitempty"`
+	RecoveryCount       *int    `json:"recovery_count,omitempty"`
+
+	// Explicitly clearable for the same reason as the protocol-scoped fields
+	// below: `probe_region_ids = []` is a legal config with no validator to
+	// shield it, and omitting the key would leave the server's old region set in
+	// place while the plan holds a known [].
+	ProbeRegionIDs *[]int64 `json:"probe_region_ids,omitempty"`
+
+	// Protocol-scoped: nil marshals as null and clears the stored value.
+	Port               *int               `json:"port"`
+	Keyword            *string            `json:"keyword"`
+	DNSRecordType      *string            `json:"dns_record_type"`
+	DNSExpectedRecords *[]string          `json:"dns_expected_records"`
+	CustomHeaders      *map[string]string `json:"custom_headers"`
+	CustomBody         *string            `json:"custom_body"`
+	ContentType        *string            `json:"content_type"`
+}
+
+// UptimeMonitorStatus is the lightweight payload returned by
+// GET /api/v1/uptime_monitors/{id}/status. It is intended as a cheap polling
+// target: it carries the liveness fields only, not the monitor configuration.
+//
+// Every optional field is a pointer so that a key the API omits decodes to nil
+// and surfaces as null rather than as a misleading zero value.
+type UptimeMonitorStatus struct {
+	ID           string  `json:"id"`
+	Status       string  `json:"status"`
+	LastCheckAt  *string `json:"last_check_at"`
+	NextCheckAt  *string `json:"next_check_at"`
+	LastError    *string `json:"last_error"`
+	SSLExpiresAt *string `json:"ssl_expires_at"`
+}
+
+// ListUptimeMonitorsOptions holds the index filters accepted by
+// GET /api/v1/uptime_monitors. Zero-valued fields are not sent.
+type ListUptimeMonitorsOptions struct {
+	// Status filters by current status: unknown, up, down, paused or recovering.
+	Status string
+	// Protocol filters by protocol: https, tcp, icmp or dns.
+	Protocol string
+	// Query is a free-text search over name, url and hostname (the "q" param).
+	Query string
+	// UpdatedSince returns only monitors updated at or after this ISO8601 timestamp.
+	UpdatedSince string
+	// Order is the column to sort by, Direction is "asc" or "desc".
+	Order     string
+	Direction string
 }
 
 // ProbeRegion represents a monitoring probe region.

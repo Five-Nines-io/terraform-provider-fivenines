@@ -347,9 +347,9 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	}
 
 	// Handle pause/resume state change
-	if !plan.Paused.IsNull() {
+	if !plan.Paused.IsNull() && !plan.Paused.IsUnknown() {
 		wantPaused := plan.Paused.ValueBool()
-		isPaused := task.Status == "paused"
+		isPaused := task.Status == client.StatusPaused
 		if wantPaused && !isPaused {
 			paused, err := r.client.PauseTask(ctx, id)
 			if err != nil {
@@ -397,7 +397,7 @@ func mapTaskToState(t *client.Task, state *taskModel) {
 	state.ID = types.StringValue(t.ID)
 	state.Name = types.StringValue(t.Name)
 	state.ScheduleType = types.StringValue(t.ScheduleType)
-	state.Paused = types.BoolValue(t.Status == "paused")
+	state.Paused = types.BoolValue(t.Status == client.StatusPaused)
 	if t.Schedule != "" {
 		state.Schedule = types.StringValue(t.Schedule)
 	} else {

@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-jsontypes/jsontypes"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -27,20 +28,20 @@ type workflowResource struct {
 }
 
 type workflowModel struct {
-	ID                 types.Int64  `tfsdk:"id"`
-	Name               types.String `tfsdk:"name"`
-	Description        types.String `tfsdk:"description"`
-	IntervalSeconds    types.Int64  `tfsdk:"interval_seconds"`
-	ExecutionGraphJSON types.String `tfsdk:"execution_graph_json"`
-	Active             types.Bool   `tfsdk:"active"`
-	Status             types.String `tfsdk:"status"`
-	TriggerType        types.String `tfsdk:"trigger_type"`
-	TriggerTypeLabel   types.String `tfsdk:"trigger_type_label"`
-	PublishedVersionID types.Int64  `tfsdk:"published_version_id"`
-	NextEvaluationAt   types.String `tfsdk:"next_evaluation_at"`
-	LastEvaluationAt   types.String `tfsdk:"last_evaluation_at"`
-	CreatedAt          types.String `tfsdk:"created_at"`
-	UpdatedAt          types.String `tfsdk:"updated_at"`
+	ID                 types.Int64          `tfsdk:"id"`
+	Name               types.String         `tfsdk:"name"`
+	Description        types.String         `tfsdk:"description"`
+	IntervalSeconds    types.Int64          `tfsdk:"interval_seconds"`
+	ExecutionGraphJSON jsontypes.Normalized `tfsdk:"execution_graph_json"`
+	Active             types.Bool           `tfsdk:"active"`
+	Status             types.String         `tfsdk:"status"`
+	TriggerType        types.String         `tfsdk:"trigger_type"`
+	TriggerTypeLabel   types.String         `tfsdk:"trigger_type_label"`
+	PublishedVersionID types.Int64          `tfsdk:"published_version_id"`
+	NextEvaluationAt   types.String         `tfsdk:"next_evaluation_at"`
+	LastEvaluationAt   types.String         `tfsdk:"last_evaluation_at"`
+	CreatedAt          types.String         `tfsdk:"created_at"`
+	UpdatedAt          types.String         `tfsdk:"updated_at"`
 }
 
 func NewWorkflowResource() resource.Resource {
@@ -77,8 +78,9 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Computed:    true,
 			},
 			"execution_graph_json": schema.StringAttribute{
-				Description: "JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value.",
+				Description: "JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value. Compared semantically, so whitespace and key ordering do not produce a diff.",
 				Optional:    true,
+				CustomType:  jsontypes.NormalizedType{},
 			},
 			"active": schema.BoolAttribute{
 				Description: "Whether the workflow is active. Set to true to activate, false to pause. Requires a published version.",
@@ -251,14 +253,21 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 		break
 	}
 
-	// If execution_graph_json changed, create a new version and publish
+	// If execution_graph_json changed, create a new version and publish. The
+	// comparison is semantic: reformatting the graph must not cut a new version.
 	if !plan.ExecutionGraphJSON.IsNull() && !plan.ExecutionGraphJSON.IsUnknown() {
-		graphChanged := state.ExecutionGraphJSON.IsNull() ||
-			plan.ExecutionGraphJSON.ValueString() != state.ExecutionGraphJSON.ValueString()
+		graphChanged := true
+		if !state.ExecutionGraphJSON.IsNull() {
+			unchanged, d := plan.ExecutionGraphJSON.StringSemanticEquals(ctx, state.ExecutionGraphJSON)
+			resp.Diagnostics.Append(d...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+			graphChanged = !unchanged
+		}
 
 		if graphChanged {
-			graphJSON := plan.ExecutionGraphJSON.ValueString()
-			if err := r.publishGraph(ctx, id, graphJSON); err != nil {
+			if err := r.publishGraph(ctx, id, plan.ExecutionGraphJSON.ValueString()); err != nil {
 				resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
 				return
 			}

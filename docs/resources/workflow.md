@@ -43,7 +43,7 @@ resource "fivenines_workflow" "disk_alert" {
 
 - `active` (Boolean) Whether the workflow is active. Set to true to activate, false to pause. Requires a published version.
 - `description` (String) Description of the workflow.
-- `execution_graph_json` (String) JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value.
+- `execution_graph_json` (String) JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value. Compared semantically, so whitespace and key ordering do not produce a diff.
 - `interval_seconds` (Number) Evaluation interval in seconds.
 
 ### Read-Only

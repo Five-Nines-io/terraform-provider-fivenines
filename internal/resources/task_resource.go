@@ -110,8 +110,11 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Default:     stringdefault.StaticString("UTC"),
 			},
 			"host_id": schema.StringAttribute{
-				Description: "Optional host ID to associate this task with.",
+				Description: "Optional host ID to associate this task with. Omit it to detach; an empty string is not a host id.",
 				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"status": schema.StringAttribute{
 				Description: "Current status.",

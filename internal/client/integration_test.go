@@ -8,7 +8,7 @@ import (
 )
 
 // Integration test against the real FiveNines API.
-// Run with: FIVENINES_API_KEY=... go test ./internal/client/ -run TestIntegration -v
+// Run with: TF_ACC=1 FIVENINES_API_KEY=... go test ./internal/client/ -run TestIntegration -v
 var (
 	testAPIKey  = os.Getenv("FIVENINES_API_KEY")
 	testBaseURL = envOr("FIVENINES_BASE_URL", "https://fivenines.io")
@@ -19,17 +19,6 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-// readPageItems re-reads a page's items so the update below can refuse to send
-// an empty list it did not mean.
-func readPageItems(ctx context.Context, t *testing.T, c *Client, id int64) []StatusPageItem {
-	t.Helper()
-	page, _, err := c.GetStatusPage(ctx, id)
-	if err != nil {
-		t.Fatalf("GetStatusPage failed: %v", err)
-	}
-	return page.Items
 }
 
 func derefOr[T any](v *T, fallback T) T {
@@ -74,12 +63,6 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 	if targetPage == nil {
 		t.Skip("No existing page with items found")
 	}
-	// Items is a pointer now, so sending an empty slice CLEARS the page. Never
-	// round-trip a read that came back empty — that would delete every item on
-	// a real page instead of leaving it alone.
-	if len(readPageItems(ctx, t, c, targetPage.ID)) == 0 {
-		t.Skip("Page reports no items on re-read — refusing to PATCH an empty items list")
-	}
 
 	t.Logf("Target page: id=%d name=%q theme=%q items=%d", targetPage.ID, targetPage.Name, derefOr(targetPage.ThemeVariant, ""), len(targetPage.Items))
 
@@ -91,6 +74,12 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 	}
 	t.Logf("ETag from GET: %q", etag)
 	t.Logf("updated_at: %q", readPage.UpdatedAt)
+
+	// Items is a pointer now, so sending an empty slice CLEARS the page. Guard
+	// the exact value the PATCH below sends, not a separate read of it.
+	if len(readPage.Items) == 0 {
+		t.Skip("Re-read came back with no items — refusing to PATCH an empty items list")
+	}
 
 	// Step 2: PATCH with a theme change, keeping items
 	t.Log("=== Step 2: PATCH (theme change, keep items) ===")

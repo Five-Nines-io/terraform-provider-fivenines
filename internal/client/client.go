@@ -208,7 +208,8 @@ func retryablePoll(err error) bool {
 		return true
 	}
 
-	// 429 is the one 4xx that fixes itself. doRequest already backs off, but it
+	// 429 and 408 are the 4xx that fix themselves. doRequest already backs off on
+	// 429, but it
 	// gives up after five attempts and hands the 429 up: a fleet destroy is
 	// exactly the workload that trips the limiter, and the DELETE was accepted
 	// already, so failing here would abort an apply over a transient limit.
@@ -234,12 +235,18 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 	interval := deletionPollInterval
 
 	// Kept so a poll that only ever saw transient failures reports why, rather
-	// than a bare timeout.
-	var lastErr error
+	// than a bare timeout. Two of them: an http.Client timeout also satisfies
+	// errors.Is(err, context.DeadlineExceeded), so a deadline must never be
+	// allowed to overwrite a real API error worth reporting.
+	var lastErr, lastNonContextErr error
 
 	timedOut := func() error {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		// A real API error beats "context deadline exceeded" every time.
+		if reportable := lastNonContextErr; reportable != nil {
+			return fmt.Errorf("timed out after %s waiting for the deletion to complete; last error: %w", timeout, reportable)
 		}
 		if lastErr != nil {
 			return fmt.Errorf("timed out after %s waiting for the deletion to complete; last error: %w", timeout, lastErr)
@@ -250,11 +257,12 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 	for {
 		done, err := gone(pollCtx)
 		// Recorded before the deadline check so the timeout message names it even
-		// when the very first poll outlives the deadline — but never record the
-		// deadline itself, or it overwrites the API error worth reporting.
-		if err != nil && retryablePoll(err) &&
-			!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		// when the very first poll outlives the deadline.
+		if err != nil && retryablePoll(err) {
 			lastErr = err
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				lastNonContextErr = err
+			}
 		}
 		switch {
 		// A successful "it is gone" wins even if the deadline expired on the

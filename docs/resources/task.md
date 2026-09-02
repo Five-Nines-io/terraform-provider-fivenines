@@ -48,7 +48,7 @@ resource "fivenines_task" "seasonal_import" {
 ### Optional
 
 - `grace_period_minutes` (Number) Grace period in minutes before marking as missed.
-- `host_id` (String) Optional host ID to associate this task with.
+- `host_id` (String) Optional host ID to associate this task with. Omit it to detach; an empty string is not a host id.
 - `interval_seconds` (Number) Interval in seconds. Required while schedule_type is "interval". Once schedule_type is "cron" you may drop it, but the API keeps the last value rather than clearing it.
 - `paused` (Boolean) Whether the task is paused.
 - `schedule` (String) Cron expression. Required while schedule_type is "cron". Once schedule_type is "interval" you may drop it, but the API keeps the last value rather than clearing it.

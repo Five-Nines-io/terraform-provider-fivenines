@@ -53,4 +53,4 @@ jobs:
           TF_ACC: "1"
           FIVENINES_API_KEY: ${{ secrets.FIVENINES_API_KEY }}
           FIVENINES_BASE_URL: ${{ vars.FIVENINES_BASE_URL }}
-        run: go test ./internal/provider/ -v -timeout 120m
+        run: go test ./internal/provider/ ./internal/client/ -v -timeout 120m

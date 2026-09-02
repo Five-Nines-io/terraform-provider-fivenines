@@ -288,7 +288,7 @@ func (r *statusPageResource) Update(ctx context.Context, req resource.UpdateRequ
 		CustomFooterEnabled:     boolPtr(plan.CustomFooterEnabled),
 		IncidentsHistoryEnabled: boolPtr(plan.IncidentsHistoryEnabled),
 		ThemeVariant:            stringPtr(plan.ThemeVariant),
-		Items:                   planItemsToUpdateInput(plan.Items),
+		Items:                   itemsUpdate(plan.Items, state.Items),
 	}
 
 	// ETag retry loop
@@ -369,24 +369,44 @@ func mapStatusPageToState(p *client.StatusPage, state *statusPageModel) {
 			})
 		}
 		state.Items, _ = types.ListValue(itemType, items)
-	case !state.Items.IsNull() && !state.Items.IsUnknown() && len(state.Items.Elements()) == 0:
-		// The plan said "items = []"; keep it so the empty list round-trips.
+	case !state.Items.IsNull() && !state.Items.IsUnknown():
+		// The plan holds a known list and the response carried none. Keep the
+		// planned value: an empty [] has to round-trip, and a create response
+		// that simply does not embed the item association must not null out a
+		// list the practitioner asked for.
 	default:
 		state.Items = types.ListNull(itemType)
 	}
 }
 
-// planItemsToUpdateInput turns the planned item list into an update value.
-//
-// A config with no `items` at all omits the key, so a page whose items are
-// curated in the dashboard is left alone — the API spec warns Go clients about
-// exactly this. Writing `items = []` is the explicit way to empty a page, and
-// that reaches the API as [] rather than being swallowed by omitempty.
+// planItemsToUpdateInput turns a planned item list into a create value: nil
+// omits the key, and a pointer to an empty slice sends the explicit [] that
+// `items = []` means. Only null and unknown omit, which at create is the
+// "no items block" case.
 func planItemsToUpdateInput(itemsList types.List) *[]client.StatusPageItem {
 	if itemsList.IsNull() || itemsList.IsUnknown() {
 		return nil
 	}
 	items := planItemsToClient(itemsList)
+	return &items
+}
+
+// itemsUpdate is planItemsToUpdateInput for the update path, where a null plan
+// value never actually arrives: items is Optional+Computed, so a config with no
+// `items` block plans the LAST REFRESHED list. Sending that back would delete
+// anything added in the dashboard since the refresh — under `-refresh=false`,
+// or between a saved plan and its apply, that is silent data loss.
+//
+// So the key is omitted whenever the plan matches what state already holds. An
+// update that does not touch items does not write items.
+func itemsUpdate(planned, stored types.List) *[]client.StatusPageItem {
+	if planned.IsNull() || planned.IsUnknown() {
+		return nil
+	}
+	if planned.Equal(stored) {
+		return nil
+	}
+	items := planItemsToClient(planned)
 	return &items
 }
 

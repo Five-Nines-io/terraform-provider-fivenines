@@ -14,13 +14,15 @@ import (
 // cannot", or worse, turns a write-only credential into one that gets wiped by
 // an unrelated update.
 //
-// This table is that missing guard: every field of every update input is
-// classified once, here, and a new field fails the build until it is added.
+// This table is that missing guard: every field of every create and update
+// input is classified once, here, and a new field fails this test until it is
+// added — which is the closest thing to a compile error the tags can get.
 func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 	const (
 		clears    = "clears on nil (Optional-only: the provider owns it)"
 		preserves = "preserves on nil (Optional+Computed, defaulted, or write-only)"
-		always    = "always sent (Required: not a pointer, so there is no nil case)"
+		always    = "always sent (Required: no nil case and no omitempty)"
+		dropsZero = "dropped when zero-valued (only safe when \"\" or 0 is not a legal config value)"
 	)
 
 	specs := []struct {
@@ -109,7 +111,7 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 			"uptime": preserves, "custom_domain": preserves,
 			"custom_domain_enabled": preserves, "custom_footer": preserves,
 			"custom_footer_enabled": preserves, "incidents_history_enabled": preserves,
-			"theme_variant": always, "items": preserves,
+			"theme_variant": dropsZero, "items": preserves,
 		},
 	}, struct {
 		input  interface{}
@@ -118,6 +120,54 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		input: CreateInstanceInput{},
 		policy: map[string]string{
 			"display_name": always, "enabled": preserves, "maintenance_mode": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateTaskInput{},
+		policy: map[string]string{
+			"name": always, "schedule_type": always, "schedule": dropsZero,
+			"interval_seconds": preserves, "grace_period_minutes": preserves,
+			"time_zone": dropsZero, "host_id": dropsZero,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateWorkflowInput{},
+		policy: map[string]string{
+			"name": always, "description": dropsZero, "interval_seconds": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateNetworkDeviceInput{},
+		policy: map[string]string{
+			"name": always, "ip_address": always, "polling_host_id": preserves,
+			"device_type": dropsZero, "polling_interval": preserves,
+			"snmp_version": dropsZero, "snmp_community": dropsZero,
+			"snmp_username": dropsZero, "snmp_security_level": dropsZero,
+			"snmp_auth_protocol": dropsZero, "snmp_auth_password": dropsZero,
+			"snmp_priv_protocol": dropsZero, "snmp_priv_password": dropsZero,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateUptimeMonitorInput{},
+		policy: map[string]string{
+			"name": always, "protocol": always, "url": dropsZero,
+			"hostname": dropsZero, "port": preserves, "http_method": dropsZero,
+			"ip_version": dropsZero, "interval_seconds": preserves,
+			"timeout_seconds": preserves, "confirmation_count": preserves,
+			"keyword": dropsZero, "keyword_absent": preserves,
+			"follow_redirects": preserves, "expected_status_codes": preserves,
+			"probe_region_ids": preserves, "dns_record_type": dropsZero,
+			"dns_expected_records": preserves, "custom_headers": preserves,
+			"custom_body": dropsZero, "content_type": dropsZero,
+			"recovery_count": preserves,
 		},
 	})
 
@@ -143,15 +193,20 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 					continue
 				}
 
-				// A field that cannot be nil has no clear case at all, so its tag
-				// says nothing about clearing — it is simply always on the wire.
-				// Pointers, slices and maps all have one.
+				// Pointers, slices and maps have a nil case, so their tag says
+				// whether nil clears or preserves. A non-nilable field has no nil
+				// case — but with omitempty its ZERO value still vanishes from the
+				// body, which is how `description = ""` got dropped on create.
 				got := always
 				switch field.Type.Kind() {
 				case reflect.Ptr, reflect.Slice, reflect.Map:
 					got = preserves
 					if !strings.Contains(opts, "omitempty") {
 						got = clears
+					}
+				default:
+					if strings.Contains(opts, "omitempty") {
+						got = dropsZero
 					}
 				}
 				if got != want {

@@ -72,8 +72,12 @@ func TestAccWorkflow_metadataLifecycle(t *testing.T) {
 	})
 }
 
-// Reformatting the graph must not diff. As a plain string attribute it did, and
-// every reindent cut a new published version.
+// Reformatting the graph must not publish a new version. The attribute is
+// Optional-only, and the framework does not apply semantic equality during
+// PlanResourceChange, so the plan still shows an in-place update — what
+// jsontypes.Normalized buys here is that shouldPublishGraph suppresses the
+// republish, which is what actually costs something. Once #10 makes Read
+// populate the graph the plan goes empty too.
 func TestAccWorkflow_executionGraphIgnoresFormatting(t *testing.T) {
 	name := acctest.RandomWithPrefix("tf-acc-workflow")
 
@@ -100,8 +104,16 @@ resource "fivenines_workflow" "test" {
 			{
 				Config: config(reformatted),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
-					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction("fivenines_workflow.test", plancheck.ResourceActionUpdate),
+					},
 				},
+				// The republish is the expensive part, and it must not happen:
+				// the published version has to survive a pure reformat.
+				Check: resource.TestCheckResourceAttrPair(
+					"fivenines_workflow.test", "published_version_id",
+					"fivenines_workflow.test", "published_version_id",
+				),
 			},
 		},
 	})

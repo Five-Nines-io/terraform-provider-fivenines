@@ -83,6 +83,9 @@ func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaReque
 			"polling_host_id": schema.StringAttribute{
 				Description: "UUID of the instance to poll from. If omitted, polling is done from the FiveNines cloud.",
 				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"device_type": schema.StringAttribute{
 				Description: "Type of device (e.g., switch, router, firewall, other).",
@@ -115,6 +118,9 @@ func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaReque
 				Description: "SNMPv3 username.",
 				Optional:    true,
 				Sensitive:   true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"snmp_security_level": schema.StringAttribute{
 				Description: "SNMPv3 security level.",

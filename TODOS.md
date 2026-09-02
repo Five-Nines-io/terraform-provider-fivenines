@@ -174,10 +174,13 @@
 ## Recently closed
 
 - **JSON `execution_graph` canonicalization** — fixed in #29. `execution_graph_json`
-  is a `jsontypes.Normalized`, so whitespace and key ordering no longer diff, and the
-  "did the graph change?" check in Update goes through the same semantic comparison
-  instead of a byte compare. It was harmless only while Read never fetched the graph
-  back; #10 makes Read populate it, and this had to land first
+  is a `jsontypes.Normalized` and the "did the graph change?" check in Update goes
+  through semantic comparison instead of a byte compare, so reformatting the graph
+  no longer publishes a new workflow version. Note what this does NOT do yet: the
+  attribute is Optional-only and the framework does not apply semantic equality
+  during PlanResourceChange, so a reformat still shows an in-place update in the
+  plan. That goes away when #10 makes Read populate the graph and the attribute
+  becomes Optional+Computed — which is why this had to land first
 
 - **Async 202 deletes dropped state early** — fixed in #29. `DeleteInstance` and
   `DeleteNetworkDevice` report whether the API took the async path, and the resources

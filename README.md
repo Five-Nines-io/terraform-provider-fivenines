@@ -127,6 +127,31 @@ What ends up there:
 | `fivenines_task.ping_key` / `ping_url` | Server-generated; the API returns the key on every read, and `ping_url` embeds it. This is what you feed to the job that pings the task, so it has to be readable as an output. |
 | `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
 
+### Upgrading: unset attributes are now null, not `""`
+
+Attributes the FiveNines agent populates used to read back as `""` before the
+agent had ever reported. They are `null` now, which is what the API actually
+says. That is the point — `""` made every plan drift — but it changes what a
+config that interpolates them sees:
+
+| Resource | Attributes |
+|---|---|
+| `fivenines_instance` | `hostname`, `operating_system_name`, `kernel_version`, `cpu_architecture`, `cpu_model`, `cpu_count`, `memory_size`, `ipv4`, `ipv6`, `source`, `client_version` |
+| `fivenines_network_device` | `status`, `vendor`, `model`, `sys_name` |
+| `fivenines_task` | `schedule` on an interval task, `host_id` when unset |
+
+An expression like `"${fivenines_instance.web.hostname}.internal"` used to
+produce `".internal"` for a host that had never synced; it now fails the plan
+with "Invalid template interpolation value". That is the honest answer, but if
+you want the old behaviour, wrap it:
+
+```hcl
+coalesce(fivenines_instance.web.hostname, "")
+```
+
+Hosts that have synced are unaffected — the API returns real values and nothing
+about them changes.
+
 ### Upgrading: `ping_url` is now sensitive
 
 `fivenines_task.ping_url` embeds `ping_key` verbatim, so it is marked

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -197,6 +198,77 @@ func TestClient_DeleteHostGroup(t *testing.T) {
 	}
 }
 
+// The filters are server-side, so each one has to reach the wire under its
+// documented name — the endpoint 400s on anything outside that set, and the
+// "query" -> "q" rename is the one that would silently drop the whole filter.
+func TestClient_ListHostGroups_Filters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"host_groups": []map[string]interface{}{},
+			"meta":        map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	_, err := c.ListHostGroups(context.Background(), &ListHostGroupsOptions{
+		Query:        "prod 100%",
+		UpdatedSince: "2026-08-30T12:00:00Z",
+		Order:        "name",
+		Direction:    "desc",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for key, want := range map[string]string{
+		// A literal percent survives URL encoding rather than arriving as a
+		// truncated term or a decode error.
+		"q":             "prod 100%",
+		"updated_since": "2026-08-30T12:00:00Z",
+		"order":         "name",
+		"direction":     "desc",
+		"page":          "1",
+		"per_page":      "100",
+	} {
+		if got := gotQuery.Get(key); got != want {
+			t.Errorf("expected %s=%q on the wire, got %q", key, want, got)
+		}
+	}
+	for key := range gotQuery {
+		switch key {
+		case "q", "updated_since", "order", "direction", "page", "per_page":
+		default:
+			t.Errorf("undocumented query parameter %q would 400 the request", key)
+		}
+	}
+}
+
+// Unset filters must be absent, not empty-valued: "q=" is a filter matching
+// everything on some endpoints and an error on others, and neither is "no filter".
+func TestClient_ListHostGroups_OmitsUnsetFilters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"host_groups": []map[string]interface{}{},
+			"meta":        map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	// Both an empty options struct and a nil one mean "no filters".
+	for _, opts := range []*ListHostGroupsOptions{{}, nil} {
+		if _, err := c.ListHostGroups(context.Background(), opts); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, key := range []string{"q", "updated_since", "order", "direction"} {
+			if _, ok := gotQuery[key]; ok {
+				t.Errorf("opts %v: expected %s to be omitted when unset, got %q", opts, key, gotQuery.Get(key))
+			}
+		}
+	}
+}
+
 func TestClient_ListHostGroups_Pagination(t *testing.T) {
 	var requestCount int32
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -212,7 +284,7 @@ func TestClient_ListHostGroups_Pagination(t *testing.T) {
 		})
 	})
 
-	groups, err := c.ListHostGroups(context.Background())
+	groups, err := c.ListHostGroups(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -243,7 +315,7 @@ func TestClient_ListHostGroups_UnrecognisedMetaStopsOnEmptyPage(t *testing.T) {
 		})
 	})
 
-	groups, err := c.ListHostGroups(context.Background())
+	groups, err := c.ListHostGroups(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

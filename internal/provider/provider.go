@@ -114,5 +114,6 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 		datasources.NewUptimeMonitorsDataSource,
 		datasources.NewUptimeMonitorStatusDataSource,
 		datasources.NewDashboardTemplatesDataSource,
+		datasources.NewHostGroupsDataSource,
 	}
 }

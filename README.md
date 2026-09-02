@@ -36,6 +36,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_uptime_monitors` | Uptime monitors, filterable by status, protocol, search text and update time |
 | `fivenines_uptime_monitor_status` | Lightweight current status of a single uptime monitor |
 | `fivenines_dashboard_templates` | The dashboard gallery, with an availability verdict per template |
+| `fivenines_host_groups` | Host groups, filterable by name, for looking up a group ID |
 
 ## Quick Start
 

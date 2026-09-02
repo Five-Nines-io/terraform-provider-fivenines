@@ -1733,11 +1733,36 @@ func (c *Client) CancelStatusPageMaintenanceWindow(ctx context.Context, statusPa
 
 // --- Host Groups ---
 
-func (c *Client) ListHostGroups(ctx context.Context) ([]HostGroup, error) {
+// hostGroupFilters renders the index filters as query parameters, skipping the
+// unset ones. The endpoint 400s on an unknown parameter, so nothing outside the
+// documented set may reach it.
+func hostGroupFilters(opts *ListHostGroupsOptions) url.Values {
+	query := url.Values{}
+	if opts == nil {
+		return query
+	}
+	for key, value := range map[string]string{
+		"q":             opts.Query,
+		"updated_since": opts.UpdatedSince,
+		"order":         opts.Order,
+		"direction":     opts.Direction,
+	} {
+		if value != "" {
+			query.Set(key, value)
+		}
+	}
+	return query
+}
+
+func (c *Client) ListHostGroups(ctx context.Context, opts *ListHostGroupsOptions) ([]HostGroup, error) {
+	query := hostGroupFilters(opts)
+	query.Set("per_page", "100")
+
 	var all []HostGroup
 	page := 1
 	for {
-		path := fmt.Sprintf("/api/v1/host_groups?page=%d&per_page=100", page)
+		query.Set("page", strconv.Itoa(page))
+		path := "/api/v1/host_groups?" + query.Encode()
 		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 		if err != nil {
 			return nil, err

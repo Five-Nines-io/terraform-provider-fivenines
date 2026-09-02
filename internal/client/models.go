@@ -621,6 +621,26 @@ type UpdateStatusPageInput struct {
 	Items                       *[]StatusPageItemInput `json:"items,omitempty"`
 }
 
+// ListHostGroupsOptions holds the index filters accepted by
+// GET /api/v1/host_groups. Zero-valued fields are not sent — the endpoint
+// rejects unknown query parameters with a 400 and the accepted list, so a
+// mistyped filter can never be silently ignored and read back as "there are
+// none".
+type ListHostGroupsOptions struct {
+	// Query is a case-insensitive substring match on the group name (the "q"
+	// param). A "%" in the term matches a literal percent sign.
+	Query string
+	// UpdatedSince returns only groups updated at or after this ISO8601
+	// timestamp. Inclusive, and it surfaces creates and updates only: a deleted
+	// group leaves no tombstone. Repositioning writes position without touching
+	// updated_at, so a reorder does not move this cursor.
+	UpdatedSince string
+	// Order is the column to sort by: position, name, created_at or updated_at.
+	// Direction is "asc" or "desc".
+	Order     string
+	Direction string
+}
+
 // HostGroup represents a named group of monitored hosts.
 //
 // Position is a plain int64 rather than a pointer, against the nullable-fields

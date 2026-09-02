@@ -87,14 +87,18 @@ resource "fivenines_network_device" "switch" {
 
 # Create a public status page
 resource "fivenines_status_page" "public" {
-  name   = "Service Status"
-  public = true
+  name     = "Service Status"
+  public   = true
+  sections = ["Core services"]
 
-  # items is a list attribute, not a block: assign it with `=`.
+  # items is a list attribute, not a block: assign it with `=`, and the list
+  # order is the display order.
   items = [
     {
-      item_type = "UptimeMonitor"
-      item_id   = fivenines_uptime_monitor.api.id
+      item_type     = "UptimeMonitor"
+      item_id       = fivenines_uptime_monitor.api.id
+      display_label = "Public API"
+      section       = "Core services"
     },
   ]
 }

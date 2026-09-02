@@ -13,7 +13,9 @@ Manages a FiveNines status page.
 ## Example Usage
 
 ```terraform
-# Basic public status page
+# Basic public status page.
+# `items` is a list attribute, so it takes `= [...]`, and the order of the list
+# is the order things appear on the page.
 resource "fivenines_status_page" "public" {
   name        = "Service Status"
   description = "Current status of our services"
@@ -37,7 +39,7 @@ resource "fivenines_status_page" "public" {
   ]
 }
 
-# Status page with custom domain and footer
+# Status page with custom domain, footer and branding
 resource "fivenines_status_page" "branded" {
   name                      = "ACME Status"
   description               = "ACME Corp service status"
@@ -49,13 +51,51 @@ resource "fivenines_status_page" "branded" {
   custom_footer_enabled     = true
   custom_footer             = "© 2026 ACME Corp. All rights reserved."
   incidents_history_enabled = true
+  contact_url               = "https://acme.com/support"
+
+  # Hides the Subscribe button without dropping existing subscribers.
+  subscriptions_enabled = false
+
+  # Keep the page out of search results, badges included.
+  search_indexing_enabled = false
+
+  # Days shorter than two minutes of downtime still count as green.
+  uptime_green_tolerance_seconds = 120
+  uptime_window_days             = 90
+
+  # Base64-encoded PNG, at most 1 MB decoded. Requires a white-label plan.
+  # The API never returns it; the stored image is exposed as `logo_url`.
+  logo = filebase64("${path.module}/logo.png")
+
+  # Sections have to be declared before an item can reference one.
+  sections = ["Core services", "Edge"]
 
   items = [
     {
-      item_type = "UptimeMonitor"
-      item_id   = fivenines_uptime_monitor.api.id
+      item_type     = "UptimeMonitor"
+      item_id       = fivenines_uptime_monitor.api.id
+      display_label = "Public API"
+      description   = "REST and GraphQL endpoints"
+      section       = "Core services"
+    },
+    {
+      item_type = "Host"
+      item_id   = fivenines_instance.web.id
+      section   = "Edge"
     },
   ]
+}
+
+output "acme_logo_url" {
+  value = fivenines_status_page.branded.logo_url
+}
+
+# Emptying a page: an explicit `[]` removes every item and section. Dropping the
+# attributes instead would leave whatever the page already has in place.
+resource "fivenines_status_page" "empty" {
+  name     = "Placeholder"
+  sections = []
+  items    = []
 }
 ```
 
@@ -68,6 +108,7 @@ resource "fivenines_status_page" "branded" {
 
 ### Optional
 
+- `contact_url` (String) URL of the contact or support page linked from the status page. Must start with http:// or https://.
 - `custom_domain` (String) Custom domain for the status page.
 - `custom_domain_enabled` (Boolean) Whether custom domain is enabled (requires plan upgrade).
 - `custom_footer` (String) Custom footer HTML.
@@ -75,14 +116,21 @@ resource "fivenines_status_page" "branded" {
 - `description` (String) Description of the status page.
 - `incidents_history_enabled` (Boolean) Whether to show incidents history.
 - `items` (Attributes List) Items displayed on the status page, in order. Omit this attribute and the provider tracks whatever the API last reported, which leaves items curated in the FiveNines dashboard alone (it follows the last refresh, so `-refresh=false` can replay a stale list). Set it to [] to remove every item. (see [below for nested schema](#nestedatt--items))
+- `logo` (String, Sensitive) Base64-encoded PNG logo, at most 1 MB once decoded. Requires a white-label plan. The API never echoes the image back, so the configuration is its only source of truth and this attribute is Optional-only: dropping it from a configuration that set it deletes the logo, and managing a page without it deletes a logo uploaded from the dashboard. Read the stored image from `logo_url`.
 - `public` (Boolean) Whether the status page is publicly accessible.
+- `search_indexing_enabled` (Boolean) Whether search engines may index the page. When false, the page and its badges are served with noindex/nofollow.
+- `sections` (List of String) Section names, in display order. Items reference a section by name, so a section must be declared here before an item can be placed in it. Omit the attribute and the provider tracks whatever the API last reported, which leaves sections curated in the dashboard alone. Set it to [] to remove them all.
+- `subscriptions_enabled` (Boolean) Whether the Subscribe button is shown. Setting this to false hides the button but keeps existing subscribers.
 - `theme_variant` (String) Theme variant (system, dark, light).
 - `uptime` (Boolean) Whether to show uptime percentages.
+- `uptime_green_tolerance_seconds` (Number) Downtime, in seconds, a day may accumulate while still being shown as green on the uptime bar (0-600).
+- `uptime_window_days` (Number) Number of days covered by the uptime bar (1, 7, 30 or 90).
 
 ### Read-Only
 
 - `created_at` (String) Creation timestamp.
 - `id` (Number) Unique identifier.
+- `logo_url` (String) Public URL of the uploaded logo, or null when the page has no logo.
 - `slug` (String) URL slug (auto-generated if not provided).
 - `updated_at` (String) Last update timestamp.
 
@@ -93,3 +141,9 @@ Required:
 
 - `item_id` (String) UUID of the item.
 - `item_type` (String) Type of item (Host, UptimeMonitor, Task).
+
+Optional:
+
+- `description` (String) Short text shown under the item. Omitting it preserves the description curated elsewhere, for example from the dashboard.
+- `display_label` (String) Label shown instead of the item's own name. Omitting it preserves the label curated elsewhere, for example from the dashboard.
+- `section` (String) Name of the section this item belongs to. Must be declared in `sections`. Omitting it preserves the section curated elsewhere, for example from the dashboard.

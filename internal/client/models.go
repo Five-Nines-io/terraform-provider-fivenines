@@ -167,6 +167,18 @@ type WorkflowListOptions struct {
 	Q string
 }
 
+// WorkflowRunListOptions holds the server-side filters accepted by the workflow
+// runs index. Zero values are omitted from the query string.
+type WorkflowRunListOptions struct {
+	// Status filters by run state: running, completed, failed or cancelled.
+	Status string
+	// UpdatedSince keeps only runs updated at or after this timestamp.
+	UpdatedSince string
+	// Order is the column to sort on, Direction is "asc" or "desc".
+	Order     string
+	Direction string
+}
+
 // WorkflowTemplate is a prebuilt workflow that can be instantiated by slug.
 type WorkflowTemplate struct {
 	Slug        string `json:"slug"`
@@ -192,14 +204,56 @@ type NodeType struct {
 	Raw json.RawMessage `json:"-"`
 }
 
-// WorkflowRun represents a single execution of a workflow.
+// WorkflowRun represents a single execution of a workflow. This is the header
+// shape the runs index returns; WorkflowRunDetail adds the per-step detail.
 type WorkflowRun struct {
-	ID          int64   `json:"id"`
-	Status      string  `json:"status"`
-	ResourceKey string  `json:"resource_key"`
-	StartedAt   *string `json:"started_at"`
-	CompletedAt *string `json:"completed_at"`
-	CreatedAt   string  `json:"created_at"`
+	ID     int64  `json:"id"`
+	Status string `json:"status"`
+	// ResourceKey names the subject a fan-out run is for (one run per host,
+	// guest, pool, ...). NULL on a workflow that dispatches once, so it is a
+	// pointer: as a plain string the null collapsed to "" and a config could
+	// not tell "dispatched once" from "fan-out over an empty key".
+	ResourceKey *string `json:"resource_key"`
+	WorkflowID  int64   `json:"workflow_id"`
+	// WorkflowVersionID is the version that was executed, not necessarily the
+	// currently published one.
+	WorkflowVersionID int64   `json:"workflow_version_id"`
+	StartedAt         *string `json:"started_at"`
+	CompletedAt       *string `json:"completed_at"`
+	// DurationSeconds is whole seconds. For a run still running this is the
+	// elapsed time so far, not a final duration.
+	DurationSeconds *int64 `json:"duration_seconds"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
+// WorkflowRunDetail is a single run with its per-step detail, returned by
+// GET /workflows/{id}/runs/{run_id}. The runs index returns headers only, so
+// "status: failed" there says a run broke but not where.
+type WorkflowRunDetail struct {
+	WorkflowRun
+	// Error is the run-level failure message. A run can fail BETWEEN steps, in
+	// which case no step explains it and this is the only account of what happened.
+	Error         *string                `json:"error"`
+	TriggerOutput map[string]interface{} `json:"trigger_output"`
+	Steps         []WorkflowRunStep      `json:"steps"`
+}
+
+// WorkflowRunStep is one node's execution inside a run.
+type WorkflowRunStep struct {
+	ID           int64   `json:"id"`
+	NodeID       string  `json:"node_id"`
+	NodeType     string  `json:"node_type"`
+	Status       string  `json:"status"`
+	ErrorMessage *string `json:"error_message"`
+	// OutputData is whatever the node produced, its shape depending on NodeType.
+	OutputData  map[string]interface{} `json:"output_data"`
+	StartedAt   *string                `json:"started_at"`
+	CompletedAt *string                `json:"completed_at"`
+	// DurationSeconds has millisecond resolution and is null — never 0 — while
+	// the step has not both started and finished.
+	DurationSeconds *float64 `json:"duration_seconds"`
+	CreatedAt       string   `json:"created_at"`
 }
 
 // CreateWorkflowVersionInput is the request body for creating a workflow version.
@@ -380,6 +434,27 @@ type Integration struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+// IntegrationListOptions holds the server-side filters accepted by the
+// integrations index. Zero values are omitted from the query string.
+type IntegrationListOptions struct {
+	// Type is the backing class name the `type` field returns
+	// ("SlackIntegration"), not the short key CreateIntegrationInput takes
+	// ("slack"). An unrecognised value is a 400, never an empty list.
+	Type string
+	// Enabled filters on the enabled flag. A pointer because false is a real
+	// filter value and has to stay distinct from "not filtering".
+	Enabled *bool
+	// Q is a substring match on the name COLUMN only. A channel that was never
+	// given a name is not matched: the name the API returns for one is the
+	// channel's own identifier, which is not searchable.
+	Q string
+	// UpdatedSince keeps only channels updated at or after this timestamp.
+	UpdatedSince string
+	// Order is the column to sort on, Direction is "asc" or "desc".
+	Order     string
+	Direction string
+}
+
 // CreateIntegrationInput is the request body for creating an integration.
 // Which fields are required depends on Type; see CreateIntegration.
 type CreateIntegrationInput struct {
@@ -425,20 +500,58 @@ type CreateIntegrationResult struct {
 	EmailVerification *EmailVerification
 }
 
+// IncidentListOptions holds the server-side filters accepted by the incidents
+// index. Zero values are omitted from the query string.
+//
+// Every index rejects an unknown query parameter with a 400 listing the ones it
+// accepts, so a mistyped filter can never be silently ignored and read back as
+// "there are none". That makes the set of keys sent here part of the contract:
+// only the fields below are ever put on the wire.
+type IncidentListOptions struct {
+	// Status filters by incident state: unknown, warning, resolved, open, muted
+	// or acknowledged.
+	Status string
+	// Q is a case-insensitive substring match on the title.
+	Q string
+	// HostID, TaskID and UptimeMonitorID are uuids; WorkflowID is an integer, and
+	// is a pointer so that "not filtering" stays distinct from workflow 0.
+	HostID          string
+	TaskID          string
+	UptimeMonitorID string
+	WorkflowID      *int64
+	// From and To bound the incident's ACTIVE WINDOW, not its created_at: an
+	// incident that opened last week and is still open matches a From of
+	// yesterday. The range is half-open ([From, To)) and an inverted window is a
+	// 400 from the API, not an empty list.
+	From string
+	To   string
+	// UpdatedSince keeps only incidents updated at or after this timestamp.
+	UpdatedSince string
+	// Order is the column to sort on, Direction is "asc" or "desc".
+	Order     string
+	Direction string
+}
+
 // Incident represents an alert triggered by a workflow or manually.
 type Incident struct {
-	ID              int64   `json:"id"`
-	Title           string  `json:"title"`
-	Summary         string  `json:"summary"`
-	Status          string  `json:"status"`
+	ID      int64  `json:"id"`
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
+	Status  string `json:"status"`
+	// Public is whether the incident is shown on the organization's public
+	// status pages. Set with PATCH /api/v1/incidents/{id}/visibility.
+	Public          bool    `json:"public"`
 	HostID          *string `json:"host_id"`
 	WorkflowID      *int64  `json:"workflow_id"`
 	TaskID          *string `json:"task_id"`
+	UptimeMonitorID *string `json:"uptime_monitor_id"`
 	StartedAt       *string `json:"started_at"`
 	EndedAt         *string `json:"ended_at"`
-	DurationSeconds *int64  `json:"duration_seconds"`
-	CreatedAt       string  `json:"created_at"`
-	UpdatedAt       string  `json:"updated_at"`
+	// DurationSeconds is whole seconds: the model rounds it down, despite the
+	// spec's fractional example.
+	DurationSeconds *int64 `json:"duration_seconds"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 // NetworkDevice represents a monitored network device (SNMP).

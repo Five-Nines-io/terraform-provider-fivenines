@@ -96,6 +96,7 @@ func (p *fiveninesProvider) Resources(_ context.Context) []func() resource.Resou
 		resources.NewMQTTBrokerResource,
 		resources.NewMQTTTopicMonitorResource,
 		resources.NewAPITokenResource,
+		resources.NewEnrollmentTokenResource,
 	}
 }
 

@@ -369,11 +369,11 @@ func mapStatusPageToState(p *client.StatusPage, state *statusPageModel) {
 			})
 		}
 		state.Items, _ = types.ListValue(itemType, items)
-	case !state.Items.IsNull() && !state.Items.IsUnknown():
-		// The plan holds a known list and the response carried none. Keep the
-		// planned value: an empty [] has to round-trip, and a create response
-		// that simply does not embed the item association must not null out a
-		// list the practitioner asked for.
+	case !state.Items.IsNull() && !state.Items.IsUnknown() && len(state.Items.Elements()) == 0:
+		// Narrow on purpose: keep ONLY a pinned empty list, which is the one
+		// distinction the API cannot express (it reports "no items" for both
+		// `[]` and unset). Keeping a non-empty list here would mean a page whose
+		// items were deleted in the dashboard never shows as drift.
 	default:
 		state.Items = types.ListNull(itemType)
 	}

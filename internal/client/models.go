@@ -380,6 +380,175 @@ type UpdateStatusPageInput struct {
 	Items                   []StatusPageItem `json:"items,omitempty"`
 }
 
+// --- Dashboards ---
+
+// Dashboard is the full dashboard definition: its sections, its panels and the
+// grid each panel sits in.
+type Dashboard struct {
+	ID                 int64              `json:"id"`
+	Name               *string            `json:"name"`
+	Description        *string            `json:"description"`
+	Shared             bool               `json:"shared"`
+	ShareURL           *string            `json:"share_url"`
+	SectionCount       int64              `json:"section_count"`
+	VisualizationCount int64              `json:"visualization_count"`
+	Sections           []DashboardSection `json:"sections"`
+	Visualizations     []Visualization    `json:"visualizations"`
+	CreatedAt          string             `json:"created_at"`
+	UpdatedAt          string             `json:"updated_at"`
+}
+
+// DashboardSection is a collapsible group of panels (a Grafana-style row).
+type DashboardSection struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Position  int64  `json:"position"`
+	Collapsed bool   `json:"collapsed"`
+}
+
+// Visualization is one panel on a dashboard, in the API's published shape:
+// layout + targets + an allowlisted options object, with chart_type hoisted to
+// the top level.
+type Visualization struct {
+	ID             int64                `json:"id"`
+	Title          *string              `json:"title"`
+	Description    *string              `json:"description"`
+	Metric         string               `json:"metric"`
+	TargetKind     string               `json:"target_kind"`
+	ChartType      string               `json:"chart_type"`
+	Section        *string              `json:"section"`
+	Layout         VisualizationLayout  `json:"layout"`
+	Targets        VisualizationTargets `json:"targets"`
+	Options        VisualizationOptions `json:"options"`
+	QueryResources []string             `json:"query_resources"`
+	CreatedAt      string               `json:"created_at"`
+	UpdatedAt      string               `json:"updated_at"`
+}
+
+// VisualizationLayout is a panel's grid geometry in 24-column gridstack space,
+// relative to the panel's own section. Omitted fields fall back to the
+// dashboard's own placement on create.
+type VisualizationLayout struct {
+	X *int64 `json:"x,omitempty"`
+	Y *int64 `json:"y,omitempty"`
+	W *int64 `json:"w,omitempty"`
+	H *int64 `json:"h,omitempty"`
+}
+
+// VisualizationTargets is the read shape of a panel's entities. All five keys
+// are always present; at most one is ever non-empty.
+type VisualizationTargets struct {
+	Hosts          []string `json:"hosts"`
+	UptimeMonitors []string `json:"uptime_monitors"`
+	Tasks          []string `json:"tasks"`
+	NetworkDevices []string `json:"network_devices"`
+	CephClusters   []string `json:"ceph_clusters"`
+}
+
+// VisualizationTargetsInput is the write shape of a panel's entities. The
+// pointers are load-bearing: on PATCH a kind that is omitted is left alone and
+// a kind that is sent is replaced, so clearing one requires sending an explicit
+// empty array rather than dropping the key.
+type VisualizationTargetsInput struct {
+	Hosts          *[]string `json:"hosts,omitempty"`
+	UptimeMonitors *[]string `json:"uptime_monitors,omitempty"`
+	Tasks          *[]string `json:"tasks,omitempty"`
+	NetworkDevices *[]string `json:"network_devices,omitempty"`
+	CephClusters   *[]string `json:"ceph_clusters,omitempty"`
+}
+
+// VisualizationOptions is a panel's settings, on read and on write alike.
+//
+// None of these carry omitempty on purpose. The API's null contract says an
+// option the panel does not store reads back as null and an explicit null on
+// write clears it back to the metric's default, so a nil pointer must marshal
+// to `null` rather than vanish - that is what makes the block declarative.
+type VisualizationOptions struct {
+	Reducer         *string  `json:"reducer"`
+	GroupBy         *string  `json:"group_by"`
+	Dimensions      []string `json:"dimensions"`
+	Limit           *int64   `json:"limit"`
+	Stacked         *bool    `json:"stacked"`
+	IncidentOverlay *bool    `json:"incident_overlay"`
+	Sparkline       *bool    `json:"sparkline"`
+	Max             *float64 `json:"max"`
+}
+
+// CreateDashboardInput is the request body for creating a dashboard. Sections
+// and panels are deliberately not included: they have their own endpoints, and
+// the provider models them as their own resources.
+type CreateDashboardInput struct {
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+}
+
+// UpdateDashboardInput is the request body for updating a dashboard. Only the
+// dashboard's own fields - a body carrying sections or visualizations is
+// refused with a 422.
+type UpdateDashboardInput struct {
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+}
+
+// DashboardSectionInput is the request body for creating or updating a section.
+// Position is the index the section should end up at, not a relative move.
+type DashboardSectionInput struct {
+	Name      string `json:"name,omitempty"`
+	Collapsed *bool  `json:"collapsed,omitempty"`
+	Position  *int64 `json:"position,omitempty"`
+}
+
+// VisualizationInput is the request body for creating or updating a panel.
+// Metric is required on create only.
+type VisualizationInput struct {
+	Title       *string                    `json:"title"`
+	Description *string                    `json:"description"`
+	Metric      string                     `json:"metric,omitempty"`
+	ChartType   string                     `json:"chart_type,omitempty"`
+	Section     *string                    `json:"section"`
+	Layout      *VisualizationLayout       `json:"layout,omitempty"`
+	Targets     *VisualizationTargetsInput `json:"targets,omitempty"`
+	Options     *VisualizationOptions      `json:"options,omitempty"`
+}
+
+// DashboardTemplate is one entry in the dashboard-template catalog.
+type DashboardTemplate struct {
+	Slug              string   `json:"slug"`
+	Name              string   `json:"name"`
+	Description       string   `json:"description"`
+	Category          string   `json:"category"`
+	Icon              string   `json:"icon"`
+	TargetKinds       []string `json:"target_kinds"`
+	PanelCount        int64    `json:"panel_count"`
+	SectionCount      int64    `json:"section_count"`
+	Available         bool     `json:"available"`
+	UnavailableReason *string  `json:"unavailable_reason"`
+}
+
+// InstantiateDashboardTemplateInput is the request body for building a template.
+type InstantiateDashboardTemplateInput struct {
+	Slug        string `json:"slug"`
+	Name        string `json:"name,omitempty"`
+	DashboardID *int64 `json:"dashboard_id,omitempty"`
+}
+
+// DashboardTemplateResult is what a template instantiation actually built.
+// Skipped is the honest half: a template declares panels for software the
+// organization may not run, and those are dropped rather than created blank.
+type DashboardTemplateResult struct {
+	Dashboard    Dashboard               `json:"dashboard"`
+	Section      *DashboardSection       `json:"section"`
+	CreatedCount int64                   `json:"created_count"`
+	Skipped      []DashboardTemplateSkip `json:"skipped"`
+	SkipSummary  []string                `json:"skip_summary"`
+}
+
+// DashboardTemplateSkip is one panel a template instantiation did not create.
+type DashboardTemplateSkip struct {
+	Title  string `json:"title"`
+	Reason string `json:"reason"`
+}
+
 // APIError represents an error response from the API.
 type APIError struct {
 	StatusCode int

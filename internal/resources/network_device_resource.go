@@ -63,7 +63,10 @@ func (r *networkDeviceResource) Metadata(_ context.Context, req resource.Metadat
 
 func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Manages a FiveNines network device (SNMP monitoring).",
+		Description: "Manages a FiveNines network device (SNMP monitoring).\n\n" +
+			"Destroying a device waits for the deletion to finish. The API answers 202 and removes " +
+			"the device asynchronously, so the provider polls until it is gone (up to five minutes) " +
+			"before releasing state.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Description: "Unique identifier (UUID).",
@@ -83,6 +86,9 @@ func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaReque
 			"polling_host_id": schema.StringAttribute{
 				Description: "UUID of the instance to poll from. If omitted, polling is done from the FiveNines cloud.",
 				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"device_type": schema.StringAttribute{
 				Description: "Type of device (e.g., switch, router, firewall, other).",
@@ -112,9 +118,12 @@ func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaReque
 				Sensitive:   true,
 			},
 			"snmp_username": schema.StringAttribute{
-				Description: "SNMPv3 username.",
+				Description: "SNMPv3 username. Omit it to clear it server-side.",
 				Optional:    true,
 				Sensitive:   true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"snmp_security_level": schema.StringAttribute{
 				Description: "SNMPv3 security level.",
@@ -309,56 +318,26 @@ func (r *networkDeviceResource) Update(ctx context.Context, req resource.UpdateR
 
 	id := state.ID.ValueString()
 
-	// Build update input
-	name := plan.Name.ValueString()
-	ipAddr := plan.IPAddress.ValueString()
+	// Two policies here, and the difference lives in the struct tags, not in
+	// these call sites — every line below looks identical:
+	//   clears on nil  — polling_host_id, snmp_username (Optional-only, ours)
+	//   preserves nil  — snmp_community, snmp_auth_password, snmp_priv_password
+	//                    (write-only, blank-means-keep server-side) and the
+	//                    defaulted attributes.
 	input := client.UpdateNetworkDeviceInput{
-		Name:      &name,
-		IPAddress: &ipAddr,
-	}
-	if !plan.PollingHostID.IsNull() {
-		v := plan.PollingHostID.ValueString()
-		input.PollingHostID = &v
-	}
-	if !plan.DeviceType.IsNull() {
-		v := plan.DeviceType.ValueString()
-		input.DeviceType = &v
-	}
-	if !plan.PollingInterval.IsNull() {
-		v := int(plan.PollingInterval.ValueInt64())
-		input.PollingInterval = &v
-	}
-	if !plan.SNMPVersion.IsNull() {
-		v := plan.SNMPVersion.ValueString()
-		input.SNMPVersion = &v
-	}
-	if !plan.SNMPCommunity.IsNull() {
-		v := plan.SNMPCommunity.ValueString()
-		input.SNMPCommunity = &v
-	}
-	if !plan.SNMPUsername.IsNull() {
-		v := plan.SNMPUsername.ValueString()
-		input.SNMPUsername = &v
-	}
-	if !plan.SNMPSecurityLevel.IsNull() {
-		v := plan.SNMPSecurityLevel.ValueString()
-		input.SNMPSecurityLevel = &v
-	}
-	if !plan.SNMPAuthProtocol.IsNull() {
-		v := plan.SNMPAuthProtocol.ValueString()
-		input.SNMPAuthProtocol = &v
-	}
-	if !plan.SNMPAuthPassword.IsNull() {
-		v := plan.SNMPAuthPassword.ValueString()
-		input.SNMPAuthPassword = &v
-	}
-	if !plan.SNMPPrivProtocol.IsNull() {
-		v := plan.SNMPPrivProtocol.ValueString()
-		input.SNMPPrivProtocol = &v
-	}
-	if !plan.SNMPPrivPassword.IsNull() {
-		v := plan.SNMPPrivPassword.ValueString()
-		input.SNMPPrivPassword = &v
+		Name:              stringPtr(plan.Name),
+		IPAddress:         stringPtr(plan.IPAddress),
+		PollingHostID:     stringPtr(plan.PollingHostID),
+		DeviceType:        stringPtr(plan.DeviceType),
+		PollingInterval:   intPtr(plan.PollingInterval),
+		SNMPVersion:       stringPtr(plan.SNMPVersion),
+		SNMPCommunity:     stringPtr(plan.SNMPCommunity),
+		SNMPUsername:      stringPtr(plan.SNMPUsername),
+		SNMPSecurityLevel: stringPtr(plan.SNMPSecurityLevel),
+		SNMPAuthProtocol:  stringPtr(plan.SNMPAuthProtocol),
+		SNMPAuthPassword:  stringPtr(plan.SNMPAuthPassword),
+		SNMPPrivProtocol:  stringPtr(plan.SNMPPrivProtocol),
+		SNMPPrivPassword:  stringPtr(plan.SNMPPrivPassword),
 	}
 
 	// ETag retry loop
@@ -413,14 +392,24 @@ func (r *networkDeviceResource) Delete(ctx context.Context, req resource.DeleteR
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting network device", map[string]interface{}{"id": state.ID.ValueString()})
+	id := state.ID.ValueString()
+	tflog.Debug(ctx, "Deleting network device", map[string]interface{}{"id": id})
 
-	err := r.client.DeleteNetworkDevice(ctx, state.ID.ValueString())
+	accepted, err := r.client.DeleteNetworkDevice(ctx, id)
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting network device", err.Error())
+		return
+	}
+
+	// Device deletion is asynchronous too (202).
+	if accepted {
+		tflog.Debug(ctx, "Waiting for asynchronous network device deletion", map[string]interface{}{"id": id})
+		if err := r.client.WaitForNetworkDeviceDeletion(ctx, id, client.AsyncDeletionTimeout); err != nil {
+			resp.Diagnostics.AddError("Error waiting for network device deletion", err.Error())
+		}
 	}
 }
 
@@ -432,26 +421,28 @@ func mapNetworkDeviceToState(d *client.NetworkDevice, state *networkDeviceModel)
 	state.ID = types.StringValue(d.ID)
 	state.Name = types.StringValue(d.Name)
 	state.IPAddress = types.StringValue(d.IPAddress)
-	if d.PollingHostID != nil {
-		state.PollingHostID = types.StringValue(*d.PollingHostID)
-	} else {
-		state.PollingHostID = types.StringNull()
-	}
-	state.DeviceType = types.StringValue(d.DeviceType)
+	// Optional-only: "" and null both mean unset, and "" is not a legal config
+	// value, so collapse both or an API "" fails the apply against a null plan.
+	state.PollingHostID = optionalNonEmptyString(d.PollingHostID)
+	// Attributes with a schema default keep the planned value when the API
+	// leaves them null, so a v2c device doesn't wipe its defaults to null.
+	state.DeviceType = stringOrKeep(d.DeviceType, state.DeviceType)
 	state.PollingInterval = types.Int64Value(int64(d.PollingInterval))
-	state.SNMPVersion = types.StringValue(d.SNMPVersion)
-	// snmp_username is returned by API (not sensitive)
-	state.SNMPUsername = types.StringValue(d.SNMPUsername)
-	state.SNMPSecurityLevel = types.StringValue(d.SNMPSecurityLevel)
-	state.SNMPAuthProtocol = types.StringValue(d.SNMPAuthProtocol)
-	state.SNMPPrivProtocol = types.StringValue(d.SNMPPrivProtocol)
+	state.SNMPVersion = stringOrKeep(d.SNMPVersion, state.SNMPVersion)
+	// snmp_username has no default and is not Computed, so the config owns it:
+	// keeping the prior value on a null would hide an out-of-band change forever
+	// instead of letting the next plan repair it.
+	state.SNMPUsername = optionalNonEmptyString(d.SNMPUsername)
+	state.SNMPSecurityLevel = stringOrKeep(d.SNMPSecurityLevel, state.SNMPSecurityLevel)
+	state.SNMPAuthProtocol = stringOrKeep(d.SNMPAuthProtocol, state.SNMPAuthProtocol)
+	state.SNMPPrivProtocol = stringOrKeep(d.SNMPPrivProtocol, state.SNMPPrivProtocol)
 	// Write-only fields (community, auth_password, priv_password) are NOT
 	// returned by the API, so we preserve whatever the user set in config.
 	state.MaintenanceMode = types.BoolValue(d.MaintenanceMode)
-	state.Status = types.StringValue(d.Status)
-	state.Vendor = types.StringValue(d.Vendor)
-	state.Model = types.StringValue(d.Model)
-	state.SysName = types.StringValue(d.SysName)
+	state.Status = optionalString(d.Status)
+	state.Vendor = optionalString(d.Vendor)
+	state.Model = optionalString(d.Model)
+	state.SysName = optionalString(d.SysName)
 	state.LastPolledAt = optionalString(d.LastPolledAt)
 	state.CreatedAt = types.StringValue(d.CreatedAt)
 	state.UpdatedAt = types.StringValue(d.UpdatedAt)

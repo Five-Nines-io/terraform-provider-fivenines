@@ -11,7 +11,7 @@ test:
 	go test ./... -v
 
 testacc:
-	TF_ACC=1 go test ./... -v
+	TF_ACC=1 go test ./internal/provider/ ./internal/client/ -v -timeout 120m
 
 fmt:
 	go fmt ./...

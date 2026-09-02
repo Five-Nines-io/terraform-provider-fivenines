@@ -172,10 +172,10 @@ func TestPlanAffectedItemsToClient(t *testing.T) {
 	}
 }
 
-// --- parseMaintenanceWindowImportID ---
+// --- parseCompositeInt64ID, via the maintenance window import form ---
 
 func TestParseMaintenanceWindowImportID(t *testing.T) {
-	statusPageID, id, err := parseMaintenanceWindowImportID("12:77")
+	statusPageID, id, err := parseCompositeInt64ID("12:77", "status_page_id", "id")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestParseMaintenanceWindowImportID(t *testing.T) {
 	}
 
 	for _, bad := range []string{"77", "12:77:3", "", ":77", "12:", "abc:77", "12:abc"} {
-		if _, _, err := parseMaintenanceWindowImportID(bad); err == nil {
+		if _, _, err := parseCompositeInt64ID(bad, "status_page_id", "id"); err == nil {
 			t.Errorf("expected an error for %q", bad)
 		}
 	}

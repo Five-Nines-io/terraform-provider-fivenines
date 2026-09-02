@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"strconv"
-	"strings"
 	"time"
 
 	// The status page timezone is resolved with time.LoadLocation to compare
@@ -397,7 +395,7 @@ func (r *statusPageMaintenanceWindowResource) Delete(ctx context.Context, req re
 }
 
 func (r *statusPageMaintenanceWindowResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	statusPageID, id, err := parseMaintenanceWindowImportID(req.ID)
+	statusPageID, id, err := parseCompositeInt64ID(req.ID, "status_page_id", "id")
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid import ID", err.Error())
 		return
@@ -407,23 +405,6 @@ func (r *statusPageMaintenanceWindowResource) ImportState(ctx context.Context, r
 	// Seed the provider-only attribute with its schema default so the first plan
 	// after an import is clean.
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("cancel_on_destroy"), types.BoolValue(false))...)
-}
-
-// parseMaintenanceWindowImportID splits the "<status_page_id>:<id>" import ID.
-func parseMaintenanceWindowImportID(importID string) (int64, int64, error) {
-	parts := strings.Split(importID, ":")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return 0, 0, fmt.Errorf("expected %q to be in the form <status_page_id>:<id>", importID)
-	}
-	statusPageID, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("cannot parse status page ID %q as an integer: %s", parts[0], err)
-	}
-	id, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("cannot parse maintenance window ID %q as an integer: %s", parts[1], err)
-	}
-	return statusPageID, id, nil
 }
 
 // mapMaintenanceWindowToPlan maps an API response onto the PLAN (Create and

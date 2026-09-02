@@ -2339,3 +2339,249 @@ func IsTokenHasRegisteredHosts(err error) bool {
 	apiErr, ok := err.(*APIError)
 	return ok && apiErr.StatusCode == http.StatusUnprocessableEntity
 }
+
+// --- Dashboards ---
+
+// GetDashboard returns the full definition: the dashboard, its sections and
+// every panel. There is no list endpoint for sections or panels - this is how
+// the nested resources read themselves back.
+func (c *Client) GetDashboard(ctx context.Context, id int64) (*Dashboard, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/dashboards/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := sanitizeETag(resp.Header.Get("ETag"))
+	var result struct {
+		Dashboard Dashboard `json:"dashboard"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Dashboard, etag, nil
+}
+
+func (c *Client) CreateDashboard(ctx context.Context, input CreateDashboardInput) (*Dashboard, error) {
+	body := map[string]interface{}{"dashboard": input}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/dashboards", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Dashboard Dashboard `json:"dashboard"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Dashboard, nil
+}
+
+func (c *Client) UpdateDashboard(ctx context.Context, id int64, etag string, input UpdateDashboardInput) (*Dashboard, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	body := map[string]interface{}{"dashboard": input}
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/dashboards/"+strconv.FormatInt(id, 10), body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Dashboard Dashboard `json:"dashboard"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Dashboard, nil
+}
+
+func (c *Client) DeleteDashboard(ctx context.Context, id int64) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/dashboards/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// --- Dashboard sections ---
+
+func (c *Client) CreateDashboardSection(ctx context.Context, dashboardID int64, input DashboardSectionInput) (*DashboardSection, error) {
+	body := map[string]interface{}{"section": input}
+	path := fmt.Sprintf("/api/v1/dashboards/%d/sections", dashboardID)
+	resp, err := c.doRequest(ctx, "POST", path, body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Section DashboardSection `json:"section"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Section, nil
+}
+
+// UpdateDashboardSection patches a section. Sections have no GET of their own -
+// the dashboard definition lists them - so there is no ETag to pass back here,
+// and the write is last-writer-wins by construction.
+func (c *Client) UpdateDashboardSection(ctx context.Context, dashboardID, id int64, input DashboardSectionInput) (*DashboardSection, error) {
+	body := map[string]interface{}{"section": input}
+	path := fmt.Sprintf("/api/v1/dashboards/%d/sections/%d", dashboardID, id)
+	resp, err := c.doRequest(ctx, "PATCH", path, body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Section DashboardSection `json:"section"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Section, nil
+}
+
+func (c *Client) DeleteDashboardSection(ctx context.Context, dashboardID, id int64) error {
+	path := fmt.Sprintf("/api/v1/dashboards/%d/sections/%d", dashboardID, id)
+	resp, err := c.doRequest(ctx, "DELETE", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// --- Dashboard visualizations (panels) ---
+
+func (c *Client) GetVisualization(ctx context.Context, dashboardID, id int64) (*Visualization, string, error) {
+	path := fmt.Sprintf("/api/v1/dashboards/%d/visualizations/%d", dashboardID, id)
+	resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := sanitizeETag(resp.Header.Get("ETag"))
+	var result struct {
+		Visualization Visualization `json:"visualization"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Visualization, etag, nil
+}
+
+func (c *Client) CreateVisualization(ctx context.Context, dashboardID int64, input VisualizationInput) (*Visualization, error) {
+	body := map[string]interface{}{"visualization": input}
+	path := fmt.Sprintf("/api/v1/dashboards/%d/visualizations", dashboardID)
+	resp, err := c.doRequest(ctx, "POST", path, body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Visualization Visualization `json:"visualization"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Visualization, nil
+}
+
+func (c *Client) UpdateVisualization(ctx context.Context, dashboardID, id int64, etag string, input VisualizationInput) (*Visualization, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	body := map[string]interface{}{"visualization": input}
+	path := fmt.Sprintf("/api/v1/dashboards/%d/visualizations/%d", dashboardID, id)
+	resp, err := c.doRequest(ctx, "PATCH", path, body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Visualization Visualization `json:"visualization"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Visualization, nil
+}
+
+func (c *Client) DeleteVisualization(ctx context.Context, dashboardID, id int64) error {
+	path := fmt.Sprintf("/api/v1/dashboards/%d/visualizations/%d", dashboardID, id)
+	resp, err := c.doRequest(ctx, "DELETE", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// --- Dashboard templates ---
+
+// ListDashboardTemplates returns the template catalog. It is unpaginated: the
+// catalog is a code-defined constant, not a table.
+func (c *Client) ListDashboardTemplates(ctx context.Context) ([]DashboardTemplate, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/dashboards/templates", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Templates []DashboardTemplate `json:"templates"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return result.Templates, nil
+}
+
+// InstantiateDashboardTemplate builds a template. Panels the organization
+// cannot feed are dropped rather than created blank, and every drop comes back
+// in the result's Skipped list.
+func (c *Client) InstantiateDashboardTemplate(ctx context.Context, input InstantiateDashboardTemplateInput) (*DashboardTemplateResult, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/dashboards/templates", input, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result DashboardTemplateResult
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result, nil
+}

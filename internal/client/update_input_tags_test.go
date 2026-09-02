@@ -349,6 +349,133 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		input  interface{}
 		policy map[string]string
 	}{
+		input: CreateDashboardInput{},
+		policy: map[string]string{
+			"name": always,
+			// Nothing to clear on a dashboard that does not exist yet, so create
+			// omits an absent description rather than sending an explicit null —
+			// the CreateStatusPageInput call.
+			"description": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: UpdateDashboardInput{},
+		policy: map[string]string{
+			// Required attribute: the plan always holds a name, so nil never
+			// reaches the tag.
+			"name": always,
+			// Optional-only, so the configuration owns it end to end: dropping
+			// `description` has to clear it, which only an explicit null can do.
+			// The dashboard PATCH accepts a null here and stores it verbatim.
+			"description": clears,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		// One write shape for both verbs, because the API publishes one:
+		// DashboardSectionInput is what POST /sections and PATCH /sections/{id}
+		// both accept, and splitting it here would be two identical structs whose
+		// policies could drift apart while the wire format could not.
+		input: DashboardSectionInput{},
+		policy: map[string]string{
+			// Required attribute, and "" is not a legal section name — the schema
+			// enforces 1-100 characters, so the zero value never reaches the tag.
+			"name": dropsZero,
+			// Optional+Computed with a schema default, so nil never reaches the
+			// tag; and it must not, because the column is NOT NULL.
+			"collapsed": preserves,
+			// There is no "clear" for a position — every section has one. Omitting
+			// it is how create asks to append and how update asks to leave the
+			// order alone, so nil must never mean null.
+			"position": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		// Shared between POST and PATCH for the same reason as the section input.
+		input: VisualizationInput{},
+		policy: map[string]string{
+			// Optional-only attributes the configuration owns end to end. The API
+			// stores a panel's title and description stripped and collapses blank
+			// to null, so dropping one has to clear it — only an explicit null can.
+			"title": clears, "description": clears,
+			// Also Optional-only: `section` names the section a panel sits in, and
+			// dropping it has to move the panel back to the ungrouped grid at the
+			// top, which the API spells as an explicit null.
+			"section": clears,
+			// Required on create; the resource always sends both (chart_type
+			// carries a schema default), so the zero value never reaches the tag.
+			"metric": dropsZero, "chart_type": dropsZero,
+			// Nested objects: omitted when the configuration declares no block, so
+			// the dashboard places the panel itself and the API leaves the entities
+			// alone. `options` is the exception that proves the rule — the resource
+			// always sends it, because its OWN fields carry the clear-on-nil policy
+			// (see VisualizationOptions below).
+			"layout": preserves, "targets": preserves, "options": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		// Not a Create*/Update* input, but it is a write shape with the same
+		// hazard, and the whole panel design rests on this row: the API's null
+		// contract says an option the panel does not store reads back as null and
+		// an explicit null on write clears it back to the metric's default. A
+		// reflexively copied `,omitempty` here would silently turn "remove the
+		// setting" into "keep whatever is stored".
+		input: VisualizationOptions{},
+		policy: map[string]string{
+			"reducer": clears, "group_by": clears, "dimensions": clears,
+			"limit": clears, "stacked": clears, "incident_overlay": clears,
+			"sparkline": clears, "max": clears,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		// Pointers-to-slice, the UpdateStatusPageInput.items shape: on PATCH the
+		// API replaces a target kind it is given and leaves out one it is not, so
+		// nil has to omit while a pointer to an empty slice sends the explicit []
+		// that detaches every entity of that kind.
+		input: VisualizationTargetsInput{},
+		policy: map[string]string{
+			"hosts": preserves, "uptime_monitors": preserves, "tasks": preserves,
+			"network_devices": preserves, "ceph_clusters": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		// Read shape and write shape in one struct. Omitting a coordinate is how
+		// the API is asked to place the panel itself (w defaults to 12, h to 6),
+		// so nil must never marshal as a null the grid would have to interpret.
+		input: VisualizationLayout{},
+		policy: map[string]string{
+			"x": preserves, "y": preserves, "w": preserves, "h": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: InstantiateDashboardTemplateInput{},
+		policy: map[string]string{
+			"slug": always,
+			// "" is not a legal dashboard name and the resource always sends the
+			// configured one, so the zero value never reaches the tag.
+			"name": dropsZero,
+			// Absent means "build a new dashboard" and present means "append to
+			// this one" — two different operations, so nil has to omit the key
+			// rather than send a null the API would have to guess at.
+			"dashboard_id": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
 		input: CreateWorkflowVersionInput{},
 		policy: map[string]string{
 			// A version is meaningless without its graph, and the resource always

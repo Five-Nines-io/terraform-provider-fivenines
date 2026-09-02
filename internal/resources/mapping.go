@@ -1,9 +1,12 @@
 package resources
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -59,6 +62,66 @@ func optionalInt64(v *int64) types.Int64 {
 		return types.Int64Null()
 	}
 	return types.Int64Value(*v)
+}
+
+// optionalBool maps a nullable API boolean onto a Terraform value. A stored
+// false and an unset field are different answers, so this must not collapse the
+// two the way a plain bool would.
+func optionalBool(v *bool) types.Bool {
+	if v == nil {
+		return types.BoolNull()
+	}
+	return types.BoolValue(*v)
+}
+
+// optionalFloat64 maps a nullable API number onto a Terraform value.
+func optionalFloat64(v *float64) types.Float64 {
+	if v == nil {
+		return types.Float64Null()
+	}
+	return types.Float64Value(*v)
+}
+
+// stringListValue renders a list the API always sends, where an empty array is
+// a real answer rather than an absent one.
+func stringListValue(values []string) types.List {
+	elements := make([]attr.Value, len(values))
+	for i, v := range values {
+		elements[i] = types.StringValue(v)
+	}
+	list, _ := types.ListValue(types.StringType, elements)
+	return list
+}
+
+// optionalStringListValue is stringListValue for a list the API sends as null
+// when it stores nothing for it — which is a different answer from [].
+func optionalStringListValue(values []string) types.List {
+	if values == nil {
+		return types.ListNull(types.StringType)
+	}
+	return stringListValue(values)
+}
+
+// --- Import IDs ---
+
+// parseCompositeInt64ID splits the "<parent-id>:<child-id>" form that every
+// resource nested under a numeric parent imports with. The labels only shape the
+// error message, which is the whole value of the function: a practitioner who
+// pastes a bare id gets told the shape the resource actually wants.
+func parseCompositeInt64ID(importID, parentLabel, childLabel string) (int64, int64, error) {
+	parts := strings.Split(importID, ":")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return 0, 0, fmt.Errorf("expected %q to be in the form <%s>:<%s>", importID, parentLabel, childLabel)
+	}
+	parentID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("cannot parse %s %q as an integer: %s", parentLabel, parts[0], err)
+	}
+	id, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("cannot parse %s %q as an integer: %s", childLabel, parts[1], err)
+	}
+	return parentID, id, nil
 }
 
 // --- Terraform plan → API update input ---

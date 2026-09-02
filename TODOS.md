@@ -228,6 +228,37 @@
   404s honestly
 - Found by: /ship API contract specialist, 2026-09-02
 
+### Dashboard sections write last-writer-wins, unlike every other resource
+
+- Every other resource does GET(ETag) then PATCH(If-Match). Sections cannot: the
+  API publishes no `GET /dashboards/{id}/sections/{id}`, so a section's ETag only
+  ever comes back in the response to a PATCH that already happened. There is
+  nothing to pass to `If-Match` on the first write of a plan
+- `UpdateDashboardSection` therefore takes no etag argument at all — deliberately,
+  because a parameter that is always `""` reads like an oversight. The cost is
+  real: two concurrent renames, or a rename racing the resequencing that any
+  sibling's `position` write triggers, and the later one wins silently. `Read`
+  has the same hole, since it reconstructs the section from the dashboard
+  definition rather than from a section endpoint
+- This is the ONE resource in the provider whose concurrency semantics differ, so
+  it is worth naming rather than burying
+- Fix: carry the ETag from the previous PATCH response in private state, so the
+  second and later writes of a session are protected even though the first cannot
+  be — or ask the server for a section `GET`, which fixes it properly and also
+  removes the whole-dashboard fetch `Read` currently pays for
+- Found by: /ship, 2026-09-02
+
+### Dashboard clone and share are actions with no Terraform surface
+
+- `POST /dashboards/{id}/clone` and `POST|DELETE /dashboards/{id}/share` are
+  actions, not resources, so #19 exposes neither
+- `shared` and `share_url` are Computed on `fivenines_dashboard`, so a fleet can
+  be AUDITED from Terraform but not published or revoked from it
+- Decide whether share belongs in the provider at all before adding it: the slug
+  IS the credential, and putting it under `terraform apply` puts it in state and
+  in plan output. `share_url` is already marked Sensitive for that reason
+- Found by: /ship, 2026-09-02
+
 ## P2 — Nice to have
 
 ### Delete timeout is not operator-tunable

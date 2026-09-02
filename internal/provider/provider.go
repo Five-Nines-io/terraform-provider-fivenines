@@ -97,6 +97,9 @@ func (p *fiveninesProvider) Resources(_ context.Context) []func() resource.Resou
 		resources.NewMQTTTopicMonitorResource,
 		resources.NewAPITokenResource,
 		resources.NewEnrollmentTokenResource,
+		resources.NewDashboardResource,
+		resources.NewDashboardSectionResource,
+		resources.NewDashboardVisualizationResource,
 	}
 }
 
@@ -110,5 +113,6 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 		datasources.NewIncidentsDataSource,
 		datasources.NewUptimeMonitorsDataSource,
 		datasources.NewUptimeMonitorStatusDataSource,
+		datasources.NewDashboardTemplatesDataSource,
 	}
 }

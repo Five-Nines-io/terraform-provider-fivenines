@@ -19,6 +19,9 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_mqtt_topic_monitor` | Per-topic freshness & payload checks on a broker |
 | `fivenines_api_token` | API tokens for this provider, so key rotation is code |
 | `fivenines_enrollment_token` | Bootstrap credentials so hosts self-enroll |
+| `fivenines_dashboard` | Dashboards, empty or built from a gallery template |
+| `fivenines_dashboard_section` | Collapsible sections (Grafana-style rows) on a dashboard |
+| `fivenines_dashboard_visualization` | Panels: 10 chart types over instances, monitors, tasks, devices and org-wide metrics |
 
 ## Data Sources
 
@@ -32,6 +35,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_incidents` | Incidents triggered by workflows |
 | `fivenines_uptime_monitors` | Uptime monitors, filterable by status, protocol, search text and update time |
 | `fivenines_uptime_monitor_status` | Lightweight current status of a single uptime monitor |
+| `fivenines_dashboard_templates` | The dashboard gallery, with an availability verdict per template |
 
 ## Quick Start
 
@@ -163,7 +167,40 @@ resource "fivenines_status_page_maintenance_window" "db_upgrade" {
 resource "fivenines_enrollment_token" "web_fleet" {
   name = "web fleet"
 }
+
+# Build a dashboard. Sections and panels are their own resources: the API keeps
+# them on separate endpoints so that renaming a dashboard can never silently
+# delete a section it did not mention.
+resource "fivenines_dashboard" "fleet" {
+  name        = "Fleet health"
+  description = "Everything on one screen"
+}
+
+resource "fivenines_dashboard_section" "compute" {
+  dashboard_id = fivenines_dashboard.fleet.id
+  name         = "Compute"
+  position     = 0
+}
+
+resource "fivenines_dashboard_visualization" "cpu" {
+  dashboard_id = fivenines_dashboard.fleet.id
+  section      = fivenines_dashboard_section.compute.name
+  title        = "CPU usage"
+  metric       = "cpu_usage"
+  chart_type   = "line"
+
+  targets = {
+    hosts = [fivenines_instance.web.id]
+  }
+
+  options = {
+    incident_overlay = true
+  }
+}
 ```
+
+See [`examples/golden-dashboard`](examples/golden-dashboard) for the same layout
+packaged as a module and instantiated once per environment.
 
 ### 4. Apply
 
@@ -306,6 +343,12 @@ terraform import fivenines_api_token.ci <api-token-id>
 # reason: `token` and `install_command` stay null, because the value was
 # readable exactly once
 terraform import fivenines_enrollment_token.fleet <enrollment-token-id>
+terraform import fivenines_dashboard.fleet <dashboard-id>
+
+# Sections and panels are addressed through their dashboard, so their import
+# ids carry it.
+terraform import fivenines_dashboard_section.compute <dashboard-id>:<section-id>
+terraform import fivenines_dashboard_visualization.cpu <dashboard-id>:<panel-id>
 ```
 
 `fivenines_integration` has no import: the API never returns an integration's

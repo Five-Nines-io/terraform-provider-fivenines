@@ -1,6 +1,9 @@
 package client
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // PaginationMeta represents pagination metadata in list responses.
 type PaginationMeta struct {
@@ -48,6 +51,15 @@ type UpdateInstanceInput struct {
 	Description     *string `json:"description,omitempty"`
 	Enabled         *bool   `json:"enabled,omitempty"`
 	MaintenanceMode *bool   `json:"maintenance_mode,omitempty"`
+}
+
+// HostGroup represents a named, ordered group of instances.
+type HostGroup struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Position  int64  `json:"position"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // Task represents a cron/heartbeat monitor.
@@ -144,6 +156,24 @@ type WorkflowRun struct {
 // CreateWorkflowVersionInput is the request body for creating a workflow version.
 type CreateWorkflowVersionInput struct {
 	ExecutionGraph map[string]interface{} `json:"execution_graph"`
+}
+
+// NodeType represents an entry in the workflow node catalog.
+type NodeType struct {
+	Type      string          `json:"type"`
+	Category  string          `json:"category"`
+	Schema    json.RawMessage `json:"schema"`
+	Available bool            `json:"available"`
+}
+
+// WorkflowTemplate represents a ready-made workflow from the template catalog.
+type WorkflowTemplate struct {
+	Slug        string  `json:"slug"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Category    string  `json:"category"`
+	Icon        *string `json:"icon"`
+	TriggerType string  `json:"trigger_type"`
 }
 
 // UptimeMonitor represents an uptime monitoring check.

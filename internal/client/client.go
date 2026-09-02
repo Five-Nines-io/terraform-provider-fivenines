@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -278,6 +279,57 @@ func (c *Client) instanceAction(ctx context.Context, id, action string) error {
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// --- Host Groups ---
+
+// hostGroupsMeta mirrors the pagination envelope documented for
+// /api/v1/host_groups. The shared PaginationMeta still speaks the older
+// count/total/offset fields (see TODOS.md, issue #5), so this keeps the host
+// group listing paging correctly without touching the other endpoints.
+type hostGroupsMeta struct {
+	CurrentPage int `json:"current_page"`
+	TotalPages  int `json:"total_pages"`
+	TotalCount  int `json:"total_count"`
+	PerPage     int `json:"per_page"`
+}
+
+// ListHostGroups returns the organization's host groups in display order.
+// A non-empty q filters server-side on a case-insensitive substring of the name.
+// The endpoint rejects unknown query parameters with a 400, so only the
+// documented ones are sent.
+func (c *Client) ListHostGroups(ctx context.Context, q string) ([]HostGroup, error) {
+	var all []HostGroup
+	page := 1
+	for {
+		params := url.Values{}
+		params.Set("page", strconv.Itoa(page))
+		params.Set("per_page", "100")
+		if q != "" {
+			params.Set("q", q)
+		}
+		resp, err := c.doRequest(ctx, "GET", "/api/v1/host_groups?"+params.Encode(), nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+
+		var result struct {
+			HostGroups []HostGroup    `json:"host_groups"`
+			Meta       hostGroupsMeta `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.HostGroups...)
+		if result.Meta.CurrentPage >= result.Meta.TotalPages {
+			break
+		}
+		page++
+	}
+	return all, nil
 }
 
 // --- Tasks ---
@@ -612,6 +664,50 @@ func (c *Client) PublishWorkflowVersion(ctx context.Context, workflowID int64, v
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// --- Node Types ---
+
+// ListNodeTypes returns the workflow node catalog. It is a static, unpaginated
+// list; the available flag is resolved per organization from feature flags.
+func (c *Client) ListNodeTypes(ctx context.Context) ([]NodeType, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/node_types", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		NodeTypes []NodeType `json:"node_types"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return result.NodeTypes, nil
+}
+
+// --- Workflow Templates ---
+
+// ListWorkflowTemplates returns the ready-made workflow catalog. Unpaginated:
+// the catalog is a fixed list, not a table.
+func (c *Client) ListWorkflowTemplates(ctx context.Context) ([]WorkflowTemplate, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/workflows/templates", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		Templates []WorkflowTemplate `json:"templates"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return result.Templates, nil
 }
 
 // --- Uptime Monitors ---

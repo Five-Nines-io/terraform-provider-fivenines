@@ -21,6 +21,9 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_integrations` | Configured notification integrations |
 | `fivenines_workflow_runs` | Workflow execution history |
 | `fivenines_incidents` | Incidents triggered by workflows |
+| `fivenines_node_types` | Workflow node catalog with per-node JSON Schema |
+| `fivenines_workflow_templates` | Ready-made workflow templates |
+| `fivenines_host_groups` | Host groups, for looking up a group ID by name |
 
 ## Quick Start
 

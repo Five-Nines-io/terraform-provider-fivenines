@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 )
@@ -676,6 +677,175 @@ func TestClient_ListIntegrations(t *testing.T) {
 	}
 	if integrations[0].Provider != "slack" {
 		t.Errorf("expected provider slack, got %s", integrations[0].Provider)
+	}
+}
+
+// --- Node Types ---
+
+func TestClient_ListNodeTypes(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node_types" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"node_types":[
+			{"type":"host_status","category":"trigger","schema":{"type":"object","required":["host_id"]},"available":true},
+			{"type":"ceph_health","category":"trigger","schema":{},"available":false}
+		]}`)
+	})
+
+	nodeTypes, err := c.ListNodeTypes(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(nodeTypes) != 2 {
+		t.Fatalf("expected 2 node types, got %d", len(nodeTypes))
+	}
+	if nodeTypes[0].Type != "host_status" || nodeTypes[0].Category != "trigger" {
+		t.Errorf("unexpected first node type: %+v", nodeTypes[0])
+	}
+	if !nodeTypes[0].Available || nodeTypes[1].Available {
+		t.Errorf("expected available true then false, got %v then %v", nodeTypes[0].Available, nodeTypes[1].Available)
+	}
+	// The JSON Schema is passed through as raw JSON, not reshaped.
+	var schema map[string]interface{}
+	if err := json.Unmarshal(nodeTypes[0].Schema, &schema); err != nil {
+		t.Fatalf("schema is not valid JSON: %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Errorf("expected schema type object, got %v", schema["type"])
+	}
+}
+
+// --- Workflow Templates ---
+
+func TestClient_ListWorkflowTemplates(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workflows/templates" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"templates": []map[string]interface{}{
+				{"slug": "cpu-usage-alert", "name": "CPU Usage Alert", "description": "Alert when CPU is high",
+					"category": "Instance Metrics", "icon": "cpu", "trigger_type": "metric_threshold"},
+				{"slug": "ceph-health", "name": "Ceph Health", "description": "", "category": "Ceph",
+					"icon": nil, "trigger_type": "ceph_health"},
+			},
+			"meta": map[string]interface{}{"total": 2},
+		})
+	})
+
+	templates, err := c.ListWorkflowTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(templates) != 2 {
+		t.Fatalf("expected 2 templates, got %d", len(templates))
+	}
+	if templates[0].Slug != "cpu-usage-alert" || templates[0].TriggerType != "metric_threshold" {
+		t.Errorf("unexpected first template: %+v", templates[0])
+	}
+	if templates[0].Icon == nil || *templates[0].Icon != "cpu" {
+		t.Errorf("expected icon cpu, got %v", templates[0].Icon)
+	}
+	if templates[1].Icon != nil {
+		t.Errorf("expected null icon to stay nil, got %q", *templates[1].Icon)
+	}
+}
+
+// --- Host Groups ---
+
+func TestClient_ListHostGroups_Pagination(t *testing.T) {
+	var pages []string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/host_groups" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		if page == "1" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"host_groups": []map[string]interface{}{
+					{"id": 7, "name": "Production", "position": 1, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"},
+					{"id": 8, "name": "Staging", "position": 2, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"},
+				},
+				"meta": map[string]interface{}{"current_page": 1, "total_pages": 2, "total_count": 3, "per_page": 2},
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"host_groups": []map[string]interface{}{
+				{"id": 9, "name": "Lab", "position": 3, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"},
+			},
+			"meta": map[string]interface{}{"current_page": 2, "total_pages": 2, "total_count": 3, "per_page": 2},
+		})
+	})
+
+	groups, err := c.ListHostGroups(context.Background(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 3 {
+		t.Fatalf("expected 3 host groups across 2 pages, got %d", len(groups))
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Errorf("expected pages 1 then 2, got %v", pages)
+	}
+	if groups[0].ID != 7 || groups[0].Name != "Production" || groups[0].Position != 1 {
+		t.Errorf("unexpected first group: %+v", groups[0])
+	}
+}
+
+// A meta-less response is a single page: the loop must not spin forever.
+func TestClient_ListHostGroups_NoMeta(t *testing.T) {
+	var calls int
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"host_groups": []map[string]interface{}{{"id": 7, "name": "Production"}},
+		})
+	})
+
+	groups, err := c.ListHostGroups(context.Background(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 request, got %d", calls)
+	}
+	if len(groups) != 1 {
+		t.Errorf("expected 1 host group, got %d", len(groups))
+	}
+}
+
+// The endpoint rejects unknown query parameters with a 400, so the client must
+// send only the documented ones — and q must survive URL encoding intact.
+func TestClient_ListHostGroups_QueryFilter(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"host_groups": []map[string]interface{}{},
+			"meta":        map[string]interface{}{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	if _, err := c.ListHostGroups(context.Background(), "prod 100%"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gotQuery.Get("q"); got != "prod 100%" {
+		t.Errorf("expected q %q, got %q", "prod 100%", got)
+	}
+	for key := range gotQuery {
+		if key != "page" && key != "per_page" && key != "q" {
+			t.Errorf("unexpected query parameter %q", key)
+		}
+	}
+
+	if _, err := c.ListHostGroups(context.Background(), ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := gotQuery["q"]; ok {
+		t.Errorf("expected no q parameter when the filter is empty, got %q", gotQuery.Get("q"))
 	}
 }
 

@@ -99,5 +99,8 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 		datasources.NewIntegrationsDataSource,
 		datasources.NewWorkflowRunsDataSource,
 		datasources.NewIncidentsDataSource,
+		datasources.NewNodeTypesDataSource,
+		datasources.NewWorkflowTemplatesDataSource,
+		datasources.NewHostGroupsDataSource,
 	}
 }

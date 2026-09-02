@@ -3,8 +3,6 @@ package provider_test
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,14 +28,7 @@ import (
 
 func mqttPlanTest(t *testing.T, respond func(w http.ResponseWriter, r *http.Request)) {
 	t.Helper()
-	if _, err := exec.LookPath("terraform"); err != nil {
-		t.Skip("terraform CLI not on PATH — skipping plan-validation test")
-	}
-	srv := httptest.NewServer(http.HandlerFunc(respond))
-	t.Cleanup(srv.Close)
-	t.Setenv("FIVENINES_BASE_URL", srv.URL)
-	t.Setenv("FIVENINES_API_KEY", "fn_test")
-	t.Setenv("TF_ACC", "1") // hermetic: the fake server above is the whole API
+	planTest(t, respond)
 }
 
 // brokerHandler serves a broker whose stored credentials are whatever the last

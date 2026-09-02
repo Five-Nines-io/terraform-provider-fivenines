@@ -233,6 +233,22 @@ func TestNetworkDeviceCreate_MaintenanceResponseIsTheFinalState(t *testing.T) {
 	if got.LastErrorType.ValueString() != "timeout" {
 		t.Errorf("expected last_error_type timeout from the enter_maintenance body, got %q", got.LastErrorType.ValueString())
 	}
+	// The maintenance endpoints answer with the full NetworkDevice schema, not a
+	// sparse acknowledgement (swagger: 200 -> $ref NetworkDevice, same as GET).
+	// Dropping the follow-up GET is only safe because of that, so pin the fields
+	// that would come back empty if the body were ever narrowed.
+	if got.Vendor.ValueString() != "Cisco" {
+		t.Errorf("expected vendor from the maintenance body, got %q", got.Vendor.ValueString())
+	}
+	if got.DeviceType.ValueString() != "switch" {
+		t.Errorf("expected device_type from the maintenance body, got %q", got.DeviceType.ValueString())
+	}
+	if got.CreatedAt.ValueString() == "" {
+		t.Error("expected created_at from the maintenance body, got empty")
+	}
+	if got.PollingInterval.ValueInt64() != 60 {
+		t.Errorf("expected polling_interval from the maintenance body, got %d", got.PollingInterval.ValueInt64())
+	}
 }
 
 func TestNetworkDeviceUpdate_MaintenanceResponseIsTheFinalState(t *testing.T) {

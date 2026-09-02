@@ -95,6 +95,29 @@
   anything indexing positionally and unstable keys in an index-keyed `for_each`
 - Fix: a Set, or make `order` mandatory
 
+### morePages trusts that the server honours `page`
+- The unreadable-envelope fallback walks until an empty page. If an index ever
+  returns no recognised meta AND ignores `page` — the shape `ListIntegrations`
+  had at this same API until 2026-09-01 — the loop runs to `maxListPages` (1000)
+  and appends the same rows 1000 times before erroring
+- #16 makes this worth more than it was: `GetAPIToken` is the provider's first
+  walk that runs per managed resource per refresh rather than once per data
+  source read, so the cost multiplies by the number of tokens in the
+  configuration. Its early exit caps the common case at one page, but only when
+  the token is found
+- Fix: a repeated-page guard in `morePages` (remember the first row of the
+  previous page, stop when it repeats). Cheap, and it belongs in the shared
+  helper rather than in one caller
+- Found by: /ship performance specialist, 2026-09-02
+
+### ImportState duplicates the same int64 parse seven times
+- `host_group`, `status_page`, `network_device`, `workflow`, `task`,
+  `maintenance_window` and now `api_token` each carry the same seven-line
+  `strconv.ParseInt` + `SetAttribute` block
+- Fix: `importInt64ID(ctx, req, resp)` in `internal/resources/mapping.go`, where
+  the other shared mapping helpers live. ~40 lines repo-wide
+- Found by: /ship simplification specialist, 2026-09-02
+
 ### Unbounded rate-limit backoff
 - `doRequest` derives the 429 wait from `X-RateLimit-Reset` via `time.Until` with
   a floor but no ceiling, so a skewed reset header parks a plan indefinitely
@@ -115,9 +138,12 @@
   even for Optional+Computed
 - #13 added `internal/provider/host_group_plan_test.go`: real Terraform against an
   httptest server, so it needs no organisation and no key and runs in `make test`
-  wherever the terraform binary is. The other six resources have no equivalent —
-  their plan-time behaviour is only covered by the TF_ACC suite, which does not
-  run in CI and needs a staging org that does not exist yet
+  wherever the terraform binary is
+- #18 added the MQTT pair, and #16 added `api_token_plan_test.go` (16 cases) and
+  extracted the harness the three had copied byte-for-byte into
+  `internal/provider/plan_test_harness_test.go`. The remaining resources have no
+  equivalent — their plan-time behaviour is only covered by the TF_ACC suite,
+  which does not run in CI and needs a staging org that does not exist yet
 - Fix: extend the hermetic pattern to the resources whose plan behaviour is
   non-trivial — uptime monitor (`protocolForbidden`), status page (items/sections
   semantics), task (`schedule_type` switching)
@@ -161,6 +187,17 @@
 - Fix: treat a missing ETag as a condition worth surfacing rather than a reason to
   drop the precondition, and decide explicitly what a weak ETag should do
 - Found by: /ship adversarial review, 2026-09-02
+
+### API tokens are visible only to the user who minted them
+- `GET /api/v1/api_tokens` is scoped to the calling user, and there is no show
+  endpoint, so `fivenines_api_token` cannot distinguish "not mine" from "deleted"
+- Rotating `FIVENINES_API_KEY` to a DIFFERENT user's token makes the next plan
+  propose recreating every token in the configuration, while the originals stay
+  live and unmanaged. Documented on the resource; there is nothing the provider
+  can do about it from here
+- Fix would have to be server-side: an org-scoped read, or a show endpoint that
+  404s honestly
+- Found by: /ship API contract specialist, 2026-09-02
 
 ## P2 — Nice to have
 

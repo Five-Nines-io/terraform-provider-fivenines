@@ -246,3 +246,45 @@ func TestMapInstanceToState_NullNumbers(t *testing.T) {
 		t.Errorf("expected source to be null, got %q", state.Source.ValueString())
 	}
 }
+
+// Import starts from an empty model — ImportStatePassthroughID puts only `id`
+// in state — so stringOrKeep has nothing to keep and every defaulted attribute
+// falls back to whatever the API sends. This pins that behaviour: it is fine
+// while the API returns these stored fields (snmp_version is Required, and
+// device_type is stored with its default), and this test is what fails if that
+// assumption ever stops holding.
+func TestMapNetworkDeviceToState_ImportStartsFromEmptyState(t *testing.T) {
+	state := &networkDeviceModel{}
+	mapNetworkDeviceToState(&client.NetworkDevice{
+		ID:                "dev-uuid",
+		Name:              "core-sw",
+		IPAddress:         "192.0.2.10",
+		DeviceType:        ptr("switch"),
+		SNMPVersion:       ptr("v2c"),
+		SNMPSecurityLevel: ptr("no_auth_no_priv"),
+		SNMPAuthProtocol:  ptr("md5"),
+		SNMPPrivProtocol:  ptr("des"),
+	}, state)
+
+	for name, got := range map[string]types.String{
+		"device_type":         state.DeviceType,
+		"snmp_version":        state.SNMPVersion,
+		"snmp_security_level": state.SNMPSecurityLevel,
+		"snmp_auth_protocol":  state.SNMPAuthProtocol,
+		"snmp_priv_protocol":  state.SNMPPrivProtocol,
+	} {
+		if got.IsNull() {
+			t.Errorf("%s is null after import; a defaulted attribute reading back null "+
+				"makes ImportStateVerify diff against the schema default", name)
+		}
+	}
+
+	// The same call with an API that omits them would yield nulls. That is the
+	// failure the acceptance suite's ImportStateVerify exists to catch.
+	empty := &networkDeviceModel{}
+	mapNetworkDeviceToState(&client.NetworkDevice{ID: "dev-uuid"}, empty)
+	if !empty.DeviceType.IsNull() {
+		t.Error("expected the no-prior-state, no-API-value case to be null — " +
+			"if this changed, revisit the import path")
+	}
+}

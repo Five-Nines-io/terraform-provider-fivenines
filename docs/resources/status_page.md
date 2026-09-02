@@ -20,39 +20,42 @@ resource "fivenines_status_page" "public" {
   public      = true
   uptime      = true
 
-  items {
-    item_type = "UptimeMonitor"
-    item_id   = fivenines_uptime_monitor.api.id
-  }
-
-  items {
-    item_type = "UptimeMonitor"
-    item_id   = fivenines_uptime_monitor.website.id
-  }
-
-  items {
-    item_type = "Host"
-    item_id   = fivenines_instance.web.id
-  }
+  # items is a list attribute, not a block: assign it with `=`.
+  items = [
+    {
+      item_type = "UptimeMonitor"
+      item_id   = fivenines_uptime_monitor.api.id
+    },
+    {
+      item_type = "UptimeMonitor"
+      item_id   = fivenines_uptime_monitor.website.id
+    },
+    {
+      item_type = "Host"
+      item_id   = fivenines_instance.web.id
+    },
+  ]
 }
 
 # Status page with custom domain and footer
 resource "fivenines_status_page" "branded" {
-  name                    = "ACME Status"
-  description             = "ACME Corp service status"
-  public                  = true
-  uptime                  = true
-  theme_variant           = "dark"
-  custom_domain_enabled   = true
-  custom_domain           = "status.acme.com"
-  custom_footer_enabled   = true
-  custom_footer           = "© 2026 ACME Corp. All rights reserved."
+  name                      = "ACME Status"
+  description               = "ACME Corp service status"
+  public                    = true
+  uptime                    = true
+  theme_variant             = "dark"
+  custom_domain_enabled     = true
+  custom_domain             = "status.acme.com"
+  custom_footer_enabled     = true
+  custom_footer             = "© 2026 ACME Corp. All rights reserved."
   incidents_history_enabled = true
 
-  items {
-    item_type = "UptimeMonitor"
-    item_id   = fivenines_uptime_monitor.api.id
-  }
+  items = [
+    {
+      item_type = "UptimeMonitor"
+      item_id   = fivenines_uptime_monitor.api.id
+    },
+  ]
 }
 ```
 
@@ -71,7 +74,7 @@ resource "fivenines_status_page" "branded" {
 - `custom_footer_enabled` (Boolean) Whether custom footer is enabled (requires plan upgrade).
 - `description` (String) Description of the status page.
 - `incidents_history_enabled` (Boolean) Whether to show incidents history.
-- `items` (Attributes List) Items displayed on the status page, in order. (see [below for nested schema](#nestedatt--items))
+- `items` (Attributes List) Items displayed on the status page, in order. Omit this attribute to leave the page's items as they are — useful when they are curated in the FiveNines dashboard. Set it to [] to remove every item. (see [below for nested schema](#nestedatt--items))
 - `public` (Boolean) Whether the status page is publicly accessible.
 - `theme_variant` (String) Theme variant (system, dark, light).
 - `uptime` (Boolean) Whether to show uptime percentages.

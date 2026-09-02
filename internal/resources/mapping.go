@@ -47,14 +47,6 @@ func optionalInt64(v *int64) types.Int64 {
 	return types.Int64Value(*v)
 }
 
-// optionalInt maps a nullable API int onto a Terraform Int64 value.
-func optionalInt(v *int) types.Int64 {
-	if v == nil {
-		return types.Int64Null()
-	}
-	return types.Int64Value(int64(*v))
-}
-
 // --- Terraform plan → API update input ---
 //
 // One shape for every attribute: a pointer when the plan holds a value, nil
@@ -66,6 +58,10 @@ func optionalInt(v *int) types.Int64 {
 //     stores. For Optional+Computed attributes and write-only secrets.
 //   - `json:"field"` — nil marshals as an explicit null, so the server clears
 //     the value. For Optional-only attributes the provider owns end to end.
+//   - `*[]T` / `*map[K]V` with omitempty — nil omits the key, but a pointer to
+//     an empty value marshals as an explicit [] / {} and clears. For list and
+//     map attributes where `x = []` is itself a legal config, which a plain
+//     slice with omitempty cannot express.
 
 func stringPtr(v types.String) *string {
 	if v.IsNull() || v.IsUnknown() {

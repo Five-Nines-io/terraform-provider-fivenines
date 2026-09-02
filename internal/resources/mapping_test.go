@@ -47,12 +47,6 @@ func TestOptionalInts(t *testing.T) {
 	if got := optionalInt64(ptr(int64(300))); got.ValueInt64() != 300 {
 		t.Errorf("expected 300, got %v", got)
 	}
-	if got := optionalInt(nil); !got.IsNull() {
-		t.Errorf("expected null, got %v", got)
-	}
-	if got := optionalInt(ptr(4)); got.ValueInt64() != 4 {
-		t.Errorf("expected 4, got %v", got)
-	}
 }
 
 // The plan→input helpers carry no clear/preserve policy of their own: they hand

@@ -30,7 +30,7 @@ type Instance struct {
 	KernelVersion       *string `json:"kernel_version"`
 	CPUArchitecture     *string `json:"cpu_architecture"`
 	CPUModel            *string `json:"cpu_model"`
-	CPUCount            *int    `json:"cpu_count"`
+	CPUCount            *int64  `json:"cpu_count"`
 	MemorySize          *int64  `json:"memory_size"`
 	IPv4                *string `json:"ipv4"`
 	IPv6                *string `json:"ipv6"`
@@ -169,6 +169,11 @@ type CreateWorkflowVersionInput struct {
 const StatusPaused = "paused"
 
 // UptimeMonitor represents an uptime monitoring check.
+//
+// Exempt from the nullable-fields-are-pointers rule above: its nullable strings
+// stay plain because #9 handles null-vs-empty in mapToState instead, using the
+// prior state to tell an unset attribute from one a config pinned to "" — which
+// a pointer cannot express. Do not pointerise these without moving that logic.
 type UptimeMonitor struct {
 	ID                  string  `json:"id"` // UUID
 	Name                string  `json:"name"`
@@ -432,14 +437,19 @@ type StatusPageItem struct {
 }
 
 // CreateStatusPageInput is the request body for creating a status page.
+//
+// The nullable strings are pointers for the same reason the update input uses
+// them: as plain strings with omitempty an explicit `description = ""` is
+// dropped from the body, the API stores null, and the read maps that back to a
+// Terraform null the plan never asked for.
 type CreateStatusPageInput struct {
 	Name                    string           `json:"name"`
-	Description             string           `json:"description,omitempty"`
+	Description             *string          `json:"description,omitempty"`
 	Public                  *bool            `json:"public,omitempty"`
 	Uptime                  *bool            `json:"uptime,omitempty"`
-	CustomDomain            string           `json:"custom_domain,omitempty"`
+	CustomDomain            *string          `json:"custom_domain,omitempty"`
 	CustomDomainEnabled     *bool            `json:"custom_domain_enabled,omitempty"`
-	CustomFooter            string           `json:"custom_footer,omitempty"`
+	CustomFooter            *string          `json:"custom_footer,omitempty"`
 	CustomFooterEnabled     *bool            `json:"custom_footer_enabled,omitempty"`
 	IncidentsHistoryEnabled *bool            `json:"incidents_history_enabled,omitempty"`
 	ThemeVariant            string           `json:"theme_variant,omitempty"`

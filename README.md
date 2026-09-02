@@ -128,12 +128,15 @@ What ends up there:
 | `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
 
 `ping_key` is deliberately kept in state rather than made write-only or
-ephemeral. It is a Computed value: Terraform's write-only arguments apply to
-values the practitioner supplies, not to ones the server generates, so there is
-no mechanism that would let the provider expose a usable `ping_url` without
-persisting it. The exposure is bounded — the key authenticates heartbeat pings
-for a single task and grants no read access and no ability to change
-configuration. If a key leaks, replace the task to issue a new one.
+ephemeral. It is a Computed value, and Terraform's write-only arguments apply to
+values the practitioner supplies, not to ones the server generates. An ephemeral
+resource could surface it without persisting it — that needs
+terraform-plugin-framework v1.13+ and Terraform 1.10+, and this provider pins
+v1.12 — but an ephemeral value cannot be referenced from an output, which is how
+you actually get `ping_url` to the job that pings the task. The exposure is
+bounded: the key authenticates heartbeat pings for a single task and grants no
+read access and no ability to change configuration. If a key leaks, replace the
+task to issue a new one.
 
 ## Importing existing resources
 

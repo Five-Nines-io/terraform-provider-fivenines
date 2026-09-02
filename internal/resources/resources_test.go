@@ -12,23 +12,6 @@ import (
 
 func ptr[T any](v T) *T { return &v }
 
-// --- optionalString ---
-
-func TestOptionalString_Nil(t *testing.T) {
-	result := optionalString(nil)
-	if !result.IsNull() {
-		t.Errorf("expected null, got %v", result)
-	}
-}
-
-func TestOptionalString_Value(t *testing.T) {
-	v := "hello"
-	result := optionalString(&v)
-	if result.ValueString() != "hello" {
-		t.Errorf("expected 'hello', got %q", result.ValueString())
-	}
-}
-
 // --- mapInstanceToState ---
 
 func TestMapInstanceToState(t *testing.T) {
@@ -37,7 +20,7 @@ func TestMapInstanceToState(t *testing.T) {
 		DisplayName: "web-1",
 		Hostname:    ptr("web-1.local"),
 		Enabled:     true,
-		CPUCount:    ptr(4),
+		CPUCount:    ptr(int64(4)),
 		MemorySize:  ptr(int64(8589934592)),
 		CreatedAt:   "2026-01-01T00:00:00Z",
 		UpdatedAt:   "2026-01-01T00:00:00Z",

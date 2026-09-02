@@ -194,6 +194,7 @@ func TestClient_DeleteInstance_204(t *testing.T) {
 }
 
 func TestClient_WaitForInstanceDeletion(t *testing.T) {
+	shrinkDeletionPolling(t)
 	var gets int32
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		// Still there for the first two polls, gone afterwards.
@@ -220,6 +221,7 @@ func TestClient_WaitForInstanceDeletion(t *testing.T) {
 }
 
 func TestClient_WaitForInstanceDeletion_Timeout(t *testing.T) {
+	shrinkDeletionPolling(t)
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"instance": map[string]interface{}{
@@ -230,7 +232,7 @@ func TestClient_WaitForInstanceDeletion_Timeout(t *testing.T) {
 		})
 	})
 
-	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 50*time.Millisecond)
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected a timeout error while the instance still exists")
 	}
@@ -242,6 +244,7 @@ func TestClient_WaitForInstanceDeletion_Timeout(t *testing.T) {
 // The DELETE was already accepted, so a proxy hiccup during the poll must not
 // turn a successful destroy into a failed one.
 func TestClient_WaitForInstanceDeletion_SurvivesTransientErrors(t *testing.T) {
+	shrinkDeletionPolling(t)
 	var gets int32
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&gets, 1) == 1 {
@@ -264,12 +267,13 @@ func TestClient_WaitForInstanceDeletion_SurvivesTransientErrors(t *testing.T) {
 // A persistent server error still fails, but as a timeout that names the last
 // error rather than a bare deadline message.
 func TestClient_WaitForInstanceDeletion_ReportsLastTransientError(t *testing.T) {
+	shrinkDeletionPolling(t)
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "boom"})
 	})
 
-	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 50*time.Millisecond)
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected an error when the poll never succeeds")
 	}
@@ -280,6 +284,7 @@ func TestClient_WaitForInstanceDeletion_ReportsLastTransientError(t *testing.T) 
 
 // A 4xx will not fix itself, so it must not burn the whole timeout window.
 func TestClient_WaitForInstanceDeletion_FailsFastOnClientError(t *testing.T) {
+	shrinkDeletionPolling(t)
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "forbidden"})
@@ -313,6 +318,7 @@ func TestWaitForDeletion_GoneWinsOnTheDeadlineTick(t *testing.T) {
 }
 
 func TestClient_WaitForNetworkDeviceDeletion(t *testing.T) {
+	shrinkDeletionPolling(t)
 	var gets int32
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if atomic.AddInt32(&gets, 1) == 1 {
@@ -358,6 +364,7 @@ func TestRetryablePoll(t *testing.T) {
 }
 
 func TestClient_WaitForInstanceDeletion_HonoursCancellation(t *testing.T) {
+	shrinkDeletionPolling(t)
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"instance": map[string]interface{}{
@@ -1729,5 +1736,36 @@ func TestClient_UpdateStatusPage_EmptyItems(t *testing.T) {
 	page = gotBody["status_page"].(map[string]interface{})
 	if _, ok := page["items"]; ok {
 		t.Error("expected items to be omitted when the pointer is nil")
+	}
+}
+
+// shrinkDeletionPolling makes the poll tests run in milliseconds instead of
+// sleeping at the production pace. Without it the deletion tests alone add
+// several seconds to every run of this package.
+func shrinkDeletionPolling(t *testing.T) {
+	t.Helper()
+	interval, maxInterval := deletionPollInterval, deletionPollMaxInterval
+	deletionPollInterval, deletionPollMaxInterval = time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() {
+		deletionPollInterval, deletionPollMaxInterval = interval, maxInterval
+	})
+}
+
+// A body the client cannot decode will not decode on the next attempt either,
+// so it must not burn the whole timeout window.
+func TestRetryablePoll_DecodeFailureIsNotRetried(t *testing.T) {
+	if retryablePoll(fmt.Errorf("decoding response: %w", errors.New("unexpected EOF"))) {
+		t.Error("expected a decode failure to fail fast")
+	}
+}
+
+// deletionDone must see through a wrapped API error, or a 404 that arrives
+// wrapped reads as "still there" and the poll runs to timeout on a resource
+// that is already gone.
+func TestDeletionDone_UnwrapsAPIError(t *testing.T) {
+	wrapped := fmt.Errorf("checking instance: %w", &APIError{StatusCode: http.StatusNotFound})
+	done, err := deletionDone(wrapped)
+	if err != nil || !done {
+		t.Errorf("expected a wrapped 404 to report done, got (%v, %v)", done, err)
 	}
 }

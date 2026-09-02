@@ -302,7 +302,7 @@ func mapInstanceToState(i *client.Instance, state *instanceModel) {
 	state.KernelVersion = optionalString(i.KernelVersion)
 	state.CPUArchitecture = optionalString(i.CPUArchitecture)
 	state.CPUModel = optionalString(i.CPUModel)
-	state.CPUCount = optionalInt(i.CPUCount)
+	state.CPUCount = optionalInt64(i.CPUCount)
 	state.MemorySize = optionalInt64(i.MemorySize)
 	state.IPv4 = optionalString(i.IPv4)
 	state.IPv6 = optionalString(i.IPv6)

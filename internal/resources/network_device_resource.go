@@ -309,8 +309,12 @@ func (r *networkDeviceResource) Update(ctx context.Context, req resource.UpdateR
 
 	id := state.ID.ValueString()
 
-	// The SNMP credentials are write-only and blank-means-keep server-side, so
-	// they are omitted when the plan has no value rather than cleared.
+	// Two policies here, and the difference lives in the struct tags, not in
+	// these call sites — every line below looks identical:
+	//   clears on nil  — polling_host_id, snmp_username (Optional-only, ours)
+	//   preserves nil  — snmp_community, snmp_auth_password, snmp_priv_password
+	//                    (write-only, blank-means-keep server-side) and the
+	//                    defaulted attributes.
 	input := client.UpdateNetworkDeviceInput{
 		Name:              stringPtr(plan.Name),
 		IPAddress:         stringPtr(plan.IPAddress),

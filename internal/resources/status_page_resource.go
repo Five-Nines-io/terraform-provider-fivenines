@@ -138,8 +138,13 @@ func (r *statusPageResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				},
 			},
 			"items": schema.ListNestedAttribute{
-				Description: "Items displayed on the status page, in order.",
+				Description: "Items displayed on the status page, in order. Omit this attribute to leave the page's items as they are — useful when they are curated in the FiveNines dashboard. Set it to [] to remove every item.",
 				Optional:    true,
+				// Computed so that omitting the attribute resolves to whatever the
+				// API holds. As Optional-only, a null plan against a page that has
+				// items fails the apply with "Provider produced inconsistent result
+				// after apply" — the server echoes items the plan said were absent.
+				Computed: true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"item_type": schema.StringAttribute{
@@ -190,9 +195,7 @@ func (r *statusPageResource) Create(ctx context.Context, req resource.CreateRequ
 	input := client.CreateStatusPageInput{
 		Name: plan.Name.ValueString(),
 	}
-	if !plan.Description.IsNull() && !plan.Description.IsUnknown() {
-		input.Description = plan.Description.ValueString()
-	}
+	input.Description = stringPtr(plan.Description)
 	if !plan.Public.IsNull() {
 		v := plan.Public.ValueBool()
 		input.Public = &v
@@ -201,16 +204,12 @@ func (r *statusPageResource) Create(ctx context.Context, req resource.CreateRequ
 		v := plan.Uptime.ValueBool()
 		input.Uptime = &v
 	}
-	if !plan.CustomDomain.IsNull() && !plan.CustomDomain.IsUnknown() {
-		input.CustomDomain = plan.CustomDomain.ValueString()
-	}
+	input.CustomDomain = stringPtr(plan.CustomDomain)
 	if !plan.CustomDomainEnabled.IsNull() {
 		v := plan.CustomDomainEnabled.ValueBool()
 		input.CustomDomainEnabled = &v
 	}
-	if !plan.CustomFooter.IsNull() && !plan.CustomFooter.IsUnknown() {
-		input.CustomFooter = plan.CustomFooter.ValueString()
-	}
+	input.CustomFooter = stringPtr(plan.CustomFooter)
 	if !plan.CustomFooterEnabled.IsNull() {
 		v := plan.CustomFooterEnabled.ValueBool()
 		input.CustomFooterEnabled = &v

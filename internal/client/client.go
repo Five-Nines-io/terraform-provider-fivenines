@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -152,6 +153,13 @@ func decodeResponse(resp *http.Response, target interface{}) error {
 // AsyncDeletionTimeout bounds the wait for a 202-accepted deletion to complete.
 const AsyncDeletionTimeout = 5 * time.Minute
 
+// Poll pacing for waitForDeletion. Variables rather than constants so tests can
+// shrink them: at the production interval every poll test would sleep for real.
+var (
+	deletionPollInterval    = 500 * time.Millisecond
+	deletionPollMaxInterval = 5 * time.Second
+)
+
 // deletionDone turns the result of a "does it still exist?" GET into a poll
 // verdict: a 404 means the record is gone, anything else is an error for
 // waitForDeletion to classify.
@@ -159,7 +167,8 @@ func deletionDone(err error) (bool, error) {
 	if err == nil {
 		return false, nil
 	}
-	if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
 		return true, nil
 	}
 	return false, err
@@ -170,10 +179,11 @@ func deletionDone(err error) (bool, error) {
 // connection mid-teardown should not turn a successful destroy into a failure.
 // A 4xx will not fix itself, so those fail immediately.
 func retryablePoll(err error) bool {
-	apiErr, ok := err.(*APIError)
-	if !ok {
-		// Transport-level: connection reset, DNS blip, timeout on one request.
-		return true
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		// A body the client cannot decode will not decode on the next attempt
+		// either, so only transport-level failures are worth retrying.
+		return !strings.Contains(err.Error(), "decoding response")
 	}
 	return apiErr.StatusCode >= 500
 }
@@ -186,8 +196,7 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 	pollCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	const maxInterval = 5 * time.Second
-	interval := 500 * time.Millisecond
+	interval := deletionPollInterval
 
 	// Kept so a poll that only ever saw transient failures reports why, rather
 	// than a bare timeout.
@@ -205,6 +214,11 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 
 	for {
 		done, err := gone(pollCtx)
+		if err != nil && retryablePoll(err) {
+			// Recorded before the deadline check so the timeout message names it
+			// even when the very first poll outlives the deadline.
+			lastErr = err
+		}
 		switch {
 		// A successful "it is gone" wins even if the deadline expired on the
 		// same tick: the deletion did finish.
@@ -216,8 +230,6 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 			return timedOut()
 		case err != nil && !retryablePoll(err):
 			return err
-		case err != nil:
-			lastErr = err
 		}
 
 		select {
@@ -226,8 +238,8 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 			return timedOut()
 		}
 
-		if interval *= 2; interval > maxInterval {
-			interval = maxInterval
+		if interval *= 2; interval > deletionPollMaxInterval {
+			interval = deletionPollMaxInterval
 		}
 	}
 }

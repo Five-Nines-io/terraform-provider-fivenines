@@ -98,6 +98,66 @@
   sequential 30s requests before the ceiling reports anything
 - Fix: cap the backoff, and bound total records rather than pages
 
+### Unit tests cannot see Terraform's plan validation
+- Driving `Create`/`Update` directly, the way every `internal/resources/*_test.go`
+  does, skips the step where Terraform compares the planned object to the
+  configuration. A provider can be structurally unable to produce a valid plan
+  while that entire suite stays green
+- Proof: #13 shipped a plan modifier that set `position` to unknown whenever it
+  changed. Every unit test passed. Real Terraform rejected it for every
+  practitioner who configured a position, before the API was called at all —
+  `planned value cty.UnknownVal(cty.Number) does not match config value
+  cty.NumberIntVal(5)`. A provider may not plan unknown over a known config value,
+  even for Optional+Computed
+- #13 added `internal/provider/host_group_plan_test.go`: real Terraform against an
+  httptest server, so it needs no organisation and no key and runs in `make test`
+  wherever the terraform binary is. The other six resources have no equivalent —
+  their plan-time behaviour is only covered by the TF_ACC suite, which does not
+  run in CI and needs a staging org that does not exist yet
+- Fix: extend the hermetic pattern to the resources whose plan behaviour is
+  non-trivial — uptime monitor (`protocolForbidden`), status page (items/sections
+  semantics), task (`schedule_type` switching)
+- Found by: /ship Codex structured review, 2026-09-02
+
+### Required name attributes are overwritten from the API response
+- `mapXToState` writes the API's `name` into state for instances, tasks, network
+  devices, status pages and host groups, but `name` is `Required` (not Computed)
+  on all of them, so Terraform pins the applied value to the exact config string
+- If the API ever normalises a name — trims it, folds case, collapses whitespace —
+  the apply aborts with "Provider produced inconsistent result after apply", and
+  on a create the resource exists server-side against a failed apply
+- Unverified either way: no evidence the API normalises today. Host groups make it
+  more likely to matter, since their names are documented unique per organisation
+  *case-insensitively*, which is the kind of constraint normalisation usually
+  accompanies
+- Fix, if confirmed: keep the planned name rather than the response value, the way
+  #13 keeps the planned position
+- Found by: /ship adversarial review, 2026-09-02
+
+### The ETag retry loop retries instantly, three times, with no backoff
+- Every resource does GET(ETag) then PATCH(If-Match), retrying a 412 immediately
+  up to three times. All three attempts land inside the same contention window
+  that caused the first failure
+- Host groups make this sharper than the rest: any group's move renumbers every
+  other group, so at parallelism 10 one group's PATCH invalidates the ETag a
+  sibling just fetched. #13 added a 412-specific diagnostic telling the user to
+  re-run, but the retries themselves are still unjittered
+- Fix: jittered backoff and a higher attempt count, applied across all resources
+  rather than one — this is the same call site copy-pasted seven times
+- Found by: /ship adversarial review, 2026-09-02
+
+### sanitizeETag only understands nginx, and a stripped ETag silently disables If-Match
+- `sanitizeETag` rewrites nginx's `-gzip` suffix and nothing else. A CDN that
+  rewrites a strong ETag to `W/"..."` produces an If-Match that can never match
+  under strong comparison: permanent 412, three wasted round trips, dead apply
+- Worse, a proxy that drops `ETag` entirely leaves `etag == ""`, and every
+  `Update*` skips the `If-Match` header when the ETag is empty — the write goes
+  through unconditionally, with no warning, and the optimistic concurrency the
+  whole retry loop exists to provide is silently gone
+- Fix: treat a missing ETag as a condition worth surfacing rather than a reason to
+  drop the precondition, and decide explicitly what a weak ETag should do
+- Found by: /ship adversarial review, 2026-09-02
+
 ## P2 — Nice to have
 
 ### Delete timeout is not operator-tunable
@@ -118,7 +178,10 @@
 - Both maintenance window inputs escaped it that way in #14 until they were added
   by hand; `CreateIntegrationInput` escaped it the same way in #15 — the suite
   stayed green with the struct entirely unclassified, and it was added by hand
-  again. That is twice in two resources, so the next one will escape too
+  again. #13 then made it three for three: `CreateHostGroupInput` and
+  `UpdateHostGroupInput` were both invisible to the guard, and the whole suite was
+  green with neither classified. Predicting the next one will escape is no longer
+  a prediction
 - Go cannot enumerate a package's types at runtime, so the fix is either a
   registry the inputs register into, or a small `go vet`-style check that greps
   `internal/client/models.go` for `Input struct` and fails on any name absent from

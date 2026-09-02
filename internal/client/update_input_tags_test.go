@@ -120,6 +120,19 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 				"custom_body": clears, "content_type": clears,
 			},
 		},
+		{
+			input: UpdateHostGroupInput{},
+			policy: map[string]string{
+				// Required attribute: the plan always holds a name, so nil never
+				// reaches the tag and omitempty only documents that.
+				"name": preserves,
+				// Optional+Computed, and the API owns the final value: omitting it
+				// leaves the group where it is, which is what Update sends when the
+				// configuration does not pin a position. There is no "clear" for a
+				// position — every group has one — so nil must never mean null.
+				"position": preserves,
+			},
+		},
 	}
 
 	// Create inputs follow the same rule, and the same copy-a-neighbour trap:
@@ -227,6 +240,17 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 			"dns_expected_records": preserves, "custom_headers": preserves,
 			"custom_body": dropsZero, "content_type": dropsZero,
 			"recovery_count": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateHostGroupInput{},
+		policy: map[string]string{
+			"name": always,
+			// Nothing to clear on a group that does not exist yet, so create omits
+			// an absent position and lets the API put the group on top.
+			"position": preserves,
 		},
 	})
 

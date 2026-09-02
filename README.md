@@ -14,6 +14,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_status_page` | Public status pages with items |
 | `fivenines_status_page_maintenance_window` | Scheduled maintenance announcements on a status page |
 | `fivenines_integration` | Notification channels (webhook, PagerDuty, Pushover) |
+| `fivenines_host_group` | Named groups of hosts |
 
 ## Data Sources
 
@@ -92,6 +93,12 @@ resource "fivenines_network_device" "switch" {
   ip_address     = "192.168.1.1"
   snmp_version   = "v2c"
   snmp_community = var.snmp_community
+}
+
+# Group hosts by environment
+resource "fivenines_host_group" "production" {
+  name     = "Production"
+  position = 1
 }
 
 # Create a public status page
@@ -226,6 +233,7 @@ terraform import fivenines_workflow.alert <workflow-id>
 terraform import fivenines_network_device.switch <device-uuid>
 terraform import fivenines_status_page.public <status-page-id>
 terraform import fivenines_status_page_maintenance_window.db_upgrade <status-page-id>:<window-id>
+terraform import fivenines_host_group.production <host-group-id>
 ```
 
 `fivenines_integration` has no import: the API never returns an integration's

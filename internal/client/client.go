@@ -1605,3 +1605,109 @@ func (c *Client) CancelStatusPageMaintenanceWindow(ctx context.Context, statusPa
 	resp.Body.Close()
 	return nil
 }
+
+// --- Host Groups ---
+
+func (c *Client) ListHostGroups(ctx context.Context) ([]HostGroup, error) {
+	var all []HostGroup
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/host_groups?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+		var result struct {
+			HostGroups []HostGroup    `json:"host_groups"`
+			Meta       PaginationMeta `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.HostGroups...)
+		more, err := morePages(len(result.HostGroups), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+func (c *Client) GetHostGroup(ctx context.Context, id int64) (*HostGroup, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/host_groups/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := sanitizeETag(resp.Header.Get("ETag"))
+	var result struct {
+		HostGroup HostGroup `json:"host_group"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.HostGroup, etag, nil
+}
+
+func (c *Client) CreateHostGroup(ctx context.Context, input CreateHostGroupInput) (*HostGroup, error) {
+	body := map[string]interface{}{"host_group": input}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/host_groups", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		HostGroup HostGroup `json:"host_group"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.HostGroup, nil
+}
+
+func (c *Client) UpdateHostGroup(ctx context.Context, id int64, etag string, input UpdateHostGroupInput) (*HostGroup, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	body := map[string]interface{}{"host_group": input}
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/host_groups/"+strconv.FormatInt(id, 10), body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		HostGroup HostGroup `json:"host_group"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.HostGroup, nil
+}
+
+// DeleteHostGroup removes a host group. The API ungroups its instances; it never
+// deletes them.
+func (c *Client) DeleteHostGroup(ctx context.Context, id int64) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/host_groups/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}

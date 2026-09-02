@@ -191,13 +191,8 @@ func (r *dashboardResource) createFromTemplate(ctx context.Context, plan dashboa
 		return
 	}
 
-	if len(result.SkipSummary) > 0 {
-		declared := result.CreatedCount + int64(len(result.Skipped))
-		resp.Diagnostics.AddWarning(
-			fmt.Sprintf("Dashboard template %q built %d of %d panels", slug, result.CreatedCount, declared),
-			"Panels the organization cannot feed are dropped rather than created blank:\n  "+
-				strings.Join(result.SkipSummary, "\n  "),
-		)
+	if summary, detail, ok := templateSkipWarning(slug, result); ok {
+		resp.Diagnostics.AddWarning(summary, detail)
 	}
 
 	dashboard := &result.Dashboard
@@ -356,4 +351,24 @@ func trimmedStringValidator() validator.String {
 		"must not be empty and must not start or end with whitespace: the API stores it stripped, "+
 			"so the value would read back changed",
 	)
+}
+
+// templateSkipWarning renders the honest half of a template instantiation: the
+// panels it did NOT build, and why. A template declares panels for software the
+// organization may not run, and those are dropped rather than created blank —
+// so without this the practitioner sees a successful apply and a dashboard that
+// is quietly a third of the size the gallery advertised.
+//
+// A separate function because a diagnostic emitted inside Create is otherwise
+// unreachable from a test, and this is the one thing the template path says
+// that nothing else in state records.
+func templateSkipWarning(slug string, result *client.DashboardTemplateResult) (summary, detail string, ok bool) {
+	if result == nil || len(result.SkipSummary) == 0 {
+		return "", "", false
+	}
+	declared := result.CreatedCount + int64(len(result.Skipped))
+	return fmt.Sprintf("Dashboard template %q built %d of %d panels", slug, result.CreatedCount, declared),
+		"Panels the organization cannot feed are dropped rather than created blank:\n  " +
+			strings.Join(result.SkipSummary, "\n  "),
+		true
 }

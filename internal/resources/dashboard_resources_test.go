@@ -2,6 +2,7 @@ package resources
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
@@ -190,6 +191,15 @@ func TestMapVisualizationToState(t *testing.T) {
 	}
 	if state.TargetKind.ValueString() != "hosts" {
 		t.Errorf("expected target_kind hosts, got %q", state.TargetKind.ValueString())
+	}
+	if state.ChartType.ValueString() != "line" {
+		t.Errorf("expected chart_type line, got %q", state.ChartType.ValueString())
+	}
+	if state.Metric.ValueString() != "cpu_usage" {
+		t.Errorf("expected metric cpu_usage, got %q", state.Metric.ValueString())
+	}
+	if state.Title.ValueString() != "CPU usage" {
+		t.Errorf("expected title, got %v", state.Title)
 	}
 
 	layout := state.Layout.Attributes()
@@ -447,5 +457,191 @@ func TestTrimmedStringValidator_IgnoresNull(t *testing.T) {
 
 	if resp.Diagnostics.HasError() {
 		t.Errorf("expected an unset optional attribute to pass, got %v", resp.Diagnostics)
+	}
+}
+
+func TestMapVisualizationToState_ChartTypeComesFromTheAPI(t *testing.T) {
+	// A panel whose chart_type always read back as the schema default would
+	// plan an in-place update forever on every gauge, stat and table on the
+	// dashboard, and the round-trip test above cannot see it because its
+	// fixture happens to be a line chart.
+	panel := newTestVisualization()
+	panel.ChartType = "gauge"
+
+	state := &dashboardVisualizationModel{}
+	mapVisualizationToState(panel, 12, state)
+
+	if state.ChartType.ValueString() != "gauge" {
+		t.Errorf("expected chart_type gauge, got %q", state.ChartType.ValueString())
+	}
+}
+
+func TestMapVisualizationToState_EmptyQueryResourcesIsNotNull(t *testing.T) {
+	// An empty query_resources is a real answer, not an absent one: the
+	// Postgres-backed metrics (uptime, SSL expiry, org incident and CVE stats)
+	// query no time series at all.
+	//
+	// The nil case is the one that bites. The API always sends the key, so a
+	// decoded [] is a non-nil empty slice and any mapper handles it; a response
+	// that omits the key decodes to nil, and mapping THAT to a null list makes a
+	// Computed attribute flip between null and [] across reads, which plans as a
+	// diff on a panel nobody touched. Absent and empty are the same answer here.
+	for name, resources := range map[string][]string{
+		"empty array": {},
+		"key omitted": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			panel := newTestVisualization()
+			panel.Metric = "monitor_uptime"
+			panel.QueryResources = resources
+
+			state := &dashboardVisualizationModel{}
+			mapVisualizationToState(panel, 12, state)
+
+			if state.QueryResources.IsNull() {
+				t.Fatal("expected an empty list, got null")
+			}
+			if n := len(state.QueryResources.Elements()); n != 0 {
+				t.Errorf("expected an empty list, got %d elements", n)
+			}
+		})
+	}
+}
+
+func TestMapDashboardSectionToState_NameAndCollapsedComeFromTheAPI(t *testing.T) {
+	// Renaming a section in the dashboard UI has to show up as drift; a mapper
+	// that echoed the plan back instead would hide it.
+	section := &client.DashboardSection{ID: 41, Name: "Renamed in the UI", Position: 0, Collapsed: true}
+
+	state := &dashboardSectionModel{
+		Name:      types.StringValue("Compute"),
+		Collapsed: types.BoolValue(false),
+		Position:  types.Int64Null(),
+	}
+	mapDashboardSectionToState(section, 12, state, false)
+
+	if state.Name.ValueString() != "Renamed in the UI" {
+		t.Errorf("expected the server name, got %q", state.Name.ValueString())
+	}
+	if !state.Collapsed.ValueBool() {
+		t.Error("expected the server collapsed value")
+	}
+}
+
+func TestMapDashboardToState_CountsAndTimestamps(t *testing.T) {
+	// section_count and visualization_count are the only signal a
+	// template-built dashboard has drifted, since its panels are not managed.
+	name := "Fleet"
+	state := &dashboardModel{}
+	mapDashboardToState(&client.Dashboard{
+		ID: 12, Name: &name, SectionCount: 3, VisualizationCount: 14,
+		CreatedAt: "2026-01-15T10:00:00Z", UpdatedAt: "2026-02-20T08:30:00Z",
+	}, state)
+
+	if state.SectionCount.ValueInt64() != 3 {
+		t.Errorf("expected 3 sections, got %d", state.SectionCount.ValueInt64())
+	}
+	if state.VisualizationCount.ValueInt64() != 14 {
+		t.Errorf("expected 14 panels, got %d", state.VisualizationCount.ValueInt64())
+	}
+	if state.CreatedAt.ValueString() != "2026-01-15T10:00:00Z" {
+		t.Errorf("unexpected created_at %q", state.CreatedAt.ValueString())
+	}
+	if state.UpdatedAt.ValueString() != "2026-02-20T08:30:00Z" {
+		t.Errorf("unexpected updated_at %q", state.UpdatedAt.ValueString())
+	}
+	if !state.Shared.Equal(types.BoolValue(false)) {
+		t.Errorf("expected shared=false, got %v", state.Shared)
+	}
+}
+
+func TestVisualizationInputFromPlan_SendsMetricAndChartType(t *testing.T) {
+	plan := &dashboardVisualizationModel{
+		Metric:    types.StringValue("memory_usage"),
+		ChartType: types.StringValue("gauge"),
+		Section:   types.StringValue("Compute"),
+	}
+
+	input := visualizationInputFromPlan(plan)
+
+	if input.Metric != "memory_usage" {
+		t.Errorf("expected metric memory_usage, got %q", input.Metric)
+	}
+	if input.ChartType != "gauge" {
+		t.Errorf("expected chart_type gauge, got %q", input.ChartType)
+	}
+	if input.Section == nil || *input.Section != "Compute" {
+		t.Errorf("expected section Compute, got %v", input.Section)
+	}
+}
+
+func TestVisualizationInputFromPlan_UnknownTargetKindIsOmitted(t *testing.T) {
+	// On create, a target kind the configuration never mentions plans as
+	// UNKNOWN, not null. Unknown is not a value: sending it as an explicit []
+	// would tell the API to replace that kind with nothing, which on a PATCH is
+	// a real detach rather than the no-op it looks like.
+	targets, diags := types.ObjectValue(visualizationTargetsAttrTypes, map[string]attr.Value{
+		"hosts":           stringListValue([]string{"host-uuid-1"}),
+		"uptime_monitors": types.ListUnknown(types.StringType),
+		"tasks":           types.ListUnknown(types.StringType),
+		"network_devices": types.ListUnknown(types.StringType),
+		"ceph_clusters":   types.ListUnknown(types.StringType),
+	})
+	if diags.HasError() {
+		t.Fatalf("building targets: %v", diags)
+	}
+
+	input := visualizationInputFromPlan(&dashboardVisualizationModel{
+		Metric:  types.StringValue("cpu_usage"),
+		Targets: targets,
+	})
+
+	if input.Targets.Hosts == nil || len(*input.Targets.Hosts) != 1 {
+		t.Errorf("expected the configured hosts to be sent, got %v", input.Targets.Hosts)
+	}
+	for name, got := range map[string]*[]string{
+		"uptime_monitors": input.Targets.UptimeMonitors,
+		"tasks":           input.Targets.Tasks,
+		"network_devices": input.Targets.NetworkDevices,
+		"ceph_clusters":   input.Targets.CephClusters,
+	} {
+		if got != nil {
+			t.Errorf("expected unknown %s to be omitted, got %v", name, *got)
+		}
+	}
+}
+
+// --- templateSkipWarning ---
+
+func TestTemplateSkipWarning(t *testing.T) {
+	summary, detail, ok := templateSkipWarning("postgresql", &client.DashboardTemplateResult{
+		CreatedCount: 9,
+		Skipped: []client.DashboardTemplateSkip{
+			{Title: "Replication lag", Reason: "no instance runs PostgreSQL yet"},
+			{Title: "Locks", Reason: "no instance runs PostgreSQL yet"},
+			{Title: "Cache hit ratio", Reason: "no instance runs PostgreSQL yet"},
+		},
+		SkipSummary: []string{"3 panels skipped, no instance runs PostgreSQL yet"},
+	})
+
+	if !ok {
+		t.Fatal("expected a warning when panels were skipped")
+	}
+	// 9 built + 3 skipped = the 12 the template declared. Reporting only the
+	// built count would let "built 4 and dropped 13" read as a full success.
+	if summary != `Dashboard template "postgresql" built 9 of 12 panels` {
+		t.Errorf("unexpected summary %q", summary)
+	}
+	if !strings.Contains(detail, "3 panels skipped, no instance runs PostgreSQL yet") {
+		t.Errorf("expected the reason in the detail, got %q", detail)
+	}
+}
+
+func TestTemplateSkipWarning_SilentWhenNothingSkipped(t *testing.T) {
+	if _, _, ok := templateSkipWarning("postgresql", &client.DashboardTemplateResult{CreatedCount: 12}); ok {
+		t.Error("expected no warning when every panel was built")
+	}
+	if _, _, ok := templateSkipWarning("postgresql", nil); ok {
+		t.Error("expected no warning for a nil result")
 	}
 }

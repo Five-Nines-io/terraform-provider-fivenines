@@ -465,3 +465,60 @@ func TestClient_InstantiateDashboardTemplate(t *testing.T) {
 		t.Error("expected dashboard_id to be omitted when building a new dashboard")
 	}
 }
+
+func TestClient_UpdateVisualization_SendsIfMatch(t *testing.T) {
+	// Optimistic concurrency on a panel is invisible when it breaks: the write
+	// still succeeds, it just stops being refused when someone else got there
+	// first. Nothing else in the suite would notice the header going missing.
+	var gotIfMatch string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotIfMatch = r.Header.Get("If-Match")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"visualization": map[string]interface{}{"id": 88, "metric": "cpu_usage"},
+		})
+	})
+
+	_, err := c.UpdateVisualization(context.Background(), 12, 88, `"panel-1"`, VisualizationInput{Metric: "cpu_usage"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if gotIfMatch != `"panel-1"` {
+		t.Errorf("expected If-Match %q, got %q", `"panel-1"`, gotIfMatch)
+	}
+}
+
+func TestClient_UpdateVisualization_OmitsIfMatchWhenEtagIsEmpty(t *testing.T) {
+	// The other half: a proxy that strips ETag leaves the caller with "", and an
+	// `If-Match: ""` would be a permanent 412 rather than an unconditional write.
+	sawHeader := true
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, sawHeader = r.Header["If-Match"]
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"visualization": map[string]interface{}{"id": 88, "metric": "cpu_usage"},
+		})
+	})
+
+	if _, err := c.UpdateVisualization(context.Background(), 12, 88, "", VisualizationInput{Metric: "cpu_usage"}); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if sawHeader {
+		t.Error("expected no If-Match header when the ETag is empty")
+	}
+}
+
+func TestClient_GetVisualization_SanitizesETag(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"panel-1-gzip"`)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"visualization": map[string]interface{}{"id": 88, "metric": "cpu_usage"},
+		})
+	})
+
+	_, etag, err := c.GetVisualization(context.Background(), 12, 88)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if etag != `"panel-1"` {
+		t.Errorf("expected the -gzip suffix stripped, got %q", etag)
+	}
+}

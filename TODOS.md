@@ -18,6 +18,10 @@
   - Instance secrets: blank-means-keep + `_set` booleans (#7)
 - Fix: pointer types + explicit-empty handling per field, map API null →
   `types.StringNull()`
+- The dashboard resources (#19) already do this and are the reference: pointer
+  fields WITHOUT `omitempty` so a nil marshals to `null`, `*[]string` for target
+  lists so "not mentioned" and "explicitly empty" stay distinguishable, and
+  Optional-without-Computed wherever the API never materializes a default
 
 ### JSON execution_graph canonicalization
 - `execution_graph_json` is a raw string attribute. Harmless *today* only because
@@ -45,6 +49,22 @@
 - Fix: mirror `taskAction` (#8) — return `(*UptimeMonitor, error)` and assign the
   response instead of patching Status
 - Found by: /ship pre-landing review, 2026-09-01
+
+### Dashboard sections write last-writer-wins
+- Sections have no `GET` of their own — the dashboard definition lists them — so
+  a section ETag only ever comes back from a `PATCH` response
+- `UpdateDashboardSection` therefore sends no `If-Match`, unlike every other
+  resource, and a concurrent rename or reorder is silently overwritten
+- Fix: carry the ETag from the previous `PATCH` response in private state, or
+  ask the server for a section `GET`
+
+### Dashboard clone and share are not modelled
+- `POST /dashboards/{id}/clone` and `POST|DELETE /dashboards/{id}/share` are
+  actions, not resources, so v1 exposes neither (#19)
+- `shared` and `share_url` are Computed on `fivenines_dashboard`, so a fleet can
+  be AUDITED from Terraform but not published or revoked from it
+- Decide whether share belongs in the provider at all: the slug is a credential,
+  and putting it under `terraform apply` puts it in state and in plan output
 
 ### Instance delete 202 handling
 - `DELETE /instances` returns 202 (async); provider drops state immediately

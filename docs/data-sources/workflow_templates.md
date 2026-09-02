@@ -3,20 +3,27 @@
 page_title: "fivenines_workflow_templates Data Source - terraform-provider-fivenines"
 subcategory: ""
 description: |-
-  Lists the catalog of ready-made workflow templates.
+  Lists the FiveNines workflow templates that can be instantiated with the template_slug argument of fivenines_workflow.
 ---
 
 # fivenines_workflow_templates (Data Source)
 
-Lists the catalog of ready-made workflow templates.
+Lists the FiveNines workflow templates that can be instantiated with the `template_slug` argument of `fivenines_workflow`.
 
 ## Example Usage
 
 ```terraform
+# List the workflow templates available to your organization
 data "fivenines_workflow_templates" "all" {}
 
 output "template_slugs" {
   value = [for t in data.fivenines_workflow_templates.all.templates : t.slug]
+}
+
+# Instantiate one by slug
+resource "fivenines_workflow" "disk_pressure" {
+  name          = "Disk Pressure"
+  template_slug = one([for t in data.fivenines_workflow_templates.all.templates : t.slug if t.category == "instances"])
 }
 ```
 
@@ -32,9 +39,9 @@ output "template_slugs" {
 
 Read-Only:
 
-- `category` (String) Catalog category.
+- `category` (String) Template category.
 - `description` (String) What the template does.
-- `icon` (String) Icon name used by the dashboard gallery.
+- `json` (String) The raw template object as returned by the API, for fields this provider does not model yet. Use jsondecode() to read it.
 - `name` (String) Template name.
-- `slug` (String) Template identifier.
-- `trigger_type` (String) The trigger the template builds around. A template for a subsystem your fleet does not run never fires.
+- `slug` (String) Template slug, to pass as `template_slug` on a workflow.
+- `trigger_type` (String) Trigger type of the template's graph.

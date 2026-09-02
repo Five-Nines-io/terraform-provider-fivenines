@@ -3,24 +3,25 @@
 page_title: "fivenines_host_groups Data Source - terraform-provider-fivenines"
 subcategory: ""
 description: |-
-  Looks up host groups, so a host group ID can be wired in by name instead of being hardcoded. Groups are returned in display order (position, then name).
+  Lists the host groups in the organization, so a host_group_id can be looked up by name instead of hardcoded. All filters are optional and are combined; omitting them returns every group, in the dashboard's display order.
 ---
 
 # fivenines_host_groups (Data Source)
 
-Looks up host groups, so a host group ID can be wired in by name instead of being hardcoded. Groups are returned in display order (position, then name).
+Lists the host groups in the organization, so a `host_group_id` can be looked up by name instead of hardcoded. All filters are optional and are combined; omitting them returns every group, in the dashboard's display order.
 
 ## Example Usage
 
 ```terraform
-# Every host group
+# Every host group, in the dashboard's display order
 data "fivenines_host_groups" "all" {}
 
 # Server-side filter on a case-insensitive substring of the group name
 data "fivenines_host_groups" "production" {
-  q = "prod"
+  query = "prod"
 }
 
+# Wire a group id into a resource without hardcoding the integer
 output "production_group_id" {
   value = one([
     for g in data.fivenines_host_groups.production.host_groups :
@@ -34,11 +35,14 @@ output "production_group_id" {
 
 ### Optional
 
-- `q` (String) Filter on a case-insensitive substring of the group name. Applied server-side; omit to list every group.
+- `direction` (String) Sort direction: "asc" or "desc". Defaults to "asc", the top of the dashboard list.
+- `order` (String) Column to sort by. Defaults to `position`, the display order rather than `created_at`; sorting by `position` breaks ties on `name`.
+- `query` (String) Case-insensitive substring match on the group name (the API's `q` filter). A `%` in the term matches a literal percent sign.
+- `updated_since` (String) Only return groups updated at or after this ISO8601 timestamp. Inclusive, and it surfaces creates and updates only — a deleted group leaves no tombstone.
 
 ### Read-Only
 
-- `host_groups` (Attributes List) List of host groups. (see [below for nested schema](#nestedatt--host_groups))
+- `host_groups` (Attributes List) Matching host groups. (see [below for nested schema](#nestedatt--host_groups))
 
 <a id="nestedatt--host_groups"></a>
 ### Nested Schema for `host_groups`
@@ -46,7 +50,7 @@ output "production_group_id" {
 Read-Only:
 
 - `created_at` (String) Creation timestamp.
-- `id` (Number) Host group ID.
-- `name` (String) Host group name.
-- `position` (Number) 1-based sort order. Groups created without one keep the default 0.
-- `updated_at` (String) Last update timestamp.
+- `id` (Number) Host group ID, the value a `host_group_id` argument expects.
+- `name` (String) Host group name. Unique within the organization, case-insensitively.
+- `position` (Number) 1-based display order. Groups never explicitly ordered keep the default 0.
+- `updated_at` (String) Last update timestamp. A reposition does not move it.

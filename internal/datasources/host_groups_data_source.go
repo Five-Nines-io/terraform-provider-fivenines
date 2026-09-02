@@ -4,8 +4,10 @@ import (
 	"context"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/datasource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -16,8 +18,11 @@ type hostGroupsDataSource struct {
 }
 
 type hostGroupsModel struct {
-	Q          types.String     `tfsdk:"q"`
-	HostGroups []hostGroupModel `tfsdk:"host_groups"`
+	Query        types.String     `tfsdk:"query"`
+	UpdatedSince types.String     `tfsdk:"updated_since"`
+	Order        types.String     `tfsdk:"order"`
+	Direction    types.String     `tfsdk:"direction"`
+	HostGroups   []hostGroupModel `tfsdk:"host_groups"`
 }
 
 type hostGroupModel struct {
@@ -38,27 +43,50 @@ func (d *hostGroupsDataSource) Metadata(_ context.Context, req datasource.Metada
 
 func (d *hostGroupsDataSource) Schema(_ context.Context, _ datasource.SchemaRequest, resp *datasource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Looks up host groups, so a host group ID can be wired in by name instead of being hardcoded. Groups are returned in display order (position, then name).",
+		Description: "Lists the host groups in the organization, so a `host_group_id` can be looked " +
+			"up by name instead of hardcoded. All filters are optional and are combined; omitting " +
+			"them returns every group, in the dashboard's display order.",
 		Attributes: map[string]schema.Attribute{
-			"q": schema.StringAttribute{
-				Description: "Filter on a case-insensitive substring of the group name. Applied server-side; omit to list every group.",
+			"query": schema.StringAttribute{
+				Description: "Case-insensitive substring match on the group name (the API's `q` filter). " +
+					"A `%` in the term matches a literal percent sign.",
+				Optional: true,
+			},
+			"updated_since": schema.StringAttribute{
+				Description: "Only return groups updated at or after this ISO8601 timestamp. Inclusive, " +
+					"and it surfaces creates and updates only — a deleted group leaves no tombstone.",
+				Optional: true,
+			},
+			"order": schema.StringAttribute{
+				Description: "Column to sort by. Defaults to `position`, the display order rather than " +
+					"`created_at`; sorting by `position` breaks ties on `name`.",
+				Optional: true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("position", "name", "created_at", "updated_at"),
+				},
+			},
+			"direction": schema.StringAttribute{
+				Description: `Sort direction: "asc" or "desc". Defaults to "asc", the top of the dashboard list.`,
 				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("asc", "desc"),
+				},
 			},
 			"host_groups": schema.ListNestedAttribute{
-				Description: "List of host groups.",
+				Description: "Matching host groups.",
 				Computed:    true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"id": schema.Int64Attribute{
-							Description: "Host group ID.",
+							Description: "Host group ID, the value a `host_group_id` argument expects.",
 							Computed:    true,
 						},
 						"name": schema.StringAttribute{
-							Description: "Host group name.",
+							Description: "Host group name. Unique within the organization, case-insensitively.",
 							Computed:    true,
 						},
 						"position": schema.Int64Attribute{
-							Description: "1-based sort order. Groups created without one keep the default 0.",
+							Description: "1-based display order. Groups never explicitly ordered keep the default 0.",
 							Computed:    true,
 						},
 						"created_at": schema.StringAttribute{
@@ -66,7 +94,7 @@ func (d *hostGroupsDataSource) Schema(_ context.Context, _ datasource.SchemaRequ
 							Computed:    true,
 						},
 						"updated_at": schema.StringAttribute{
-							Description: "Last update timestamp.",
+							Description: "Last update timestamp. A reposition does not move it.",
 							Computed:    true,
 						},
 					},
@@ -96,23 +124,31 @@ func (d *hostGroupsDataSource) Read(ctx context.Context, req datasource.ReadRequ
 		return
 	}
 
-	groups, err := d.client.ListHostGroups(ctx, state.Q.ValueString())
+	opts := client.ListHostGroupsOptions{
+		Query:        state.Query.ValueString(),
+		UpdatedSince: state.UpdatedSince.ValueString(),
+		Order:        state.Order.ValueString(),
+		Direction:    state.Direction.ValueString(),
+	}
+
+	groups, err := d.client.ListHostGroups(ctx, &opts)
 	if err != nil {
 		resp.Diagnostics.AddError("Error listing host groups", err.Error())
 		return
 	}
 
-	// Sized rather than appended so a filter that matches nothing reads back as
-	// an empty list, not null.
-	state.HostGroups = make([]hostGroupModel, len(groups))
-	for i, g := range groups {
-		state.HostGroups[i] = hostGroupModel{
+	// Non-nil even when nothing matches: a nil slice serialises as a null list, and
+	// length()/for_each/toset over a null fail. Zero matches is the normal case for
+	// a filtered read, so it has to come back as [].
+	state.HostGroups = make([]hostGroupModel, 0, len(groups))
+	for _, g := range groups {
+		state.HostGroups = append(state.HostGroups, hostGroupModel{
 			ID:        types.Int64Value(g.ID),
 			Name:      types.StringValue(g.Name),
 			Position:  types.Int64Value(g.Position),
 			CreatedAt: types.StringValue(g.CreatedAt),
 			UpdatedAt: types.StringValue(g.UpdatedAt),
-		}
+		})
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)

@@ -22,6 +22,9 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_dashboard` | Dashboards, empty or built from a gallery template |
 | `fivenines_dashboard_section` | Collapsible sections (Grafana-style rows) on a dashboard |
 | `fivenines_dashboard_visualization` | Panels: 10 chart types over instances, monitors, tasks, devices and org-wide metrics |
+| `fivenines_organization` | Organization settings (singleton — rename only) |
+| `fivenines_organization_member` | Member roles, and offboarding on destroy |
+| `fivenines_organization_invitation` | Invitations to join the organization |
 
 ## Data Sources
 
@@ -38,6 +41,10 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_uptime_monitor_status` | Lightweight current status of a single uptime monitor |
 | `fivenines_dashboard_templates` | The dashboard gallery, with an availability verdict per template |
 | `fivenines_host_groups` | Host groups, filterable by name, for looking up a group ID |
+| `fivenines_organization` | Organization identity, effective plan and seat accounting |
+| `fivenines_organization_members` | Member roster with per-person two-factor state |
+| `fivenines_organization_security` | Two-factor policy and enrollment counters (read-only by design) |
+| `fivenines_organization_saml` | SAML SSO posture and IdP certificate expiry (read-only by design) |
 
 ### Per-instance collector inventories
 
@@ -257,7 +264,44 @@ resource "fivenines_dashboard_visualization" "cpu" {
 See [`examples/golden-dashboard`](examples/golden-dashboard) for the same layout
 packaged as a module and instantiated once per environment.
 
-### 4. Apply
+### 4. Manage the team
+
+Onboarding is two resources. The invitation sends the email and holds a seat; the
+member resource takes over once the person accepts, because the API has no endpoint
+that creates a member.
+
+```hcl
+resource "fivenines_organization_invitation" "new_hire" {
+  email = "newhire@acme.com"
+  role  = "member"
+}
+
+# Adopts an existing membership and manages its role.
+resource "fivenines_organization_member" "lead" {
+  email = "lead@acme.com"
+  role  = "admin"
+}
+```
+
+**Destroying a `fivenines_organization_member` offboards the person.** The API
+removes the membership and deletes the user account in one transaction, which also
+destroys every API token that user owned — so the key this provider authenticates
+with must not belong to the person being removed. Terraform pre-validates removals
+and role changes with an `X-Dry-Run` request during `terraform plan`, so the API's
+refusals (removing yourself, removing the owner, a read-only key) surface before an
+apply starts. If you plan with a different key than you apply with, set
+`skip_plan_validation = true` on the provider — or export
+`FIVENINES_SKIP_PLAN_VALIDATION=true` — to turn that pre-flight off.
+
+The two-factor policy and the SAML configuration are **read-only over the API by
+design**: the server refuses those writes with a `403` on every plan and scope, so a
+stolen token cannot disarm the control that makes a stolen password survivable, or
+repoint the organization's identity provider. They are exposed as the
+`fivenines_organization_security` and `fivenines_organization_saml` data sources —
+`idp_certificate_expires_at` is worth an alert, since nothing else surfaces it and
+every member is locked out at once when it passes. Change both in the dashboard.
+
+### 5. Apply
 
 ```bash
 terraform init    # download the provider
@@ -439,6 +483,9 @@ terraform import fivenines_dashboard.fleet <dashboard-id>
 # ids carry it.
 terraform import fivenines_dashboard_section.compute <dashboard-id>:<section-id>
 terraform import fivenines_dashboard_visualization.cpu <dashboard-id>:<panel-id>
+terraform import fivenines_organization.this organization          # the ID is ignored
+terraform import fivenines_organization_member.lead <membership-id-or-email>
+terraform import fivenines_organization_invitation.new_hire <invitation-id>
 ```
 
 `fivenines_integration` has no import: the API never returns an integration's

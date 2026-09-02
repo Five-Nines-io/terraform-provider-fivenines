@@ -159,6 +159,51 @@
   helper rather than in one caller
 - Found by: /ship performance specialist, 2026-09-02
 
+### Member and invitation Read each walk the whole roster
+
+- The organization API exposes no per-member and no per-invitation GET and no
+  `id`/`email` filter on either index, so `organizationMemberResource.Read`
+  resolves one membership by walking the entire paginated roster. With M managed
+  members in an organization of N that is M x ceil(N/100) GETs per refresh: 900
+  requests for 300 managed members in a 300-person organization
+- Invitations pay it too — a pending one walks the invitation list, and one that
+  is neither pending nor recorded accepted walks the roster as well
+- Mitigated so far: an invitation recorded `accepted` is terminal and costs zero
+  requests (#20), and `morePages` keeps `per_page` at the API maximum of 100
+- Amplifier: `doRequest` retries a 429 five times with 2/4/8/16/32s backoff, so a
+  rate-limited plan pays up to 62s per throttled request on top
+- Fix options, cheapest first: (a) surface the documented `q`/`role` index filters
+  on `ListOrganizationMembers` so a single-address lookup is one request, (b) a
+  TTL'd roster memo on the shared `*client.Client`, invalidated on member writes —
+  note the staleness risk, since a stale roster reads as drift, (c) a server-side
+  per-member GET. (a) is the real fix and needs no new state
+- Found by: /ship review army (performance) + Codex adversarial, 2026-09-02
+
+### The dry-run pre-flight cannot verify the server honoured it
+
+- `fivenines_organization_member` sends a real `DELETE`/`PATCH` during
+  `terraform plan` and relies on `X-Dry-Run: true` making it non-destructive.
+  `DeleteOrganizationMember` accepts a bare 204, and a 204 carries no channel
+  through which the server can say "this was rolled back"
+- So anything that drops the header turns `terraform plan` into a live
+  offboarding: a proxy or WAF that strips unknown `X-` request headers, an API
+  gateway that normalizes them, a `base_url` pointed at a shim, or a server
+  predating dry-run support. `sanitizeETag` exists precisely because a reverse
+  proxy rewrites headers on this API, so header-mangling intermediaries are
+  demonstrably in the request path
+- Also unverified: whether member deletion's side effects (offboarding email,
+  webhook, audit entry) are genuinely inside the rolled-back transaction. The
+  contract already concedes this class for invitations — "an email cannot be
+  rolled back" — but says nothing about member removal
+- Fix needs the server: echo `X-Dry-Run` on the response (or a `dry_run: true`
+  body field) so the client can fail CLOSED when it is absent. Client-side
+  alternative if that never lands: pre-flight the removal with a dry-run PATCH
+  setting the member's CURRENT role, which exercises the same self/owner/scope
+  refusals and is a harmless no-op even if the header is ignored
+- `skip_plan_validation` (or `FIVENINES_SKIP_PLAN_VALIDATION`) turns the
+  pre-flight off entirely for anyone who cannot accept the risk
+- Found by: /ship adversarial review (Claude + Codex), 2026-09-02
+
 ### ImportState duplicates the same int64 parse eight times
 - `host_group`, `status_page`, `network_device`, `workflow`, `task`,
   `maintenance_window`, `api_token` and now `enrollment_token` each carry the same
@@ -230,7 +275,9 @@
   sibling just fetched. #13 added a 412-specific diagnostic telling the user to
   re-run, but the retries themselves are still unjittered
 - Fix: jittered backoff and a higher attempt count, applied across all resources
-  rather than one — this is the same call site copy-pasted seven times
+  rather than one — this is the same call site copy-pasted eight times since #20
+  added `organizationResource.updateName`, which follows the existing shape
+  deliberately rather than fixing it in one place only
 - Found by: /ship adversarial review, 2026-09-02
 
 ### sanitizeETag only understands nginx, and a stripped ETag silently disables If-Match

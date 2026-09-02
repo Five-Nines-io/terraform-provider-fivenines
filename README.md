@@ -37,7 +37,7 @@ terraform {
   required_providers {
     fivenines = {
       source  = "Five-Nines-io/fivenines"
-      version = "~> 0.3"
+      version = "~> 0.6"
     }
   }
 }
@@ -90,10 +90,13 @@ resource "fivenines_status_page" "public" {
   name   = "Service Status"
   public = true
 
-  items {
-    item_type = "UptimeMonitor"
-    item_id   = fivenines_uptime_monitor.api.id
-  }
+  # items is a list attribute, not a block: assign it with `=`.
+  items = [
+    {
+      item_type = "UptimeMonitor"
+      item_id   = fivenines_uptime_monitor.api.id
+    },
+  ]
 }
 ```
 
@@ -113,6 +116,73 @@ The API key can be provided in three ways (in order of precedence):
 2. Environment variable: `export FIVENINES_API_KEY="fn_live_..."`
 3. Terraform variable: `var.fivenines_api_key`
 
+## Secrets in state
+
+Terraform stores every attribute it manages in the state file, including the
+sensitive ones. `Sensitive: true` only redacts a value in CLI output; it does
+not keep it out of state. Treat the state file as a secret and use a backend
+that encrypts it and restricts who can read it.
+
+What ends up there:
+
+| Attribute | Why it is in state |
+|-----------|--------------------|
+| `fivenines_task.ping_key` / `ping_url` | Server-generated; the API returns the key on every read, and `ping_url` embeds it. This is what you feed to the job that pings the task, so it has to be readable as an output. |
+| `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
+
+### Upgrading: unset attributes are now null, not `""`
+
+Attributes the FiveNines agent populates used to read back as `""` before the
+agent had ever reported. They are `null` now, which is what the API actually
+says. That is the point — `""` made every plan drift — but it changes what a
+config that interpolates them sees:
+
+| Resource | Attributes |
+|---|---|
+| `fivenines_instance` | `hostname`, `operating_system_name`, `kernel_version`, `cpu_architecture`, `cpu_model`, `cpu_count`, `memory_size`, `ipv4`, `ipv6`, `source`, `client_version` |
+| `fivenines_network_device` | `status`, `vendor`, `model`, `sys_name` |
+| `fivenines_task` | `schedule` on an interval task, `host_id` when unset |
+
+An expression like `"${fivenines_instance.web.hostname}.internal"` used to
+produce `".internal"` for a host that had never synced; it now fails the plan
+with "Invalid template interpolation value". That is the honest answer, but if
+you want the old behaviour, wrap it:
+
+```hcl
+coalesce(fivenines_instance.web.hostname, "")
+```
+
+Hosts that have synced are unaffected — the API returns real values and nothing
+about them changes.
+
+### Upgrading: `ping_url` is now sensitive
+
+`fivenines_task.ping_url` embeds `ping_key` verbatim, so it is marked
+`Sensitive` from this release on. Terraform refuses to expose a sensitive value
+through a root-module output unless the output says so, so if you export it,
+add one line:
+
+```hcl
+output "backup_ping_url" {
+  value     = fivenines_task.backup.ping_url
+  sensitive = true   # required from this release on
+}
+```
+
+Nothing else changes: the value is identical and still readable by anything that
+consumes the output.
+
+`ping_key` is deliberately kept in state rather than made write-only or
+ephemeral. It is a Computed value, and Terraform's write-only arguments apply to
+values the practitioner supplies, not to ones the server generates. An ephemeral
+resource could surface it without persisting it — that needs
+terraform-plugin-framework v1.13+ and Terraform 1.10+, and this provider pins
+v1.12 — but an ephemeral value cannot be referenced from an output, which is how
+you actually get `ping_url` to the job that pings the task. The exposure is
+bounded: the key authenticates heartbeat pings for a single task and grants no
+read access and no ability to change configuration. If a key leaks, replace the
+task to issue a new one.
+
 ## Importing existing resources
 
 Import resources created outside of Terraform:
@@ -131,7 +201,7 @@ terraform import fivenines_status_page.public <status-page-id>
 ```bash
 make build      # compile the provider
 make test       # run unit tests
-make testacc    # run acceptance tests (requires API key)
+make testacc    # run acceptance tests (requires API key, see below)
 make install    # install locally for testing
 make docs       # regenerate registry documentation
 ```
@@ -142,13 +212,32 @@ not named `terraform-provider-fivenines` (a git worktree, for example) run
 `tfplugindocs generate --provider-name fivenines --rendered-provider-name terraform-provider-fivenines`
 instead; the bare command infers the wrong provider name, deletes `docs/`, and fails.
 
+### Acceptance tests
+
+Unit tests pin the shapes the provider *believes* the API has. Only the
+acceptance tests notice when the API changes underneath it, so they drive real
+Terraform plans and applies against a live organisation:
+
+```bash
+TF_ACC=1 FIVENINES_API_KEY=fn_live_... make testacc
+```
+
+They need the `terraform` CLI on `PATH`, and they skip entirely without
+`TF_ACC` — `make test` stays offline and fast. **Point them at a dedicated
+staging organisation**: every test creates and destroys real instances,
+monitors, tasks, devices, status pages and workflows. Resource names are
+randomised with a `tf-acc-` prefix so parallel runs do not collide.
+
+CI runs them nightly and on pushes to `main` (never on pull requests — a fork
+must not see the key) via `.github/workflows/acceptance.yml`.
+
 ## Publishing
 
 Releases are automated via GitHub Actions. The git tag *is* the version — there is no `VERSION` file and no changelog to update. To create a release:
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 This triggers GoReleaser to build cross-platform binaries, sign checksums with GPG, and create a GitHub release, with release notes generated from the commit subjects since the last tag. The Terraform Registry picks up new releases automatically.
@@ -159,3 +248,7 @@ This triggers GoReleaser to build cross-platform binaries, sign checksums with G
 |--------|-------------|
 | `GPG_PRIVATE_KEY` | ASCII-armored GPG private key for signing releases |
 | `GPG_PASSPHRASE` | Passphrase for the GPG key |
+| `FIVENINES_API_KEY` | API key for the staging organisation the acceptance tests run against. Until it is set, the acceptance workflow reports that it skipped instead of failing. |
+
+An optional `FIVENINES_BASE_URL` repository *variable* points the acceptance
+tests at a non-production API.

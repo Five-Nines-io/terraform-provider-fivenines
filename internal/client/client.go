@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -143,10 +144,149 @@ func parseError(resp *http.Response) error {
 	return apiErr
 }
 
+// errMalformedBody marks a response body the client could not parse. It is a
+// permanent failure — the same bytes will not parse on a retry — as opposed to
+// a read that died in transit, which is worth another attempt.
+var errMalformedBody = errors.New("malformed response body")
+
 // decodeResponse reads and decodes a JSON response body.
 func decodeResponse(resp *http.Response, target interface{}) error {
 	defer resp.Body.Close()
-	return json.NewDecoder(resp.Body).Decode(target)
+	err := json.NewDecoder(resp.Body).Decode(target)
+	if err == nil {
+		return nil
+	}
+
+	// Only a syntactically bad body is permanent. An unexpected EOF or a reset
+	// mid-body is the transport failing, not the server sending garbage.
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+		return fmt.Errorf("%w: %w", errMalformedBody, err)
+	}
+	return err
+}
+
+// AsyncDeletionTimeout bounds the wait for a 202-accepted deletion to complete.
+const AsyncDeletionTimeout = 5 * time.Minute
+
+// Poll pacing for waitForDeletion. Variables rather than constants so tests can
+// shrink them: at the production interval every poll test would sleep for real.
+var (
+	deletionPollInterval    = 500 * time.Millisecond
+	deletionPollMaxInterval = 5 * time.Second
+)
+
+// deletionDone turns the result of a "does it still exist?" GET into a poll
+// verdict: a 404 means the record is gone, anything else is an error for
+// waitForDeletion to classify.
+func deletionDone(err error) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		return true, nil
+	}
+	return false, err
+}
+
+// retryablePoll reports whether an error from a deletion poll is worth another
+// attempt. The DELETE was already accepted, so a proxy 502 or a dropped
+// connection mid-teardown should not turn a successful destroy into a failure.
+// A 4xx will not fix itself, so those fail immediately.
+func retryablePoll(err error) bool {
+	// A syntactically bad body will be just as bad next time. Everything else
+	// that is not an API error is the transport failing mid-flight — a reset, a
+	// truncated read, a DNS blip — and is worth another attempt.
+	if errors.Is(err, errMalformedBody) {
+		return false
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+
+	// 429 and 408 are the 4xx that fix themselves. doRequest already backs off on
+	// 429, but it
+	// gives up after five attempts and hands the 429 up: a fleet destroy is
+	// exactly the workload that trips the limiter, and the DELETE was accepted
+	// already, so failing here would abort an apply over a transient limit.
+	switch {
+	case apiErr.StatusCode >= 500:
+		return true
+	case apiErr.StatusCode == http.StatusTooManyRequests,
+		apiErr.StatusCode == http.StatusRequestTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitForDeletion polls gone until it reports the record has disappeared,
+// backing off between attempts. Deletions that answer 202 are asynchronous: the
+// record outlives the response, so returning early breaks a delete followed by
+// a recreate of the same host in one apply.
+func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(context.Context) (bool, error)) error {
+	pollCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	interval := deletionPollInterval
+
+	// Kept so a poll that only ever saw transient failures reports why, rather
+	// than a bare timeout. Two of them: an http.Client timeout also satisfies
+	// errors.Is(err, context.DeadlineExceeded), so a deadline must never be
+	// allowed to overwrite a real API error worth reporting.
+	var lastErr, lastNonContextErr error
+
+	timedOut := func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// A real API error beats "context deadline exceeded" every time.
+		if reportable := lastNonContextErr; reportable != nil {
+			return fmt.Errorf("timed out after %s waiting for the deletion to complete; last error: %w", timeout, reportable)
+		}
+		if lastErr != nil {
+			return fmt.Errorf("timed out after %s waiting for the deletion to complete; last error: %w", timeout, lastErr)
+		}
+		return fmt.Errorf("timed out after %s waiting for the deletion to complete", timeout)
+	}
+
+	for {
+		done, err := gone(pollCtx)
+		// Recorded before the deadline check so the timeout message names it even
+		// when the very first poll outlives the deadline.
+		if err != nil && retryablePoll(err) {
+			lastErr = err
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				lastNonContextErr = err
+			}
+		}
+		switch {
+		// A successful "it is gone" wins even if the deadline expired on the
+		// same tick: the deletion did finish.
+		case err == nil && done:
+			return nil
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case pollCtx.Err() != nil:
+			return timedOut()
+		case err != nil && !retryablePoll(err):
+			return err
+		}
+
+		select {
+		case <-time.After(interval):
+		case <-pollCtx.Done():
+			return timedOut()
+		}
+
+		if interval *= 2; interval > deletionPollMaxInterval {
+			interval = deletionPollMaxInterval
+		}
+	}
 }
 
 // listResponse is a generic list response envelope.
@@ -281,17 +421,28 @@ func (c *Client) UpdateInstance(ctx context.Context, id string, etag string, inp
 	return &result.Instance, nil
 }
 
-func (c *Client) DeleteInstance(ctx context.Context, id string) error {
+// DeleteInstance deletes an instance. It reports whether the API accepted the
+// deletion asynchronously (202), in which case the host still exists until the
+// backend finishes tearing it down — see WaitForInstanceDeletion.
+func (c *Client) DeleteInstance(ctx context.Context, id string) (accepted bool, err error) {
 	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/instances/"+id, nil, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// 202 Accepted (async) or 204 No Content
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
-		return parseError(resp)
+		return false, parseError(resp)
 	}
 	resp.Body.Close()
-	return nil
+	return resp.StatusCode == http.StatusAccepted, nil
+}
+
+// WaitForInstanceDeletion polls the instance until the API 404s it.
+func (c *Client) WaitForInstanceDeletion(ctx context.Context, id string, timeout time.Duration) error {
+	return waitForDeletion(ctx, timeout, func(ctx context.Context) (bool, error) {
+		_, _, err := c.GetInstance(ctx, id)
+		return deletionDone(err)
+	})
 }
 
 func (c *Client) EnableInstance(ctx context.Context, id string) error {
@@ -1072,17 +1223,26 @@ func (c *Client) UpdateNetworkDevice(ctx context.Context, id string, etag string
 	return &result.NetworkDevice, nil
 }
 
-func (c *Client) DeleteNetworkDevice(ctx context.Context, id string) error {
+// DeleteNetworkDevice deletes a network device. Like instances, the API tears
+// devices down asynchronously and answers 202 — see WaitForNetworkDeviceDeletion.
+func (c *Client) DeleteNetworkDevice(ctx context.Context, id string) (accepted bool, err error) {
 	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/network_devices/"+id, nil, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
-	// Delete returns 202 Accepted (async deletion)
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
-		return parseError(resp)
+		return false, parseError(resp)
 	}
 	resp.Body.Close()
-	return nil
+	return resp.StatusCode == http.StatusAccepted, nil
+}
+
+// WaitForNetworkDeviceDeletion polls the device until the API 404s it.
+func (c *Client) WaitForNetworkDeviceDeletion(ctx context.Context, id string, timeout time.Duration) error {
+	return waitForDeletion(ctx, timeout, func(ctx context.Context) (bool, error) {
+		_, _, err := c.GetNetworkDevice(ctx, id)
+		return deletionDone(err)
+	})
 }
 
 func (c *Client) EnterMaintenanceNetworkDevice(ctx context.Context, id string) error {

@@ -8,6 +8,10 @@ work is tracked in GitHub issues #5-#26.
 ## Build and test
 
 - `make build` / `make test` / `make fmt` — standard targets.
+- `make testacc` runs the acceptance suite (`internal/provider/*_test.go`) against
+  a live organisation, creating and destroying real resources. It needs `TF_ACC=1`,
+  a staging `FIVENINES_API_KEY` and the `terraform` CLI on `PATH`; without `TF_ACC`
+  those tests skip, so `make test` stays offline.
 - `make docs` runs `tfplugindocs generate`. It derives the provider name from the
   directory name, so from a checkout not named `terraform-provider-fivenines`
   (a git worktree, for example) you must pass both flags or it deletes `docs/`

@@ -138,8 +138,13 @@ func (r *statusPageResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				},
 			},
 			"items": schema.ListNestedAttribute{
-				Description: "Items displayed on the status page, in order.",
+				Description: "Items displayed on the status page, in order. Omit this attribute and the provider tracks whatever the API last reported, which leaves items curated in the FiveNines dashboard alone (it follows the last refresh, so `-refresh=false` can replay a stale list). Set it to [] to remove every item.",
 				Optional:    true,
+				// Computed so that omitting the attribute resolves to whatever the
+				// API holds. As Optional-only, a null plan against a page that has
+				// items fails the apply with "Provider produced inconsistent result
+				// after apply" — the server echoes items the plan said were absent.
+				Computed: true,
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"item_type": schema.StringAttribute{
@@ -190,9 +195,7 @@ func (r *statusPageResource) Create(ctx context.Context, req resource.CreateRequ
 	input := client.CreateStatusPageInput{
 		Name: plan.Name.ValueString(),
 	}
-	if !plan.Description.IsNull() && !plan.Description.IsUnknown() {
-		input.Description = plan.Description.ValueString()
-	}
+	input.Description = stringPtr(plan.Description)
 	if !plan.Public.IsNull() {
 		v := plan.Public.ValueBool()
 		input.Public = &v
@@ -201,16 +204,12 @@ func (r *statusPageResource) Create(ctx context.Context, req resource.CreateRequ
 		v := plan.Uptime.ValueBool()
 		input.Uptime = &v
 	}
-	if !plan.CustomDomain.IsNull() && !plan.CustomDomain.IsUnknown() {
-		input.CustomDomain = plan.CustomDomain.ValueString()
-	}
+	input.CustomDomain = stringPtr(plan.CustomDomain)
 	if !plan.CustomDomainEnabled.IsNull() {
 		v := plan.CustomDomainEnabled.ValueBool()
 		input.CustomDomainEnabled = &v
 	}
-	if !plan.CustomFooter.IsNull() && !plan.CustomFooter.IsUnknown() {
-		input.CustomFooter = plan.CustomFooter.ValueString()
-	}
+	input.CustomFooter = stringPtr(plan.CustomFooter)
 	if !plan.CustomFooterEnabled.IsNull() {
 		v := plan.CustomFooterEnabled.ValueBool()
 		input.CustomFooterEnabled = &v
@@ -222,9 +221,9 @@ func (r *statusPageResource) Create(ctx context.Context, req resource.CreateRequ
 	if !plan.ThemeVariant.IsNull() && !plan.ThemeVariant.IsUnknown() {
 		input.ThemeVariant = plan.ThemeVariant.ValueString()
 	}
-	if !plan.Items.IsNull() && !plan.Items.IsUnknown() {
-		input.Items = planItemsToClient(plan.Items)
-	}
+	// Same shape as the update: `items = []` at create has to reach the API as
+	// an explicit [], which a plain slice with omitempty would drop.
+	input.Items = planItemsToUpdateInput(plan.Items)
 
 	tflog.Debug(ctx, "Creating status page", map[string]interface{}{"name": input.Name})
 
@@ -234,7 +233,7 @@ func (r *statusPageResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 
-	mapStatusPageToState(page, &plan)
+	mapStatusPageToPlan(page, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -274,48 +273,22 @@ func (r *statusPageResource) Update(ctx context.Context, req resource.UpdateRequ
 
 	id := state.ID.ValueInt64()
 
-	name := plan.Name.ValueString()
+	// A null plan value means "keep the server value" and the key is omitted.
+	// items needs the pointer-to-slice shape for one reason: an explicit
+	// `items = []` has to reach the API as [], which a plain slice with
+	// omitempty cannot express.
 	input := client.UpdateStatusPageInput{
-		Name: &name,
-	}
-	if !plan.Description.IsNull() && !plan.Description.IsUnknown() {
-		v := plan.Description.ValueString()
-		input.Description = &v
-	}
-	if !plan.Public.IsNull() {
-		v := plan.Public.ValueBool()
-		input.Public = &v
-	}
-	if !plan.Uptime.IsNull() {
-		v := plan.Uptime.ValueBool()
-		input.Uptime = &v
-	}
-	if !plan.CustomDomain.IsNull() && !plan.CustomDomain.IsUnknown() {
-		v := plan.CustomDomain.ValueString()
-		input.CustomDomain = &v
-	}
-	if !plan.CustomDomainEnabled.IsNull() {
-		v := plan.CustomDomainEnabled.ValueBool()
-		input.CustomDomainEnabled = &v
-	}
-	if !plan.CustomFooter.IsNull() && !plan.CustomFooter.IsUnknown() {
-		v := plan.CustomFooter.ValueString()
-		input.CustomFooter = &v
-	}
-	if !plan.CustomFooterEnabled.IsNull() {
-		v := plan.CustomFooterEnabled.ValueBool()
-		input.CustomFooterEnabled = &v
-	}
-	if !plan.IncidentsHistoryEnabled.IsNull() {
-		v := plan.IncidentsHistoryEnabled.ValueBool()
-		input.IncidentsHistoryEnabled = &v
-	}
-	if !plan.ThemeVariant.IsNull() && !plan.ThemeVariant.IsUnknown() {
-		v := plan.ThemeVariant.ValueString()
-		input.ThemeVariant = &v
-	}
-	if !plan.Items.IsNull() && !plan.Items.IsUnknown() {
-		input.Items = planItemsToClient(plan.Items)
+		Name:                    stringPtr(plan.Name),
+		Description:             stringPtr(plan.Description),
+		Public:                  boolPtr(plan.Public),
+		Uptime:                  boolPtr(plan.Uptime),
+		CustomDomain:            stringPtr(plan.CustomDomain),
+		CustomDomainEnabled:     boolPtr(plan.CustomDomainEnabled),
+		CustomFooter:            stringPtr(plan.CustomFooter),
+		CustomFooterEnabled:     boolPtr(plan.CustomFooterEnabled),
+		IncidentsHistoryEnabled: boolPtr(plan.IncidentsHistoryEnabled),
+		ThemeVariant:            stringPtr(plan.ThemeVariant),
+		Items:                   itemsUpdate(plan.Items, state.Items),
 	}
 
 	// ETag retry loop
@@ -338,7 +311,7 @@ func (r *statusPageResource) Update(ctx context.Context, req resource.UpdateRequ
 		break
 	}
 
-	mapStatusPageToState(page, &plan)
+	mapStatusPageToPlan(page, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -369,23 +342,45 @@ func (r *statusPageResource) ImportState(ctx context.Context, req resource.Impor
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
 }
 
+// mapStatusPageToPlan maps an API response onto a PLAN (Create and Update).
+//
+// Terraform requires the applied value to equal any KNOWN planned value, so the
+// plan wins for `items` and only an unknown one takes what the server reports.
+// items is the one attribute where the two can legitimately diverge: it is the
+// only one the provider conditionally omits, so the server's list can move
+// underneath a plan that never asked to change it — someone adding an item in
+// the dashboard between the refresh and the apply, say. Letting the echo win
+// there fails the apply instead of converging on the next refresh.
+func mapStatusPageToPlan(p *client.StatusPage, plan *statusPageModel) {
+	planned := plan.Items
+	mapStatusPageToState(p, plan)
+	if !planned.IsUnknown() {
+		plan.Items = planned
+	}
+}
+
+// mapStatusPageToState maps an API response onto prior STATE (Read), where the
+// server is the truth: reporting it is how a page edited in the dashboard shows
+// up as drift.
 func mapStatusPageToState(p *client.StatusPage, state *statusPageModel) {
 	state.ID = types.Int64Value(p.ID)
 	state.Name = types.StringValue(p.Name)
 	state.Slug = types.StringValue(p.Slug)
-	state.Description = types.StringValue(p.Description)
+	state.Description = optionalString(p.Description)
 	state.Public = types.BoolValue(p.Public)
 	state.Uptime = types.BoolValue(p.Uptime)
-	state.CustomDomain = types.StringValue(p.CustomDomain)
+	state.CustomDomain = optionalString(p.CustomDomain)
 	state.CustomDomainEnabled = types.BoolValue(p.CustomDomainEnabled)
-	state.CustomFooter = types.StringValue(p.CustomFooter)
+	state.CustomFooter = optionalString(p.CustomFooter)
 	state.CustomFooterEnabled = types.BoolValue(p.CustomFooterEnabled)
 	state.IncidentsHistoryEnabled = types.BoolValue(p.IncidentsHistoryEnabled)
-	state.ThemeVariant = types.StringValue(p.ThemeVariant)
+	state.ThemeVariant = stringOrKeep(p.ThemeVariant, state.ThemeVariant)
 	state.CreatedAt = types.StringValue(p.CreatedAt)
 	state.UpdatedAt = types.StringValue(p.UpdatedAt)
 
-	if len(p.Items) > 0 {
+	itemType := types.ObjectType{AttrTypes: statusPageItemAttrTypes}
+	switch {
+	case len(p.Items) > 0:
 		items := make([]attr.Value, len(p.Items))
 		for i, item := range p.Items {
 			items[i], _ = types.ObjectValue(statusPageItemAttrTypes, map[string]attr.Value{
@@ -393,10 +388,46 @@ func mapStatusPageToState(p *client.StatusPage, state *statusPageModel) {
 				"item_id":   types.StringValue(item.ItemID),
 			})
 		}
-		state.Items, _ = types.ListValue(types.ObjectType{AttrTypes: statusPageItemAttrTypes}, items)
-	} else {
-		state.Items = types.ListNull(types.ObjectType{AttrTypes: statusPageItemAttrTypes})
+		state.Items, _ = types.ListValue(itemType, items)
+	case !state.Items.IsNull() && !state.Items.IsUnknown() && len(state.Items.Elements()) == 0:
+		// Narrow on purpose: keep ONLY a pinned empty list, which is the one
+		// distinction the API cannot express (it reports "no items" for both
+		// `[]` and unset). Keeping a non-empty list here would mean a page whose
+		// items were deleted in the dashboard never shows as drift.
+	default:
+		state.Items = types.ListNull(itemType)
 	}
+}
+
+// planItemsToUpdateInput turns a planned item list into a create value: nil
+// omits the key, and a pointer to an empty slice sends the explicit [] that
+// `items = []` means. Only null and unknown omit, which at create is the
+// "no items block" case.
+func planItemsToUpdateInput(itemsList types.List) *[]client.StatusPageItem {
+	if itemsList.IsNull() || itemsList.IsUnknown() {
+		return nil
+	}
+	items := planItemsToClient(itemsList)
+	return &items
+}
+
+// itemsUpdate is planItemsToUpdateInput for the update path, where a null plan
+// value never actually arrives: items is Optional+Computed, so a config with no
+// `items` block plans the LAST REFRESHED list. Sending that back would delete
+// anything added in the dashboard since the refresh — under `-refresh=false`,
+// or between a saved plan and its apply, that is silent data loss.
+//
+// So the key is omitted whenever the plan matches what state already holds. An
+// update that does not touch items does not write items.
+func itemsUpdate(planned, stored types.List) *[]client.StatusPageItem {
+	if planned.IsNull() || planned.IsUnknown() {
+		return nil
+	}
+	if planned.Equal(stored) {
+		return nil
+	}
+	items := planItemsToClient(planned)
+	return &items
 }
 
 func planItemsToClient(itemsList types.List) []client.StatusPageItem {

@@ -10,22 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-// --- optionalString ---
-
-func TestOptionalString_Nil(t *testing.T) {
-	result := optionalString(nil)
-	if !result.IsNull() {
-		t.Errorf("expected null, got %v", result)
-	}
-}
-
-func TestOptionalString_Value(t *testing.T) {
-	v := "hello"
-	result := optionalString(&v)
-	if result.ValueString() != "hello" {
-		t.Errorf("expected 'hello', got %q", result.ValueString())
-	}
-}
+func ptr[T any](v T) *T { return &v }
 
 // --- mapInstanceToState ---
 
@@ -33,10 +18,10 @@ func TestMapInstanceToState(t *testing.T) {
 	inst := &client.Instance{
 		ID:          "uuid-1",
 		DisplayName: "web-1",
-		Hostname:    "web-1.local",
+		Hostname:    ptr("web-1.local"),
 		Enabled:     true,
-		CPUCount:    4,
-		MemorySize:  8589934592,
+		CPUCount:    ptr(int64(4)),
+		MemorySize:  ptr(int64(8589934592)),
 		CreatedAt:   "2026-01-01T00:00:00Z",
 		UpdatedAt:   "2026-01-01T00:00:00Z",
 	}
@@ -61,6 +46,14 @@ func TestMapInstanceToState(t *testing.T) {
 	}
 	if !state.LastSyncAt.IsNull() {
 		t.Error("expected last_sync_at to be null")
+	}
+	// An instance that never synced reports null for everything the agent
+	// fills in; those must stay null instead of collapsing to "".
+	if !state.IPv4.IsNull() {
+		t.Errorf("expected ipv4 to be null, got %q", state.IPv4.ValueString())
+	}
+	if !state.KernelVersion.IsNull() {
+		t.Errorf("expected kernel_version to be null, got %q", state.KernelVersion.ValueString())
 	}
 }
 
@@ -94,7 +87,7 @@ func TestMapTaskToState_Paused(t *testing.T) {
 		ID:           "task-uuid",
 		Name:         "paused-task",
 		ScheduleType: "cron",
-		Schedule:     "0 * * * *",
+		Schedule:     ptr("0 * * * *"),
 		Status:       "paused",
 		CreatedAt:    "2026-01-01T00:00:00Z",
 		UpdatedAt:    "2026-01-01T00:00:00Z",
@@ -153,7 +146,7 @@ func TestMapTaskToState_EmptyScheduleIsNull(t *testing.T) {
 		Name:            "interval-task",
 		ScheduleType:    "interval",
 		Status:          "active",
-		Schedule:        "",
+		Schedule:        ptr(""),
 		IntervalSeconds: &interval,
 		CreatedAt:       "2026-01-01T00:00:00Z",
 		UpdatedAt:       "2026-01-01T00:00:00Z",
@@ -255,11 +248,11 @@ func TestMapWorkflowToState(t *testing.T) {
 	wf := &client.Workflow{
 		ID:                 42,
 		Name:               "CPU Alert",
-		Description:        "Alerts on high CPU",
+		Description:        ptr("Alerts on high CPU"),
 		Status:             "active",
 		IntervalSeconds:    &interval,
-		TriggerType:        "metric_threshold",
-		TriggerTypeLabel:   "Instance Metric",
+		TriggerType:        ptr("metric_threshold"),
+		TriggerTypeLabel:   ptr("Instance Metric"),
 		PublishedVersionID: &versionID,
 		CreatedAt:          "2026-01-01T00:00:00Z",
 		UpdatedAt:          "2026-01-01T00:00:00Z",

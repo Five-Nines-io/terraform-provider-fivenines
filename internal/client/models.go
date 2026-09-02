@@ -17,22 +17,25 @@ type PaginationMeta struct {
 }
 
 // Instance represents a monitored server (Host).
+//
+// Fields the API documents as nullable are pointers so a null round-trips to
+// types.StringNull()/types.Int64Null() instead of collapsing to "" or 0.
 type Instance struct {
 	ID                  string  `json:"id"` // UUID
 	DisplayName         string  `json:"display_name"`
-	Hostname            string  `json:"hostname"`
+	Hostname            *string `json:"hostname"`
 	Enabled             bool    `json:"enabled"`
 	MaintenanceMode     bool    `json:"maintenance_mode"`
-	OperatingSystemName string  `json:"operating_system_name"`
-	KernelVersion       string  `json:"kernel_version"`
-	CPUArchitecture     string  `json:"cpu_architecture"`
-	CPUModel            string  `json:"cpu_model"`
-	CPUCount            int     `json:"cpu_count"`
-	MemorySize          int64   `json:"memory_size"`
-	IPv4                string  `json:"ipv4"`
-	IPv6                string  `json:"ipv6"`
-	Source              string  `json:"source"`
-	ClientVersion       string  `json:"client_version"`
+	OperatingSystemName *string `json:"operating_system_name"`
+	KernelVersion       *string `json:"kernel_version"`
+	CPUArchitecture     *string `json:"cpu_architecture"`
+	CPUModel            *string `json:"cpu_model"`
+	CPUCount            *int64  `json:"cpu_count"`
+	MemorySize          *int64  `json:"memory_size"`
+	IPv4                *string `json:"ipv4"`
+	IPv6                *string `json:"ipv6"`
+	Source              *string `json:"source"`
+	ClientVersion       *string `json:"client_version"`
 	Status              string  `json:"status"`
 	LastSyncAt          *string `json:"last_sync_at"`
 	FirstSyncAt         *string `json:"first_sync_at"`
@@ -44,7 +47,6 @@ type Instance struct {
 // CreateInstanceInput is the request body for creating an instance.
 type CreateInstanceInput struct {
 	DisplayName     string `json:"display_name"`
-	Description     string `json:"description,omitempty"`
 	Enabled         *bool  `json:"enabled,omitempty"`
 	MaintenanceMode *bool  `json:"maintenance_mode,omitempty"`
 }
@@ -52,7 +54,6 @@ type CreateInstanceInput struct {
 // UpdateInstanceInput is the request body for updating an instance.
 type UpdateInstanceInput struct {
 	DisplayName     *string `json:"display_name,omitempty"`
-	Description     *string `json:"description,omitempty"`
 	Enabled         *bool   `json:"enabled,omitempty"`
 	MaintenanceMode *bool   `json:"maintenance_mode,omitempty"`
 }
@@ -62,9 +63,9 @@ type Task struct {
 	ID                 string  `json:"id"` // UUID
 	Name               string  `json:"name"`
 	ScheduleType       string  `json:"schedule_type"`
-	Schedule           string  `json:"schedule"`
+	Schedule           *string `json:"schedule"`
 	IntervalSeconds    *int64  `json:"interval_seconds"`
-	TimeZone           string  `json:"time_zone"`
+	TimeZone           *string `json:"time_zone"`
 	GracePeriodMinutes int     `json:"grace_period_minutes"`
 	Status             string  `json:"status"`
 	MonitoringStatus   string  `json:"monitoring_status"`
@@ -89,6 +90,13 @@ type CreateTaskInput struct {
 }
 
 // UpdateTaskInput is the request body for updating a task.
+//
+// host_id carries NO omitempty, following the same convention as the
+// protocol-scoped uptime monitor fields: it is Optional-only, so the provider
+// owns it end to end and a nil pointer marshals as an explicit null that clears
+// the association. schedule/interval_seconds are Optional+Computed — the API
+// keeps the counterpart it already stored across a schedule_type switch (#8) —
+// so they keep omitempty and are omitted when unset.
 type UpdateTaskInput struct {
 	Name               *string `json:"name,omitempty"`
 	ScheduleType       *string `json:"schedule_type,omitempty"`
@@ -96,18 +104,18 @@ type UpdateTaskInput struct {
 	IntervalSeconds    *int64  `json:"interval_seconds,omitempty"`
 	GracePeriodMinutes *int    `json:"grace_period_minutes,omitempty"`
 	TimeZone           *string `json:"time_zone,omitempty"`
-	HostID             *string `json:"host_id,omitempty"`
+	HostID             *string `json:"host_id"`
 }
 
 // Workflow represents an automation definition.
 type Workflow struct {
 	ID                 int64             `json:"id"`
 	Name               string            `json:"name"`
-	Description        string            `json:"description"`
+	Description        *string           `json:"description"`
 	Status             string            `json:"status"`
 	IntervalSeconds    *int64            `json:"interval_seconds"`
-	TriggerType        string            `json:"trigger_type"`
-	TriggerTypeLabel   string            `json:"trigger_type_label"`
+	TriggerType        *string           `json:"trigger_type"`
+	TriggerTypeLabel   *string           `json:"trigger_type_label"`
 	PublishedVersionID *int64            `json:"published_version_id"`
 	NextEvaluationAt   *string           `json:"next_evaluation_at"`
 	LastEvaluationAt   *string           `json:"last_evaluation_at"`
@@ -159,6 +167,11 @@ type CreateWorkflowVersionInput struct {
 const StatusPaused = "paused"
 
 // UptimeMonitor represents an uptime monitoring check.
+//
+// Exempt from the nullable-fields-are-pointers rule above: its nullable strings
+// stay plain because #9 handles null-vs-empty in mapToState instead, using the
+// prior state to tell an unset attribute from one a config pinned to "" — which
+// a pointer cannot express. Do not pointerise these without moving that logic.
 type UptimeMonitor struct {
 	ID                  string  `json:"id"` // UUID
 	Name                string  `json:"name"`
@@ -336,18 +349,18 @@ type NetworkDevice struct {
 	Name              string  `json:"name"`
 	IPAddress         string  `json:"ip_address"`
 	PollingHostID     *string `json:"polling_host_id"`
-	DeviceType        string  `json:"device_type"`
+	DeviceType        *string `json:"device_type"`
 	PollingInterval   int     `json:"polling_interval"`
-	SNMPVersion       string  `json:"snmp_version"`
-	SNMPUsername      string  `json:"snmp_username"`
-	SNMPSecurityLevel string  `json:"snmp_security_level"`
-	SNMPAuthProtocol  string  `json:"snmp_auth_protocol"`
-	SNMPPrivProtocol  string  `json:"snmp_priv_protocol"`
+	SNMPVersion       *string `json:"snmp_version"`
+	SNMPUsername      *string `json:"snmp_username"`
+	SNMPSecurityLevel *string `json:"snmp_security_level"`
+	SNMPAuthProtocol  *string `json:"snmp_auth_protocol"`
+	SNMPPrivProtocol  *string `json:"snmp_priv_protocol"`
 	MaintenanceMode   bool    `json:"maintenance_mode"`
-	Status            string  `json:"status"`
-	Vendor            string  `json:"vendor"`
-	Model             string  `json:"model"`
-	SysName           string  `json:"sys_name"`
+	Status            *string `json:"status"`
+	Vendor            *string `json:"vendor"`
+	Model             *string `json:"model"`
+	SysName           *string `json:"sys_name"`
 	LastPolledAt      *string `json:"last_polled_at"`
 	CreatedAt         string  `json:"created_at"`
 	UpdatedAt         string  `json:"updated_at"`
@@ -371,15 +384,23 @@ type CreateNetworkDeviceInput struct {
 }
 
 // UpdateNetworkDeviceInput is the request body for updating a network device.
+//
+// polling_host_id and snmp_username carry NO omitempty: they are Optional-only,
+// so a nil pointer marshals as an explicit null and clears the stored value.
+//
+// The SNMP credentials keep omitempty on purpose. They are write-only — the API
+// never returns them and treats a blank value as "keep what is stored" — so an
+// unset plan value must omit the key. Sending null there would wipe a working
+// credential on every unrelated update.
 type UpdateNetworkDeviceInput struct {
 	Name              *string `json:"name,omitempty"`
 	IPAddress         *string `json:"ip_address,omitempty"`
-	PollingHostID     *string `json:"polling_host_id,omitempty"`
+	PollingHostID     *string `json:"polling_host_id"`
 	DeviceType        *string `json:"device_type,omitempty"`
 	PollingInterval   *int    `json:"polling_interval,omitempty"`
 	SNMPVersion       *string `json:"snmp_version,omitempty"`
 	SNMPCommunity     *string `json:"snmp_community,omitempty"`
-	SNMPUsername      *string `json:"snmp_username,omitempty"`
+	SNMPUsername      *string `json:"snmp_username"`
 	SNMPSecurityLevel *string `json:"snmp_security_level,omitempty"`
 	SNMPAuthProtocol  *string `json:"snmp_auth_protocol,omitempty"`
 	SNMPAuthPassword  *string `json:"snmp_auth_password,omitempty"`
@@ -392,15 +413,15 @@ type StatusPage struct {
 	ID                      int64            `json:"id"`
 	Name                    string           `json:"name"`
 	Slug                    string           `json:"slug"`
-	Description             string           `json:"description"`
+	Description             *string          `json:"description"`
 	Public                  bool             `json:"public"`
 	Uptime                  bool             `json:"uptime"`
-	CustomDomain            string           `json:"custom_domain"`
+	CustomDomain            *string          `json:"custom_domain"`
 	CustomDomainEnabled     bool             `json:"custom_domain_enabled"`
-	CustomFooter            string           `json:"custom_footer"`
+	CustomFooter            *string          `json:"custom_footer"`
 	CustomFooterEnabled     bool             `json:"custom_footer_enabled"`
 	IncidentsHistoryEnabled bool             `json:"incidents_history_enabled"`
-	ThemeVariant            string           `json:"theme_variant"`
+	ThemeVariant            *string          `json:"theme_variant"`
 	Items                   []StatusPageItem `json:"items"`
 	CreatedAt               string           `json:"created_at"`
 	UpdatedAt               string           `json:"updated_at"`
@@ -414,33 +435,43 @@ type StatusPageItem struct {
 }
 
 // CreateStatusPageInput is the request body for creating a status page.
+//
+// The nullable strings are pointers for the same reason the update input uses
+// them: as plain strings with omitempty an explicit `description = ""` is
+// dropped from the body, the API stores null, and the read maps that back to a
+// Terraform null the plan never asked for.
 type CreateStatusPageInput struct {
-	Name                    string           `json:"name"`
-	Description             string           `json:"description,omitempty"`
-	Public                  *bool            `json:"public,omitempty"`
-	Uptime                  *bool            `json:"uptime,omitempty"`
-	CustomDomain            string           `json:"custom_domain,omitempty"`
-	CustomDomainEnabled     *bool            `json:"custom_domain_enabled,omitempty"`
-	CustomFooter            string           `json:"custom_footer,omitempty"`
-	CustomFooterEnabled     *bool            `json:"custom_footer_enabled,omitempty"`
-	IncidentsHistoryEnabled *bool            `json:"incidents_history_enabled,omitempty"`
-	ThemeVariant            string           `json:"theme_variant,omitempty"`
-	Items                   []StatusPageItem `json:"items,omitempty"`
+	Name                    string            `json:"name"`
+	Description             *string           `json:"description,omitempty"`
+	Public                  *bool             `json:"public,omitempty"`
+	Uptime                  *bool             `json:"uptime,omitempty"`
+	CustomDomain            *string           `json:"custom_domain,omitempty"`
+	CustomDomainEnabled     *bool             `json:"custom_domain_enabled,omitempty"`
+	CustomFooter            *string           `json:"custom_footer,omitempty"`
+	CustomFooterEnabled     *bool             `json:"custom_footer_enabled,omitempty"`
+	IncidentsHistoryEnabled *bool             `json:"incidents_history_enabled,omitempty"`
+	ThemeVariant            string            `json:"theme_variant,omitempty"`
+	Items                   *[]StatusPageItem `json:"items,omitempty"`
 }
 
 // UpdateStatusPageInput is the request body for updating a status page.
+//
+// Items is a pointer to a slice, not a plain slice: a nil pointer omits the key
+// while a pointer to an empty slice marshals as an explicit []. Emptying a page
+// needs that [] — a plain `[]StatusPageItem` with omitempty marshals an empty
+// list to nothing, which the API reads as "preserve the current items".
 type UpdateStatusPageInput struct {
-	Name                    *string          `json:"name,omitempty"`
-	Description             *string          `json:"description,omitempty"`
-	Public                  *bool            `json:"public,omitempty"`
-	Uptime                  *bool            `json:"uptime,omitempty"`
-	CustomDomain            *string          `json:"custom_domain,omitempty"`
-	CustomDomainEnabled     *bool            `json:"custom_domain_enabled,omitempty"`
-	CustomFooter            *string          `json:"custom_footer,omitempty"`
-	CustomFooterEnabled     *bool            `json:"custom_footer_enabled,omitempty"`
-	IncidentsHistoryEnabled *bool            `json:"incidents_history_enabled,omitempty"`
-	ThemeVariant            *string          `json:"theme_variant,omitempty"`
-	Items                   []StatusPageItem `json:"items,omitempty"`
+	Name                    *string           `json:"name,omitempty"`
+	Description             *string           `json:"description,omitempty"`
+	Public                  *bool             `json:"public,omitempty"`
+	Uptime                  *bool             `json:"uptime,omitempty"`
+	CustomDomain            *string           `json:"custom_domain,omitempty"`
+	CustomDomainEnabled     *bool             `json:"custom_domain_enabled,omitempty"`
+	CustomFooter            *string           `json:"custom_footer,omitempty"`
+	CustomFooterEnabled     *bool             `json:"custom_footer_enabled,omitempty"`
+	IncidentsHistoryEnabled *bool             `json:"incidents_history_enabled,omitempty"`
+	ThemeVariant            *string           `json:"theme_variant,omitempty"`
+	Items                   *[]StatusPageItem `json:"items,omitempty"`
 }
 
 // APIError represents an error response from the API.

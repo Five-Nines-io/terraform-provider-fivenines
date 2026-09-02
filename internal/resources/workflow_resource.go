@@ -7,6 +7,8 @@ import (
 	"strconv"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-jsontypes/jsontypes"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -27,20 +29,20 @@ type workflowResource struct {
 }
 
 type workflowModel struct {
-	ID                 types.Int64  `tfsdk:"id"`
-	Name               types.String `tfsdk:"name"`
-	Description        types.String `tfsdk:"description"`
-	IntervalSeconds    types.Int64  `tfsdk:"interval_seconds"`
-	ExecutionGraphJSON types.String `tfsdk:"execution_graph_json"`
-	Active             types.Bool   `tfsdk:"active"`
-	Status             types.String `tfsdk:"status"`
-	TriggerType        types.String `tfsdk:"trigger_type"`
-	TriggerTypeLabel   types.String `tfsdk:"trigger_type_label"`
-	PublishedVersionID types.Int64  `tfsdk:"published_version_id"`
-	NextEvaluationAt   types.String `tfsdk:"next_evaluation_at"`
-	LastEvaluationAt   types.String `tfsdk:"last_evaluation_at"`
-	CreatedAt          types.String `tfsdk:"created_at"`
-	UpdatedAt          types.String `tfsdk:"updated_at"`
+	ID                 types.Int64          `tfsdk:"id"`
+	Name               types.String         `tfsdk:"name"`
+	Description        types.String         `tfsdk:"description"`
+	IntervalSeconds    types.Int64          `tfsdk:"interval_seconds"`
+	ExecutionGraphJSON jsontypes.Normalized `tfsdk:"execution_graph_json"`
+	Active             types.Bool           `tfsdk:"active"`
+	Status             types.String         `tfsdk:"status"`
+	TriggerType        types.String         `tfsdk:"trigger_type"`
+	TriggerTypeLabel   types.String         `tfsdk:"trigger_type_label"`
+	PublishedVersionID types.Int64          `tfsdk:"published_version_id"`
+	NextEvaluationAt   types.String         `tfsdk:"next_evaluation_at"`
+	LastEvaluationAt   types.String         `tfsdk:"last_evaluation_at"`
+	CreatedAt          types.String         `tfsdk:"created_at"`
+	UpdatedAt          types.String         `tfsdk:"updated_at"`
 }
 
 func NewWorkflowResource() resource.Resource {
@@ -77,8 +79,9 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Computed:    true,
 			},
 			"execution_graph_json": schema.StringAttribute{
-				Description: "JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value.",
+				Description: "JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value. Compared semantically, so reformatting the graph (whitespace, key ordering) does not publish a new workflow version. A pure reformat still shows as an in-place update in the plan, but the apply leaves the published version alone.",
 				Optional:    true,
+				CustomType:  jsontypes.NormalizedType{},
 			},
 			"active": schema.BoolAttribute{
 				Description: "Whether the workflow is active. Set to true to activate, false to pause. Requires a published version.",
@@ -226,17 +229,10 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 	id := state.ID.ValueInt64()
 
 	// Update metadata with ETag retry on 412
-	name := plan.Name.ValueString()
 	input := client.UpdateWorkflowInput{
-		Name: &name,
-	}
-	if !plan.Description.IsNull() && !plan.Description.IsUnknown() {
-		v := plan.Description.ValueString()
-		input.Description = &v
-	}
-	if !plan.IntervalSeconds.IsNull() && !plan.IntervalSeconds.IsUnknown() {
-		v := plan.IntervalSeconds.ValueInt64()
-		input.IntervalSeconds = &v
+		Name:            stringPtr(plan.Name),
+		Description:     stringPtr(plan.Description),
+		IntervalSeconds: int64Ptr(plan.IntervalSeconds),
 	}
 
 	var workflow *client.Workflow
@@ -258,17 +254,16 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 		break
 	}
 
-	// If execution_graph_json changed, create a new version and publish
-	if !plan.ExecutionGraphJSON.IsNull() && !plan.ExecutionGraphJSON.IsUnknown() {
-		graphChanged := state.ExecutionGraphJSON.IsNull() ||
-			plan.ExecutionGraphJSON.ValueString() != state.ExecutionGraphJSON.ValueString()
-
-		if graphChanged {
-			graphJSON := plan.ExecutionGraphJSON.ValueString()
-			if err := r.publishGraph(ctx, id, graphJSON); err != nil {
-				resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
-				return
-			}
+	// If execution_graph_json changed, create a new version and publish.
+	publish, d := shouldPublishGraph(ctx, plan.ExecutionGraphJSON, state.ExecutionGraphJSON)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if publish {
+		if err := r.publishGraph(ctx, id, plan.ExecutionGraphJSON.ValueString()); err != nil {
+			resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
+			return
 		}
 	}
 
@@ -325,6 +320,28 @@ func (r *workflowResource) ImportState(ctx context.Context, req resource.ImportS
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
 }
 
+// shouldPublishGraph decides whether an update has to cut a new workflow
+// version. The comparison is semantic, so reformatting the graph — a different
+// key order, different indentation — publishes nothing. A plan with no graph
+// publishes nothing either; a graph that was never in state always publishes.
+func shouldPublishGraph(ctx context.Context, planned, stored jsontypes.Normalized) (bool, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	if planned.IsNull() || planned.IsUnknown() {
+		return false, diags
+	}
+	if stored.IsNull() || stored.IsUnknown() {
+		return true, diags
+	}
+
+	unchanged, d := planned.StringSemanticEquals(ctx, stored)
+	diags.Append(d...)
+	if diags.HasError() {
+		return false, diags
+	}
+	return !unchanged, diags
+}
+
 // publishGraph creates a new workflow version from JSON and publishes it.
 func (r *workflowResource) publishGraph(ctx context.Context, workflowID int64, graphJSON string) error {
 	var graph map[string]interface{}
@@ -349,21 +366,14 @@ func (r *workflowResource) publishGraph(ctx context.Context, workflowID int64, g
 func mapWorkflowToState(w *client.Workflow, state *workflowModel) {
 	state.ID = types.Int64Value(w.ID)
 	state.Name = types.StringValue(w.Name)
-	state.Description = types.StringValue(w.Description)
-	if w.IntervalSeconds != nil {
-		state.IntervalSeconds = types.Int64Value(*w.IntervalSeconds)
-	} else {
-		state.IntervalSeconds = types.Int64Null()
-	}
+	state.Description = optionalString(w.Description)
+	state.IntervalSeconds = optionalInt64(w.IntervalSeconds)
 	state.Status = types.StringValue(w.Status)
 	state.Active = types.BoolValue(w.Status == "active")
-	state.TriggerType = types.StringValue(w.TriggerType)
-	state.TriggerTypeLabel = types.StringValue(w.TriggerTypeLabel)
-	if w.PublishedVersionID != nil {
-		state.PublishedVersionID = types.Int64Value(*w.PublishedVersionID)
-	} else {
-		state.PublishedVersionID = types.Int64Null()
-	}
+	// Both are derived from the published graph, so a draft has neither.
+	state.TriggerType = optionalString(w.TriggerType)
+	state.TriggerTypeLabel = optionalString(w.TriggerTypeLabel)
+	state.PublishedVersionID = optionalInt64(w.PublishedVersionID)
 	state.NextEvaluationAt = optionalString(w.NextEvaluationAt)
 	state.LastEvaluationAt = optionalString(w.LastEvaluationAt)
 	state.CreatedAt = types.StringValue(w.CreatedAt)

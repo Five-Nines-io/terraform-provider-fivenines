@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -120,6 +121,16 @@ func sanitizeETag(etag string) string {
 func IsPreconditionFailed(err error) bool {
 	if apiErr, ok := err.(*APIError); ok {
 		return apiErr.StatusCode == 412
+	}
+	return false
+}
+
+// IsForbidden returns true if the error is a 403 Forbidden. The security
+// endpoints are plan-gated behind `security_details` and answer 403 rather than
+// an empty list, so a caller can tell "you may not ask" from "nothing found".
+func IsForbidden(err error) bool {
+	if apiErr, ok := err.(*APIError); ok {
+		return apiErr.StatusCode == 403
 	}
 	return false
 }
@@ -1068,4 +1079,170 @@ func (c *Client) GetIntegration(ctx context.Context, id int64) (*Integration, er
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 	return &result.Integration, nil
+}
+
+// --- Security (vulnerabilities & container images) ---
+
+// securityPerPage is the API's documented maximum. These indexes are read in
+// full by a data source, so the fewest round trips wins.
+const securityPerPage = 100
+
+// ListVulnerabilities returns every OSV finding across the organization.
+func (c *Client) ListVulnerabilities(ctx context.Context, filters VulnerabilityFilters) (*VulnerabilityList, error) {
+	return c.listFindings(ctx, "/api/v1/vulnerabilities", filters.values())
+}
+
+// ListInstanceVulnerabilities returns one instance's findings. An instance that
+// has never been scanned answers with a nil Vulnerabilities slice - see
+// VulnerabilityList.
+func (c *Client) ListInstanceVulnerabilities(ctx context.Context, instanceID string, filters VulnerabilityFilters) (*VulnerabilityList, error) {
+	// Ecosystem is an org-wide-only filter; the nested route 400s on it.
+	filters.Ecosystem = ""
+	return c.listFindings(ctx, "/api/v1/instances/"+url.PathEscape(instanceID)+"/vulnerabilities", filters.values())
+}
+
+// ListDockerImageVulnerabilities returns one container image's findings. An
+// image whose scan did not complete answers with a nil Vulnerabilities slice
+// and a DockerImage whose State says why.
+func (c *Client) ListDockerImageVulnerabilities(ctx context.Context, imageID string, filters VulnerabilityFilters) (*VulnerabilityList, error) {
+	filters.Ecosystem = ""
+	return c.listFindings(ctx, "/api/v1/docker_images/"+url.PathEscape(imageID)+"/vulnerabilities", filters.values())
+}
+
+// ListDockerImages returns the organization's container image inventory,
+// including the images that could not be scanned - they are the point, so they
+// are never filtered out.
+func (c *Client) ListDockerImages(ctx context.Context, filters DockerImageFilters) (*DockerImageList, error) {
+	result := &DockerImageList{Images: []DockerImage{}}
+	query := filters.values()
+
+	for page := 1; ; page++ {
+		var body struct {
+			DockerImages []DockerImage      `json:"docker_images"`
+			Posture      DockerImagePosture `json:"posture"`
+			Meta         *FindingPageMeta   `json:"meta"`
+		}
+		if err := c.getPage(ctx, "/api/v1/docker_images", query, page, &body); err != nil {
+			return nil, err
+		}
+
+		if page == 1 {
+			result.Posture = body.Posture
+		}
+		result.Images = append(result.Images, body.DockerImages...)
+		if body.Meta == nil || page >= body.Meta.TotalPages {
+			return result, nil
+		}
+	}
+}
+
+// listFindings walks every page of one findings index.
+func (c *Client) listFindings(ctx context.Context, path string, query url.Values) (*VulnerabilityList, error) {
+	// Non-nil: a scanned subject with nothing wrong must read as an empty list
+	// and not as the refusal below.
+	result := &VulnerabilityList{Vulnerabilities: []Vulnerability{}}
+
+	for page := 1; ; page++ {
+		var body struct {
+			Vulnerabilities []Vulnerability    `json:"vulnerabilities"`
+			Scan            *VulnerabilityScan `json:"scan"`
+			DockerImage     *DockerImage       `json:"docker_image"`
+			Meta            *FindingPageMeta   `json:"meta"`
+		}
+		if err := c.getPage(ctx, path, query, page, &body); err != nil {
+			return nil, err
+		}
+
+		if page == 1 {
+			result.Scan = body.Scan
+			result.DockerImage = body.DockerImage
+		}
+
+		// THE REFUSAL. A subject that was never scanned - and an image whose
+		// scan moved while the page was being built - answers `vulnerabilities:
+		// null` beside `meta: null` rather than an empty page, because an empty
+		// page is what a build gate reads as PASSED for something nothing ever
+		// looked at. Discard whatever earlier pages held: a partial set reported
+		// as complete is the same lie in the other direction.
+		if body.Meta == nil {
+			result.Vulnerabilities = nil
+			// Take the refusal's own subject, not the one page 1 described: an
+			// image whose scan moved mid-request comes back with its NEW state,
+			// and `state` is the field a caller branches on. Reporting
+			// "scanned" beside a null list would be the contradiction this
+			// whole protocol exists to prevent.
+			if body.Scan != nil {
+				result.Scan = body.Scan
+			}
+			if body.DockerImage != nil {
+				result.DockerImage = body.DockerImage
+			}
+			return result, nil
+		}
+
+		result.Vulnerabilities = append(result.Vulnerabilities, body.Vulnerabilities...)
+		// Paged off our own counter rather than meta.current_page, so a bogus
+		// echo cannot spin this loop.
+		if page >= body.Meta.TotalPages {
+			return result, nil
+		}
+	}
+}
+
+// getPage issues one page of a security index and decodes it into target.
+func (c *Client) getPage(ctx context.Context, path string, query url.Values, page int, target interface{}) error {
+	q := url.Values{}
+	for k, v := range query {
+		q[k] = v
+	}
+	q.Set("page", strconv.Itoa(page))
+	q.Set("per_page", strconv.Itoa(securityPerPage))
+
+	resp, err := c.doRequest(ctx, "GET", path+"?"+q.Encode(), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return parseError(resp)
+	}
+	if err := decodeResponse(resp, target); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+	return nil
+}
+
+func (f VulnerabilityFilters) values() url.Values {
+	q := url.Values{}
+	// Only set filters travel: the API rejects an unknown or empty filter with
+	// a 400 rather than answering an unfiltered list, and on a security index
+	// silently widening the question is the failure that matters.
+	if len(f.Severity) > 0 {
+		q.Set("severity", strings.Join(f.Severity, ","))
+	}
+	if f.Patchable != nil {
+		q.Set("patchable", strconv.FormatBool(*f.Patchable))
+	}
+	setIfPresent(q, "fix_state", f.FixState)
+	setIfPresent(q, "package_name", f.PackageName)
+	setIfPresent(q, "vulnerability_id", f.VulnerabilityID)
+	setIfPresent(q, "ecosystem", f.Ecosystem)
+	setIfPresent(q, "q", f.Query)
+	return q
+}
+
+func (f DockerImageFilters) values() url.Values {
+	q := url.Values{}
+	setIfPresent(q, "state", f.State)
+	setIfPresent(q, "ecosystem", f.Ecosystem)
+	if f.PackagesTruncated != nil {
+		q.Set("packages_truncated", strconv.FormatBool(*f.PackagesTruncated))
+	}
+	setIfPresent(q, "q", f.Query)
+	return q
+}
+
+func setIfPresent(q url.Values, key, value string) {
+	if value != "" {
+		q.Set(key, value)
+	}
 }

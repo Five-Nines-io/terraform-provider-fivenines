@@ -21,6 +21,8 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_integrations` | Configured notification integrations |
 | `fivenines_workflow_runs` | Workflow execution history |
 | `fivenines_incidents` | Incidents triggered by workflows |
+| `fivenines_vulnerabilities` | CVE findings, org-wide or scoped to an instance or container image |
+| `fivenines_docker_images` | Container image inventory with scan verdicts and finding counts |
 
 ## Quick Start
 

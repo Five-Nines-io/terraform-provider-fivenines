@@ -380,6 +380,178 @@ type UpdateStatusPageInput struct {
 	Items                   []StatusPageItem `json:"items,omitempty"`
 }
 
+// --- Security (vulnerabilities & container images) ---
+//
+// Every endpoint below is plan-gated behind `security_details` and answers 403
+// on a plan without it. The gate is deliberate: an empty list is what a build
+// gate reads as PASSED, so the API refuses rather than answering with one.
+
+// FindingPageMeta is the pagination envelope the security indexes return.
+// It is null on a response the API refused to answer - see VulnerabilityList.
+//
+// NOTE: this is the current API's pagination shape (current_page/total_pages),
+// not PaginationMeta's count/offset - the older list methods still speak the
+// stale one (tracked separately in #5).
+type FindingPageMeta struct {
+	CurrentPage int `json:"current_page"`
+	TotalPages  int `json:"total_pages"`
+	TotalCount  int `json:"total_count"`
+	PerPage     int `json:"per_page"`
+}
+
+// Vulnerability is one OSV finding: an (advisory, package, subject) row.
+// Exactly one subject pair is populated - HostID/HostName/Ecosystem on the
+// instance indexes, DockerImageID/ImageName on the container-image one.
+type Vulnerability struct {
+	// ID is NOT a stable per-CVE identity: a scan rewrites a subject's findings
+	// wholesale, so it is minted fresh on every rewrite. Reconcile across scans
+	// on (subject, PackageName, VulnerabilityID).
+	ID               int64   `json:"id"`
+	HostID           *string `json:"host_id"`
+	HostName         *string `json:"host_name"`
+	Ecosystem        *string `json:"ecosystem"`
+	DockerImageID    *string `json:"docker_image_id"`
+	ImageName        *string `json:"image_name"`
+	PackageName      string  `json:"package_name"`
+	InstalledVersion string  `json:"installed_version"`
+	// VulnerabilityID is the OSV advisory id (UBUNTU-CVE-2024-2511, DSA-1234-1),
+	// which is distinct from a CVE id - an advisory can alias several, or none.
+	VulnerabilityID string   `json:"vulnerability_id"`
+	CVEIDs          []string `json:"cve_ids"`
+	Summary         *string  `json:"summary"`
+	AdvisoryURL     *string  `json:"advisory_url"`
+	// CVSSScore is null when no usable score was recorded, which reads as
+	// Severity "Unknown". A null is not a zero.
+	CVSSScore *float64 `json:"cvss_score"`
+	// Severity bands CVSSScore: Critical >= 9, High >= 7, Medium >= 4, Low is
+	// everything else that HAS a score, Unknown is a missing one.
+	Severity string `json:"severity"`
+	// Patchable is the work-queue flag: a fix exists AND this subject can
+	// install it. Strictly narrower than FixState == "fixed", which also covers
+	// fixes gated behind a paid channel (see RequiresSubscription).
+	Patchable            bool    `json:"patchable"`
+	FixVersion           *string `json:"fix_version"`
+	FixState             string  `json:"fix_state"`
+	RequiresSubscription bool    `json:"requires_subscription"`
+	Vendor               *string `json:"vendor"`
+	VendorNote           *string `json:"vendor_note"`
+	// DetectedAt is when the scan that WROTE this row ran, not when the CVE was
+	// published and not a durable "first seen".
+	DetectedAt *string `json:"detected_at"`
+	UpdatedAt  *string `json:"updated_at"`
+}
+
+// VulnerabilityScan says what an empty findings list means. The org-wide index
+// fills the fleet pair (OldestCheckedAt, InstancesNeverChecked); the
+// per-instance index fills the host pair (LastCheckedAt, NeverChecked).
+type VulnerabilityScan struct {
+	OldestCheckedAt       *string `json:"oldest_checked_at"`
+	InstancesNeverChecked *int64  `json:"instances_never_checked"`
+	LastCheckedAt         *string `json:"last_checked_at"`
+	NeverChecked          *bool   `json:"never_checked"`
+}
+
+// VulnerabilityList is one findings query with the context that qualifies it.
+type VulnerabilityList struct {
+	// Vulnerabilities is nil - not empty - when the API refused to answer,
+	// which it does for an instance or image that was never scanned. An empty
+	// non-nil slice is a real all-clear from a subject that WAS scanned; the
+	// difference is the whole point of these endpoints and is carried through
+	// to Terraform as a null list rather than an empty one.
+	Vulnerabilities []Vulnerability
+	// Scan is nil on the per-image drill-down, which reports its subject's
+	// state through DockerImage instead.
+	Scan *VulnerabilityScan
+	// DockerImage is set only by ListDockerImageVulnerabilities, and always -
+	// including on the refusal, where its State says why there are no findings.
+	DockerImage *DockerImage
+}
+
+// VulnerabilityFilters narrows a findings index. Zero values are omitted from
+// the query string: the API rejects an unknown or empty filter with a 400
+// rather than silently answering an unfiltered list.
+type VulnerabilityFilters struct {
+	// Severity is sent comma-separated (severity=Critical,High) and matches
+	// each FINDING's own score.
+	Severity        []string
+	Patchable       *bool
+	FixState        string
+	PackageName     string
+	VulnerabilityID string
+	// Ecosystem is accepted by the org-wide index only: the nested routes
+	// already fix their subject's ecosystem and 400 on the parameter.
+	Ecosystem string
+	Query     string
+}
+
+// DockerImage is one container image in the organization, with its scan
+// verdict. It is org-scoped: one image running on 50 hosts is one row.
+type DockerImage struct {
+	ID             string `json:"id"` // UUID
+	OrganizationID int64  `json:"organization_id"`
+	// ImageID is the sha256: config digest - the durable, content-addressed
+	// identity the scan is keyed on. ID is the Fivenines row.
+	ImageID     string `json:"image_id"`
+	ShortDigest string `json:"short_digest"`
+	// DisplayName is a tag if the image carries one, else the short digest -
+	// a label, not an id.
+	DisplayName string   `json:"display_name"`
+	Tags        []string `json:"tags"`
+	RepoDigests []string `json:"repo_digests"`
+	Distro      *string  `json:"distro"`
+	Ecosystem   *string  `json:"ecosystem"`
+	// State is pending | scanned | unsupported | unscannable, and is the field
+	// to read BEFORE the counts.
+	State          string  `json:"state"`
+	StateReason    *string `json:"state_reason"`
+	StateErrorType *string `json:"state_error_type"`
+	// Countable is whether the counts below mean anything at all: false for
+	// every non-scanned state.
+	Countable bool `json:"countable"`
+	// VulnerabilityCount is null unless the image is scanned. A null is "not
+	// scanned", never "zero vulnerabilities" - the underlying columns are NOT
+	// NULL default 0, which is exactly the reading this nulling prevents.
+	VulnerabilityCount         *int64 `json:"vulnerability_count"`
+	CriticalVulnerabilityCount *int64 `json:"critical_vulnerability_count"`
+	// PackagesTruncated marks an image whose package list the agent capped, so
+	// the counts are a FLOOR rather than a total. Not a fifth state: the scan
+	// really did complete. FindingCountIsFloor is the two conditions together.
+	PackagesTruncated   bool    `json:"packages_truncated"`
+	FindingCountIsFloor bool    `json:"finding_count_is_floor"`
+	LastSeenAt          *string `json:"last_seen_at"`
+	InventoryReceivedAt *string `json:"inventory_received_at"`
+	LastScannedAt       *string `json:"last_scanned_at"`
+	CreatedAt           string  `json:"created_at"`
+	UpdatedAt           string  `json:"updated_at"`
+	// RunningHostCount is the blast radius: instances currently running a
+	// container off this image.
+	RunningHostCount *int64 `json:"running_host_count"`
+}
+
+// DockerImagePosture counts images per scan state across the WHOLE
+// organization. It is never narrowed by the list filters - it is the answer to
+// "is this list the complete picture", which a filtered count could not be.
+type DockerImagePosture struct {
+	Pending     int64 `json:"pending"`
+	Scanned     int64 `json:"scanned"`
+	Unsupported int64 `json:"unsupported"`
+	Unscannable int64 `json:"unscannable"`
+}
+
+// DockerImageList is the image inventory plus the posture that qualifies it.
+type DockerImageList struct {
+	Images  []DockerImage
+	Posture DockerImagePosture
+}
+
+// DockerImageFilters narrows the container-image index.
+type DockerImageFilters struct {
+	State             string
+	Ecosystem         string
+	PackagesTruncated *bool
+	Query             string
+}
+
 // APIError represents an error response from the API.
 type APIError struct {
 	StatusCode int

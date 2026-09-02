@@ -2059,3 +2059,128 @@ func (c *Client) DeleteMQTTTopicMonitor(ctx context.Context, brokerID, id string
 	resp.Body.Close()
 	return nil
 }
+
+// --- API Tokens ---
+
+// ListAPITokens returns every API token belonging to the calling user in this
+// organization, revoked and expired ones included.
+func (c *Client) ListAPITokens(ctx context.Context) ([]APIToken, error) {
+	var all []APIToken
+	err := c.walkAPITokens(ctx, func(page []APIToken) bool {
+		all = append(all, page...)
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return all, nil
+}
+
+// GetAPIToken returns one token by id.
+//
+// There is no show endpoint for api_tokens — index, create and revoke are the
+// whole surface — so this walks the index and synthesises the 404 a caller
+// expects when the row is gone. It stops at the page holding the match, which
+// matters because a revoke keeps the row: the list only ever grows, and every
+// refresh of every managed token walks it.
+//
+// Narrowing the request is deliberately not attempted. `q` matches on name,
+// which is not the key being looked up, and `active` would hide the expired
+// tokens this resource keeps in state on purpose — either one turns a miss into
+// a 404, which Read reads as "gone" and the next plan turns into minting a
+// replacement for a credential that is still live.
+func (c *Client) GetAPIToken(ctx context.Context, id int64) (*APIToken, error) {
+	var found *APIToken
+	err := c.walkAPITokens(ctx, func(page []APIToken) bool {
+		for i := range page {
+			if page[i].ID == id {
+				found = &page[i]
+				return false
+			}
+		}
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	if found == nil {
+		return nil, &APIError{
+			StatusCode: http.StatusNotFound,
+			Message:    fmt.Sprintf("no API token with id %d belongs to you in this organization", id),
+		}
+	}
+	return found, nil
+}
+
+// walkAPITokens pages through the index, handing each page to fn. fn returns
+// false to stop the walk early.
+func (c *Client) walkAPITokens(ctx context.Context, fn func([]APIToken) bool) error {
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/api_tokens?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return parseError(resp)
+		}
+
+		var result struct {
+			APITokens []APIToken     `json:"api_tokens"`
+			Meta      PaginationMeta `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		if !fn(result.APITokens) {
+			return nil
+		}
+		more, err := morePages(len(result.APITokens), result.Meta, page)
+		if err != nil {
+			return err
+		}
+		if !more {
+			return nil
+		}
+		page++
+	}
+}
+
+// CreateAPIToken mints a token. The returned APIToken is the only place the
+// plaintext value ever appears - it is stored as a digest, so a lost value can
+// only be replaced, never recovered.
+func (c *Client) CreateAPIToken(ctx context.Context, input CreateAPITokenInput) (*APIToken, error) {
+	body := map[string]interface{}{"api_token": input}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/api_tokens", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		APIToken APIToken `json:"api_token"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.APIToken, nil
+}
+
+// RevokeAPIToken kills a token. DELETE here is a revocation, not a delete: the
+// row survives with a revoked_at stamp so the audit trail outlives the
+// credential. The API renders the revoked row back and nothing wants it — the
+// resource is dropping the token from state either way.
+func (c *Client) RevokeAPIToken(ctx context.Context, id int64) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/api_tokens/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}

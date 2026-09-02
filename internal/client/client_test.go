@@ -2614,3 +2614,257 @@ func TestWaitForDeletion_BackoffCaps(t *testing.T) {
 		t.Errorf("expected the backoff to cap and keep polling, got %d polls in 60ms", polls)
 	}
 }
+
+// --- API Tokens ---
+
+func TestClient_CreateAPIToken(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/api_tokens" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"api_token": map[string]interface{}{
+				"id":           7,
+				"name":         "CI deploy key",
+				"token_prefix": "fn_a1b2c",
+				"scopes":       []string{"write", "read"},
+				"expires_at":   nil,
+				"active":       true,
+				"created_at":   "2026-09-01T10:00:00Z",
+				"updated_at":   "2026-09-01T10:00:00Z",
+				"token":        "fn_a1b2c3d4e5f6",
+			},
+		})
+	})
+
+	token, err := c.CreateAPIToken(context.Background(), CreateAPITokenInput{
+		Name:   "CI deploy key",
+		Scopes: []string{"read", "write"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The body has to be nested under the api_token root key.
+	wrapped, ok := gotBody["api_token"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected body nested under api_token, got %v", gotBody)
+	}
+	if wrapped["name"] != "CI deploy key" {
+		t.Errorf("expected name 'CI deploy key', got %v", wrapped["name"])
+	}
+	if _, sent := wrapped["expires_at"]; sent {
+		t.Error("expected expires_at to be omitted when unset")
+	}
+	if token.Token != "fn_a1b2c3d4e5f6" {
+		t.Errorf("expected the plaintext token to be returned, got %q", token.Token)
+	}
+	if token.ID != 7 {
+		t.Errorf("expected id 7, got %d", token.ID)
+	}
+}
+
+func TestClient_CreateAPIToken_SendsExpiry(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{"api_token": map[string]interface{}{"id": 1}})
+	})
+
+	expires := "2026-12-01T00:00:00Z"
+	if _, err := c.CreateAPIToken(context.Background(), CreateAPITokenInput{Name: "t", ExpiresAt: &expires}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wrapped := gotBody["api_token"].(map[string]interface{})
+	if wrapped["expires_at"] != expires {
+		t.Errorf("expected expires_at %q, got %v", expires, wrapped["expires_at"])
+	}
+}
+
+func TestClient_ListAPITokens_Pagination(t *testing.T) {
+	var pages int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := atomic.AddInt32(&pages, 1)
+		if got := r.URL.Query().Get("page"); got != fmt.Sprint(page) {
+			t.Errorf("expected page %d, got %q", page, got)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"api_tokens": []map[string]interface{}{{"id": int(page), "name": fmt.Sprintf("token-%d", page)}},
+			"meta": map[string]int{
+				"current_page": int(page),
+				"total_pages":  2,
+				"total_count":  2,
+				"per_page":     100,
+			},
+		})
+	})
+
+	tokens, err := c.ListAPITokens(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tokens) != 2 {
+		t.Fatalf("expected 2 tokens across 2 pages, got %d", len(tokens))
+	}
+	if tokens[1].Name != "token-2" {
+		t.Errorf("expected the second page to be appended, got %q", tokens[1].Name)
+	}
+}
+
+// An unreadable meta envelope walks until an empty page rather than trusting
+// counters it cannot decode — the morePages guard that exists because a meta
+// rename once truncated every list in the provider at one page while the unit
+// tests stayed green. A recognised meta is authoritative instead, empty middle
+// page included, which TestClient_ListAPITokens_Pagination covers.
+func TestClient_ListAPITokens_StopsOnEmptyPageWhenMetaIsUnreadable(t *testing.T) {
+	var calls int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := atomic.AddInt32(&calls, 1)
+		tokens := []map[string]interface{}{}
+		if page == 1 {
+			tokens = append(tokens, map[string]interface{}{"id": 1, "name": "only"})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"api_tokens": tokens,
+			// The pre-2026-09 envelope: every field of PaginationMeta decodes to zero.
+			"meta": map[string]int{"count": 1, "total": 1, "offset": 0},
+		})
+	})
+
+	tokens, err := c.ListAPITokens(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tokens) != 1 {
+		t.Errorf("expected 1 token, got %d", len(tokens))
+	}
+	if calls != 2 {
+		t.Errorf("expected the walk to over-fetch by exactly one empty page, got %d requests", calls)
+	}
+}
+
+func TestClient_GetAPIToken(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/api_tokens" {
+			t.Errorf("expected the index to be walked, got %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"api_tokens": []map[string]interface{}{
+				{"id": 1, "name": "other"},
+				{"id": 42, "name": "wanted", "token_prefix": "fn_a1b2c", "scopes": []string{"read"}, "active": true},
+			},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1},
+		})
+	})
+
+	token, err := c.GetAPIToken(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if token.Name != "wanted" {
+		t.Errorf("expected token 42, got %q", token.Name)
+	}
+}
+
+// There is no show endpoint, so a missing row has to answer like one.
+func TestClient_GetAPIToken_NotFound(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"api_tokens": []map[string]interface{}{{"id": 1}},
+			"meta":       map[string]int{"current_page": 1, "total_pages": 1},
+		})
+	})
+
+	_, err := c.GetAPIToken(context.Background(), 42)
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T (%v)", err, err)
+	}
+	if apiErr.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestClient_RevokeAPIToken(t *testing.T) {
+	var hit bool
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hit = r.Method == "DELETE" && r.URL.Path == "/api/v1/api_tokens/7"
+		if !hit {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"api_token": map[string]interface{}{
+				"id":         7,
+				"name":       "CI deploy key",
+				"revoked_at": "2026-09-01T12:00:00Z",
+				"active":     false,
+			},
+		})
+	})
+
+	if err := c.RevokeAPIToken(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hit {
+		t.Error("expected DELETE /api/v1/api_tokens/7")
+	}
+}
+
+// A refused mint must not read as a success. Every failure mode on this endpoint
+// answers with a body — 403 for a read-scoped caller or a scope it cannot grant,
+// 402 for a restricted organization, 422 for a bad expiry — and all of them
+// decode into an APIToken with an empty value. Without the status check the
+// provider would store that empty credential and report the apply green.
+func TestClient_CreateAPIToken_RejectionIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   map[string]interface{}
+	}{
+		{"scope escalation", http.StatusForbidden, map[string]interface{}{"error": "This token cannot grant scopes it does not hold itself: write."}},
+		{"restricted organization", http.StatusPaymentRequired, map[string]interface{}{"error": "Access restricted"}},
+		{"bad expiry", http.StatusUnprocessableEntity, map[string]interface{}{"error": "expires_at must be in the future"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				json.NewEncoder(w).Encode(tc.body)
+			})
+
+			token, err := c.CreateAPIToken(context.Background(), CreateAPITokenInput{Name: "nope"})
+			if err == nil {
+				t.Fatalf("expected an error, got token %+v", token)
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("expected *APIError, got %T (%v)", err, err)
+			}
+			if apiErr.StatusCode != tc.status {
+				t.Errorf("expected status %d, got %d", tc.status, apiErr.StatusCode)
+			}
+		})
+	}
+}
+
+// A refused revoke is the same hazard in reverse: swallow it and Terraform drops
+// a live credential out of state, leaving it valid and unmanaged.
+func TestClient_RevokeAPIToken_RejectionIsAnError(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Missing write scope"})
+	})
+
+	if err := c.RevokeAPIToken(context.Background(), 7); err == nil {
+		t.Fatal("expected an error")
+	} else {
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+			t.Errorf("expected a 403 APIError, got %v", err)
+		}
+	}
+}

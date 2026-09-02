@@ -317,6 +317,27 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		input  interface{}
 		policy map[string]string
 	}{
+		input: CreateAPITokenInput{},
+		policy: map[string]string{
+			"name": always,
+			// Create-and-revoke only: there is no UpdateAPITokenInput, and every
+			// attribute forces replacement, so no unrelated apply can reach these
+			// fields to wipe them. Both are omitted rather than nulled when absent,
+			// and both have to be: `scopes: null` and `expires_at: null` are the
+			// documented ways to ask for the defaults, but the API answers 422 on
+			// an explicitly empty scope array, and omission is the only spelling of
+			// "read-only token" it accepts.
+			//
+			// Neither nil case actually arises today — the schema defaults scopes to
+			// ["read"] and Create only sets ExpiresAt when the plan holds one — which
+			// is precisely why this table is the only place the policy can be pinned
+			// (the v0.13.0 precedent).
+			"scopes": preserves, "expires_at": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
 		input: CreateWorkflowVersionInput{},
 		policy: map[string]string{
 			// A version is meaningless without its graph, and the resource always

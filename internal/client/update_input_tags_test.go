@@ -74,10 +74,17 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 				"uptime": preserves, "custom_domain": preserves,
 				"custom_domain_enabled": preserves, "custom_footer": preserves,
 				"custom_footer_enabled": preserves, "incidents_history_enabled": preserves,
-				"theme_variant": preserves,
-				// A pointer-to-slice: nil omits, &[] sends the explicit [] that
-				// is the only way to empty a page.
-				"items": preserves,
+				"theme_variant": preserves, "contact_url": preserves,
+				"subscriptions_enabled": preserves, "search_indexing_enabled": preserves,
+				"uptime_green_tolerance_seconds": preserves, "uptime_window_days": preserves,
+				// Pointers-to-slice: nil omits, &[] sends the explicit [] that is
+				// the only way to empty a page or drop every section.
+				"items": preserves, "sections": preserves,
+				// The API never echoes the logo back, so its Terraform attribute
+				// is Optional-only and the configuration owns it end to end:
+				// dropping `logo` has to delete the image, which only an explicit
+				// null can do.
+				"logo": clears,
 			},
 		},
 		{
@@ -111,7 +118,13 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 			"uptime": preserves, "custom_domain": preserves,
 			"custom_domain_enabled": preserves, "custom_footer": preserves,
 			"custom_footer_enabled": preserves, "incidents_history_enabled": preserves,
-			"theme_variant": dropsZero, "items": preserves,
+			"theme_variant": dropsZero, "items": preserves, "sections": preserves,
+			"contact_url": preserves, "subscriptions_enabled": preserves,
+			"uptime_green_tolerance_seconds": preserves, "uptime_window_days": preserves,
+			"search_indexing_enabled": preserves,
+			// Nothing to clear on a page that does not exist yet, so the create
+			// side omits an absent logo rather than sending an explicit null.
+			"logo": preserves,
 		},
 	}, struct {
 		input  interface{}

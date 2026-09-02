@@ -1716,7 +1716,7 @@ func TestClient_UpdateStatusPage_EmptyItems(t *testing.T) {
 	name := "Status"
 	if _, err := c.UpdateStatusPage(context.Background(), 1, "", UpdateStatusPageInput{
 		Name:  &name,
-		Items: &[]StatusPageItem{},
+		Items: &[]StatusPageItemInput{},
 	}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

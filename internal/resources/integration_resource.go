@@ -247,8 +247,8 @@ func (r *integrationResource) ValidateConfig(ctx context.Context, req resource.V
 	if rules.requireName && config.Name.IsNull() {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("name"),
-			"Missing required argument",
-			fmt.Sprintf("%q integrations require `name`.", integrationType),
+			"Missing required attribute",
+			fmt.Sprintf("%q integrations require %q to be set.", integrationType, "name"),
 		)
 	}
 
@@ -257,8 +257,8 @@ func (r *integrationResource) ValidateConfig(ctx context.Context, req resource.V
 		if scoped[name].IsNull() {
 			resp.Diagnostics.AddAttributeError(
 				path.Root(name),
-				"Missing required argument",
-				fmt.Sprintf("%q integrations require `%s`.", integrationType, name),
+				"Missing required attribute",
+				fmt.Sprintf("%q integrations require %q to be set.", integrationType, name),
 			)
 		}
 	}
@@ -273,8 +273,9 @@ func (r *integrationResource) ValidateConfig(ctx context.Context, req resource.V
 		}
 		resp.Diagnostics.AddAttributeError(
 			path.Root(name),
-			"Argument not valid for this integration type",
-			fmt.Sprintf("`%s` does not apply to %q integrations. It is only used by %s.", name, integrationType, typesAccepting(name)),
+			"Attribute not used by this integration type",
+			fmt.Sprintf("%q integrations do not use %q; it is only used by %s. "+
+				"Remove it from the configuration.", integrationType, name, typesAccepting(name)),
 		)
 	}
 }

@@ -394,10 +394,15 @@ func TestHostGroupRead_KeepsStateOnServerError(t *testing.T) {
 
 func hostGroupUpdateRequest(t *testing.T, s rschema.Schema, objType tftypes.Type, configPosition *int64) resource.UpdateRequest {
 	t.Helper()
+	return hostGroupUpdateRequestWithPlan(t, s, objType, configPosition, tftypes.NewValue(tftypes.Number, tftypes.UnknownValue))
+}
+
+func hostGroupUpdateRequestWithPlan(t *testing.T, s rschema.Schema, objType tftypes.Type, configPosition *int64, planPosition tftypes.Value) resource.UpdateRequest {
+	t.Helper()
 	planAttrs := map[string]tftypes.Value{
 		"id":       tftypes.NewValue(tftypes.Number, 7),
 		"name":     tftypes.NewValue(tftypes.String, "Prod EU"),
-		"position": tftypes.NewValue(tftypes.Number, tftypes.UnknownValue),
+		"position": planPosition,
 	}
 	stateAttrs := map[string]tftypes.Value{
 		"id":       tftypes.NewValue(tftypes.Number, 7),
@@ -528,6 +533,72 @@ func TestHostGroupUpdate_ExplainsVanishedGroup(t *testing.T) {
 	summary := resp.Diagnostics.Errors()[0].Summary()
 	if !strings.Contains(summary, "no longer exists") {
 		t.Errorf("expected a diagnostic explaining the group is gone, got %q", summary)
+	}
+}
+
+// Position is renumbered by the server whenever a NEIGHBOUR moves, so an update
+// that does not touch position can still come back carrying a different one. The
+// plan modifier cannot help here: the config does not move this group, so the
+// planned position equals state and stays KNOWN. Writing the API's value into
+// state against a known plan is exactly what Terraform rejects with "Provider
+// produced inconsistent result after apply" — and two managed groups in one
+// apply, where the other one moves, is enough to trigger it. Keep the planned
+// value; the next refresh reports the server's truth and plans the correction.
+func TestHostGroupUpdate_KeepsPlannedPositionWhenRenumberedConcurrently(t *testing.T) {
+	ctx := context.Background()
+	s := hostGroupSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	r := newHostGroupResource(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("ETag", `"hg-etag"`)
+		// A sibling group moved into this slot mid-apply, so the group this
+		// update touches came back renumbered from 3 to 4.
+		json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{
+			"name": "Prod EU", "position": 4,
+		}))
+	})
+
+	req := hostGroupUpdateRequestWithPlan(t, s, objType, nil, tftypes.NewValue(tftypes.Number, 3))
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Update(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var got hostGroupModel
+	resp.State.Get(ctx, &got)
+	if got.Position.ValueInt64() != 3 {
+		t.Errorf("state must keep the planned position 3 so the apply stays consistent, got %d",
+			got.Position.ValueInt64())
+	}
+}
+
+// The mirror of the case above: when the plan is unknown the API is the only
+// source of truth, so its value must land in state rather than a stale one.
+func TestHostGroupUpdate_TakesAPIPositionWhenPlanIsUnknown(t *testing.T) {
+	ctx := context.Background()
+	s := hostGroupSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	r := newHostGroupResource(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("ETag", `"hg-etag"`)
+		json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{
+			"name": "Prod EU", "position": 2,
+		}))
+	})
+
+	want := int64(9)
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Update(ctx, hostGroupUpdateRequest(t, s, objType, &want), resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	var got hostGroupModel
+	resp.State.Get(ctx, &got)
+	if got.Position.ValueInt64() != 2 {
+		t.Errorf("an unknown plan must take the API's clamped position 2, got %d",
+			got.Position.ValueInt64())
 	}
 }
 

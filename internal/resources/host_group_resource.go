@@ -245,7 +245,22 @@ func (r *hostGroupResource) Update(ctx context.Context, req resource.UpdateReque
 		break
 	}
 
+	plannedPosition := plan.Position
 	mapHostGroupToState(group, &plan)
+
+	// A group's position is renumbered by the server whenever a NEIGHBOUR moves,
+	// so an update that never touched position can still come back carrying a
+	// different one. The plan modifier cannot catch that: this configuration does
+	// not move this group, so the planned position equals state and stays known.
+	// Terraform rejects an applied value that differs from a known planned one, so
+	// writing the server's number here fails the whole apply — two managed groups
+	// in a single apply, where the other one moves, is enough to hit it. Keep the
+	// planned value instead; the next refresh reports the server's truth and plans
+	// the correction, which is a diff rather than a dead apply.
+	if !plannedPosition.IsUnknown() && !plannedPosition.IsNull() {
+		plan.Position = plannedPosition
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 

@@ -295,11 +295,20 @@ func (r *networkDeviceResource) Create(ctx context.Context, req resource.CreateR
 	// Handle maintenance mode if requested. The endpoint returns the updated
 	// device, so no follow-up GET is needed.
 	if plan.MaintenanceMode.ValueBool() {
-		device, err = r.client.EnterMaintenanceNetworkDevice(ctx, device.ID)
+		entered, err := r.client.EnterMaintenanceNetworkDevice(ctx, device.ID)
 		if err != nil {
-			resp.Diagnostics.AddError("Error entering maintenance mode", err.Error())
+			// The device already exists server-side. Terraform taints a resource
+			// whose Create errors with state set, so the next apply replaces it —
+			// that still beats writing no state, which would leak this device and
+			// create a second one on the next apply.
+			mapNetworkDeviceToState(device, &plan)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+			resp.Diagnostics.AddError("Error entering maintenance mode after creation",
+				"The device was created but could not be put into maintenance mode. It is recorded as "+
+					"tainted, so the next apply will destroy and recreate it.\n\n"+err.Error())
 			return
 		}
+		device = entered
 	}
 
 	mapNetworkDeviceToState(device, &plan)

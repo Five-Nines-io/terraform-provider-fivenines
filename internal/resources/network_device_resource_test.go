@@ -429,3 +429,85 @@ func TestNetworkDeviceDelete_PollsUntilGone(t *testing.T) {
 		t.Errorf("expected the provider to poll past a still-alive device, got %d GETs (%v)", gets, paths)
 	}
 }
+
+// A device that was created but could not enter maintenance still has to be
+// recorded. Writing no state leaks it: the API holds a device Terraform has
+// never heard of, and the next apply creates a second one.
+func TestNetworkDeviceCreate_FailedMaintenanceStillRecordsTheDevice(t *testing.T) {
+	ctx := context.Background()
+	s := networkDeviceSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	r := newDeviceResource(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/api/v1/network_devices" {
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(deviceJSON(nil))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "maintenance unavailable"})
+	})
+
+	plan := nullObjectValue(t, objType, map[string]tftypes.Value{
+		"name":             tftypes.NewValue(tftypes.String, "Core Switch"),
+		"ip_address":       tftypes.NewValue(tftypes.String, "192.0.2.1"),
+		"maintenance_mode": tftypes.NewValue(tftypes.Bool, true),
+	})
+	resp := &resource.CreateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Create(ctx, resource.CreateRequest{Plan: tfsdk.Plan{Schema: s, Raw: plan}}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic for the failed maintenance call")
+	}
+	var got networkDeviceModel
+	if diags := resp.State.Get(ctx, &got); diags.HasError() {
+		t.Fatalf("reading state: %v", diags.Errors())
+	}
+	if got.ID.ValueString() != "dev-uuid" {
+		t.Errorf("the created device must be recorded so it is not leaked, got id %q", got.ID.ValueString())
+	}
+}
+
+// Three consecutive 412s exhaust the ETag retry loop. The update result is the
+// only thing state is built from now that the trailing GET is gone, so the
+// exhausted path has to error out rather than fall through to a nil device.
+func TestNetworkDeviceUpdate_ExhaustedETagRetriesErrorCleanly(t *testing.T) {
+	ctx := context.Background()
+	s := networkDeviceSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	patches := 0
+	r := newDeviceResource(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet {
+			w.Header().Set("ETag", `"dev-etag"`)
+			json.NewEncoder(w).Encode(deviceJSON(nil))
+			return
+		}
+		patches++
+		w.WriteHeader(http.StatusPreconditionFailed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "etag mismatch"})
+	})
+
+	plan := nullObjectValue(t, objType, map[string]tftypes.Value{
+		"id":               tftypes.NewValue(tftypes.String, "dev-uuid"),
+		"name":             tftypes.NewValue(tftypes.String, "Core Switch"),
+		"ip_address":       tftypes.NewValue(tftypes.String, "192.0.2.1"),
+		"maintenance_mode": tftypes.NewValue(tftypes.Bool, false),
+	})
+	state := nullObjectValue(t, objType, map[string]tftypes.Value{
+		"id":               tftypes.NewValue(tftypes.String, "dev-uuid"),
+		"maintenance_mode": tftypes.NewValue(tftypes.Bool, false),
+	})
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:  tfsdk.Plan{Schema: s, Raw: plan},
+		State: tfsdk.State{Schema: s, Raw: state},
+	}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected an error diagnostic once the retries are exhausted")
+	}
+	if patches != 3 {
+		t.Errorf("expected 3 PATCH attempts before giving up, got %d", patches)
+	}
+}

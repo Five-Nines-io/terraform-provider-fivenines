@@ -3,32 +3,14 @@ package resources
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
-	fwresource "github.com/hashicorp/terraform-plugin-framework/resource"
-	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
 
-// --- optionalString ---
-
-func TestOptionalString_Nil(t *testing.T) {
-	result := optionalString(nil)
-	if !result.IsNull() {
-		t.Errorf("expected null, got %v", result)
-	}
-}
-
-func TestOptionalString_Value(t *testing.T) {
-	v := "hello"
-	result := optionalString(&v)
-	if result.ValueString() != "hello" {
-		t.Errorf("expected 'hello', got %q", result.ValueString())
-	}
-}
+func ptr[T any](v T) *T { return &v }
 
 // --- mapInstanceToState ---
 
@@ -36,10 +18,10 @@ func TestMapInstanceToState(t *testing.T) {
 	inst := &client.Instance{
 		ID:          "uuid-1",
 		DisplayName: "web-1",
-		Hostname:    "web-1.local",
+		Hostname:    ptr("web-1.local"),
 		Enabled:     true,
-		CPUCount:    4,
-		MemorySize:  8589934592,
+		CPUCount:    ptr(int64(4)),
+		MemorySize:  ptr(int64(8589934592)),
 		CreatedAt:   "2026-01-01T00:00:00Z",
 		UpdatedAt:   "2026-01-01T00:00:00Z",
 	}
@@ -64,6 +46,14 @@ func TestMapInstanceToState(t *testing.T) {
 	}
 	if !state.LastSyncAt.IsNull() {
 		t.Error("expected last_sync_at to be null")
+	}
+	// An instance that never synced reports null for everything the agent
+	// fills in; those must stay null instead of collapsing to "".
+	if !state.IPv4.IsNull() {
+		t.Errorf("expected ipv4 to be null, got %q", state.IPv4.ValueString())
+	}
+	if !state.KernelVersion.IsNull() {
+		t.Errorf("expected kernel_version to be null, got %q", state.KernelVersion.ValueString())
 	}
 }
 
@@ -97,7 +87,7 @@ func TestMapTaskToState_Paused(t *testing.T) {
 		ID:           "task-uuid",
 		Name:         "paused-task",
 		ScheduleType: "cron",
-		Schedule:     "0 * * * *",
+		Schedule:     ptr("0 * * * *"),
 		Status:       "paused",
 		CreatedAt:    "2026-01-01T00:00:00Z",
 		UpdatedAt:    "2026-01-01T00:00:00Z",
@@ -149,6 +139,107 @@ func TestMapTaskToState_NilIntervalSeconds(t *testing.T) {
 	}
 }
 
+func TestMapTaskToState_EmptyScheduleIsNull(t *testing.T) {
+	interval := int64(300)
+	task := &client.Task{
+		ID:              "task-uuid",
+		Name:            "interval-task",
+		ScheduleType:    "interval",
+		Status:          "active",
+		Schedule:        ptr(""),
+		IntervalSeconds: &interval,
+		CreatedAt:       "2026-01-01T00:00:00Z",
+		UpdatedAt:       "2026-01-01T00:00:00Z",
+	}
+
+	state := &taskModel{}
+	mapTaskToState(task, state)
+
+	if !state.Schedule.IsNull() {
+		t.Errorf("expected schedule to be null for interval task, got %v", state.Schedule)
+	}
+}
+
+// --- validateTaskSchedule ---
+
+func TestValidateTaskSchedule_CronRequiresSchedule(t *testing.T) {
+	diags := validateTaskSchedule(taskModel{
+		ScheduleType: types.StringValue("cron"),
+		Schedule:     types.StringNull(),
+	})
+
+	if !diags.HasError() {
+		t.Fatal("expected an error when schedule_type is cron without schedule")
+	}
+	if got := diags.Errors()[0].Detail(); got != `"schedule" is required when "schedule_type" is "cron".` {
+		t.Errorf("unexpected detail: %s", got)
+	}
+}
+
+func TestValidateTaskSchedule_IntervalRequiresIntervalSeconds(t *testing.T) {
+	diags := validateTaskSchedule(taskModel{
+		ScheduleType:    types.StringValue("interval"),
+		IntervalSeconds: types.Int64Null(),
+	})
+
+	if !diags.HasError() {
+		t.Fatal("expected an error when schedule_type is interval without interval_seconds")
+	}
+}
+
+func TestValidateTaskSchedule_Valid(t *testing.T) {
+	cron := validateTaskSchedule(taskModel{
+		ScheduleType: types.StringValue("cron"),
+		Schedule:     types.StringValue("0 2 * * *"),
+	})
+	if cron.HasError() {
+		t.Errorf("expected no error for a valid cron task, got %v", cron.Errors())
+	}
+
+	interval := validateTaskSchedule(taskModel{
+		ScheduleType:    types.StringValue("interval"),
+		IntervalSeconds: types.Int64Value(300),
+	})
+	if interval.HasError() {
+		t.Errorf("expected no error for a valid interval task, got %v", interval.Errors())
+	}
+}
+
+func TestValidateTaskSchedule_NullScheduleType(t *testing.T) {
+	diags := validateTaskSchedule(taskModel{})
+	if diags.HasError() {
+		t.Errorf("expected no error for a null schedule_type, got %v", diags.Errors())
+	}
+}
+
+// A schedule sourced from another resource is unknown at validate time; the API
+// gets the last word rather than the plan failing outright.
+func TestValidateTaskSchedule_UnknownValuesDeferred(t *testing.T) {
+	unknownType := validateTaskSchedule(taskModel{
+		ScheduleType: types.StringUnknown(),
+		Schedule:     types.StringNull(),
+	})
+	if unknownType.HasError() {
+		t.Errorf("expected no error for unknown schedule_type, got %v", unknownType.Errors())
+	}
+
+	unknownSchedule := validateTaskSchedule(taskModel{
+		ScheduleType: types.StringValue("cron"),
+		Schedule:     types.StringUnknown(),
+	})
+	if unknownSchedule.HasError() {
+		t.Errorf("expected no error for unknown schedule, got %v", unknownSchedule.Errors())
+	}
+
+	unknownInterval := validateTaskSchedule(taskModel{
+		ScheduleType:    types.StringValue("interval"),
+		IntervalSeconds: types.Int64Unknown(),
+	})
+	if unknownInterval.HasError() {
+		t.Errorf("expected no error for unknown interval_seconds, got %v", unknownInterval.Errors())
+	}
+}
+
 // --- mapWorkflowToState ---
 
 func TestMapWorkflowToState(t *testing.T) {
@@ -157,11 +248,11 @@ func TestMapWorkflowToState(t *testing.T) {
 	wf := &client.Workflow{
 		ID:                 42,
 		Name:               "CPU Alert",
-		Description:        "Alerts on high CPU",
+		Description:        ptr("Alerts on high CPU"),
 		Status:             "active",
 		IntervalSeconds:    &interval,
-		TriggerType:        "metric_threshold",
-		TriggerTypeLabel:   "Instance Metric",
+		TriggerType:        ptr("metric_threshold"),
+		TriggerTypeLabel:   ptr("Instance Metric"),
 		PublishedVersionID: &versionID,
 		CreatedAt:          "2026-01-01T00:00:00Z",
 		UpdatedAt:          "2026-01-01T00:00:00Z",
@@ -212,377 +303,293 @@ func TestTypesStringNull(t *testing.T) {
 	}
 }
 
-// --- parseWindowTime ---
+// --- uptime monitor: protocol cross-field validation ---
 
-func TestParseWindowTime(t *testing.T) {
-	paris, err := time.LoadLocation("Europe/Paris")
-	if err != nil {
-		t.Fatalf("loading Europe/Paris: %v", err)
-	}
-
+func TestMissingProtocolAttributes(t *testing.T) {
 	tests := []struct {
-		name      string
-		input     string
-		wantUTC   string
-		wantZoned bool
-		wantOK    bool
+		name   string
+		config uptimeMonitorModel
+		want   []string
 	}{
-		{"utc", "2026-09-01T22:00:00Z", "2026-09-01T22:00:00Z", true, true},
-		{"offset", "2026-09-02T00:00:00+02:00", "2026-09-01T22:00:00Z", true, true},
-		{"offset without colon", "2026-09-02T00:00:00+0200", "2026-09-01T22:00:00Z", true, true},
-		{"fractional seconds", "2026-09-01T22:00:00.500Z", "2026-09-01T22:00:00Z", true, true},
-		{"minute precision", "2026-09-01T22:00Z", "2026-09-01T22:00:00Z", true, true},
-		{"space separator", "2026-09-01 22:00:00Z", "2026-09-01T22:00:00Z", true, true},
-		{"bare local read in page zone", "2026-09-02T00:00:00", "2026-09-01T22:00:00Z", false, true},
-		{"bare local minute precision", "2026-09-02T00:00", "2026-09-01T22:00:00Z", false, true},
-		{"impossible date", "2026-02-30T00:00:00Z", "", false, false},
-		{"not a timestamp", "tomorrow", "", false, false},
+		{
+			name:   "https without url",
+			config: uptimeMonitorModel{Protocol: types.StringValue("https")},
+			want:   []string{"url"},
+		},
+		{
+			name: "https with url",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("https"),
+				URL:      types.StringValue("https://example.com"),
+			},
+		},
+		{
+			name:   "tcp without hostname or port",
+			config: uptimeMonitorModel{Protocol: types.StringValue("tcp")},
+			want:   []string{"hostname", "port"},
+		},
+		{
+			name: "tcp with hostname but no port",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("tcp"),
+				Hostname: types.StringValue("db.example.com"),
+			},
+			want: []string{"port"},
+		},
+		{
+			name:   "icmp without hostname",
+			config: uptimeMonitorModel{Protocol: types.StringValue("icmp")},
+			want:   []string{"hostname"},
+		},
+		{
+			name:   "dns without record type",
+			config: uptimeMonitorModel{Protocol: types.StringValue("dns")},
+			want:   []string{"dns_record_type"},
+		},
+		{
+			name: "dns with record type",
+			config: uptimeMonitorModel{
+				Protocol:      types.StringValue("dns"),
+				DNSRecordType: types.StringValue("A"),
+			},
+		},
+		{
+			name: "unknown value is not treated as missing",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("https"),
+				URL:      types.StringUnknown(),
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, zoned, ok := parseWindowTime(tt.input, paris)
-			if ok != tt.wantOK {
-				t.Fatalf("parseWindowTime(%q) ok = %v, want %v", tt.input, ok, tt.wantOK)
+			got := missingProtocolAttributes(tt.config)
+			if len(got) != len(tt.want) {
+				t.Fatalf("expected missing %v, got %v", tt.want, got)
 			}
-			if !ok {
-				return
-			}
-			if zoned != tt.wantZoned {
-				t.Errorf("parseWindowTime(%q) zoned = %v, want %v", tt.input, zoned, tt.wantZoned)
-			}
-			if utc := got.UTC().Format(time.RFC3339); utc != tt.wantUTC {
-				t.Errorf("parseWindowTime(%q) = %s, want %s", tt.input, utc, tt.wantUTC)
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("expected missing %v, got %v", tt.want, got)
+				}
 			}
 		})
 	}
 }
 
-// --- preserveTimestamp ---
+// --- uptime monitor: mapToState ---
 
-func TestPreserveTimestamp_SameInstantKeepsConfiguredFormat(t *testing.T) {
-	// The API normalizes into the page timezone; the practitioner wrote UTC.
-	got := preserveTimestamp(types.StringValue("2026-09-01T22:00:00Z"), "2026-09-02T00:00:00+02:00", "Europe/Paris")
-	if got.ValueString() != "2026-09-01T22:00:00Z" {
-		t.Errorf("expected the configured value to be kept, got %q", got.ValueString())
-	}
-}
-
-func TestPreserveTimestamp_BareLocalResolvedInPageZone(t *testing.T) {
-	got := preserveTimestamp(types.StringValue("2026-09-02T00:00:00"), "2026-09-02T00:00:00+02:00", "Europe/Paris")
-	if got.ValueString() != "2026-09-02T00:00:00" {
-		t.Errorf("expected the configured value to be kept, got %q", got.ValueString())
-	}
-}
-
-func TestPreserveTimestamp_DifferentInstantTakesAPIValue(t *testing.T) {
-	got := preserveTimestamp(types.StringValue("2026-09-01T22:00:00Z"), "2026-09-05T00:00:00+02:00", "Europe/Paris")
-	if got.ValueString() != "2026-09-05T00:00:00+02:00" {
-		t.Errorf("expected drift to surface the API value, got %q", got.ValueString())
-	}
-}
-
-func TestPreserveTimestamp_NullPriorTakesAPIValue(t *testing.T) {
-	got := preserveTimestamp(types.StringNull(), "2026-09-02T00:00:00+02:00", "Europe/Paris")
-	if got.ValueString() != "2026-09-02T00:00:00+02:00" {
-		t.Errorf("expected the API value, got %q", got.ValueString())
-	}
-}
-
-func TestPreserveTimestamp_UnparseableFallsBackToAPIValue(t *testing.T) {
-	got := preserveTimestamp(types.StringValue("whenever"), "2026-09-02T00:00:00+02:00", "")
-	if got.ValueString() != "2026-09-02T00:00:00+02:00" {
-		t.Errorf("expected the API value, got %q", got.ValueString())
-	}
-}
-
-// --- preserveBlankString ---
-
-func TestPreserveBlankString(t *testing.T) {
-	blank := ""
-	text := "hello"
-
-	if got := preserveBlankString(nil, types.StringNull()); !got.IsNull() {
-		t.Errorf("null API + null config should stay null, got %q", got.ValueString())
-	}
-	if got := preserveBlankString(&blank, types.StringNull()); !got.IsNull() {
-		t.Errorf("empty API + null config should stay null, got %q", got.ValueString())
-	}
-	if got := preserveBlankString(nil, types.StringValue("")); got.IsNull() || got.ValueString() != "" {
-		t.Errorf(`null API + "" config should stay "", got %v`, got)
-	}
-	if got := preserveBlankString(&text, types.StringNull()); got.ValueString() != "hello" {
-		t.Errorf("expected 'hello', got %q", got.ValueString())
-	}
-	// Body cleared outside Terraform must surface as drift, not be masked.
-	if got := preserveBlankString(nil, types.StringValue("hello")); !got.IsNull() {
-		t.Errorf("expected null to surface out-of-band clearing, got %q", got.ValueString())
-	}
-}
-
-// --- affectedItemsToState / planAffectedItemsToClient ---
-
-func maintenanceWindowItemList(t *testing.T, items ...client.MaintenanceWindowAffectedItem) types.List {
+func mapUptimeMonitor(t *testing.T, m *client.UptimeMonitor, state *uptimeMonitorModel) {
 	t.Helper()
-	objType := types.ObjectType{AttrTypes: maintenanceWindowItemAttrTypes}
-	values := make([]attr.Value, len(items))
-	for i, item := range items {
-		values[i] = types.ObjectValueMust(maintenanceWindowItemAttrTypes, map[string]attr.Value{
-			"item_type": types.StringValue(item.ItemType),
-			"item_id":   types.StringValue(item.ItemID),
-		})
-	}
-	return types.ListValueMust(objType, values)
-}
-
-func TestAffectedItemsToState_Populated(t *testing.T) {
-	got := affectedItemsToState(
-		[]client.MaintenanceWindowAffectedItem{{ItemType: "Host", ItemID: "host-uuid"}},
-		types.ListNull(types.ObjectType{AttrTypes: maintenanceWindowItemAttrTypes}),
-	)
-	if len(got.Elements()) != 1 {
-		t.Fatalf("expected 1 element, got %d", len(got.Elements()))
-	}
-	attrs := got.Elements()[0].(types.Object).Attributes()
-	if attrs["item_type"].(types.String).ValueString() != "Host" {
-		t.Errorf("unexpected item_type: %v", attrs["item_type"])
-	}
-	if attrs["item_id"].(types.String).ValueString() != "host-uuid" {
-		t.Errorf("unexpected item_id: %v", attrs["item_id"])
+	var diags diag.Diagnostics
+	(&uptimeMonitorResource{}).mapToState(context.Background(), m, state, &diags)
+	if diags.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", diags)
 	}
 }
 
-func TestAffectedItemsToState_EmptyKeepsNullVersusEmptyChoice(t *testing.T) {
-	nullList := types.ListNull(types.ObjectType{AttrTypes: maintenanceWindowItemAttrTypes})
-	if got := affectedItemsToState(nil, nullList); !got.IsNull() {
-		t.Error("expected an unconfigured list to stay null")
-	}
+func TestMapUptimeMonitorToState_PausedFromStatus(t *testing.T) {
+	for status, wantPaused := range map[string]bool{
+		"paused": true, "up": false, "down": false, "unknown": false, "recovering": false,
+	} {
+		state := &uptimeMonitorModel{}
+		mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", Status: status}, state)
 
-	emptyList := maintenanceWindowItemList(t)
-	got := affectedItemsToState(nil, emptyList)
-	if got.IsNull() || len(got.Elements()) != 0 {
-		t.Errorf("expected an explicitly empty list to stay empty, got %v", got)
-	}
-}
-
-func TestAffectedItemsToState_ClearedOutOfBandSurfacesAsDrift(t *testing.T) {
-	prior := maintenanceWindowItemList(t, client.MaintenanceWindowAffectedItem{ItemType: "Host", ItemID: "host-uuid"})
-	if got := affectedItemsToState(nil, prior); !got.IsNull() {
-		t.Errorf("expected null so the removal shows up in the plan, got %v", got)
-	}
-}
-
-func TestPlanAffectedItemsToClient(t *testing.T) {
-	nullList := types.ListNull(types.ObjectType{AttrTypes: maintenanceWindowItemAttrTypes})
-	// An unconfigured list must send [] so removing the block clears the items.
-	if got := planAffectedItemsToClient(nullList); got == nil || len(got) != 0 {
-		t.Errorf("expected an empty non-nil slice, got %#v", got)
-	}
-
-	list := maintenanceWindowItemList(t,
-		client.MaintenanceWindowAffectedItem{ItemType: "UptimeMonitor", ItemID: "monitor-uuid"},
-		client.MaintenanceWindowAffectedItem{ItemType: "Task", ItemID: "task-uuid"},
-	)
-	got := planAffectedItemsToClient(list)
-	if len(got) != 2 || got[0].ItemType != "UptimeMonitor" || got[1].ItemID != "task-uuid" {
-		t.Errorf("unexpected conversion: %#v", got)
-	}
-}
-
-// --- parseMaintenanceWindowImportID ---
-
-func TestParseMaintenanceWindowImportID(t *testing.T) {
-	statusPageID, id, err := parseMaintenanceWindowImportID("12:77")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if statusPageID != 12 || id != 77 {
-		t.Errorf("expected 12:77, got %d:%d", statusPageID, id)
-	}
-
-	for _, bad := range []string{"77", "12:77:3", "", ":77", "12:", "abc:77", "12:abc"} {
-		if _, _, err := parseMaintenanceWindowImportID(bad); err == nil {
-			t.Errorf("expected an error for %q", bad)
+		if state.Paused.ValueBool() != wantPaused {
+			t.Errorf("status %q: expected paused %v, got %v", status, wantPaused, state.Paused.ValueBool())
+		}
+		if state.Status.ValueString() != status {
+			t.Errorf("expected status %q, got %q", status, state.Status.ValueString())
 		}
 	}
 }
 
-// --- mapMaintenanceWindowToState ---
+func TestMapUptimeMonitorToState_DNSExpectedRecords(t *testing.T) {
+	emptyList := types.ListValueMust(types.StringType, []attr.Value{})
 
-func TestMapMaintenanceWindowToState(t *testing.T) {
-	body := "Read-only mode for two hours."
-	window := &client.StatusPageMaintenanceWindow{
-		ID:            77,
-		StatusPageID:  12,
-		Title:         "Database upgrade",
-		Body:          &body,
-		StartsAt:      "2026-09-02T00:00:00+02:00",
-		EndsAt:        "2026-09-02T02:00:00+02:00",
-		TimeZone:      "Europe/Paris",
-		Status:        "scheduled",
-		State:         "in_progress",
-		AffectedItems: []client.MaintenanceWindowAffectedItem{{ItemType: "Host", ItemID: "host-uuid"}},
-		CreatedAt:     "2026-09-01T00:00:00Z",
-		UpdatedAt:     "2026-09-01T00:00:00Z",
-	}
-
-	// The model arrives holding the plan, as it does during Create and Update.
-	state := &statusPageMaintenanceWindowModel{
-		StatusPageID:  types.Int64Value(12),
-		StartsAt:      types.StringValue("2026-09-01T22:00:00Z"),
-		EndsAt:        types.StringValue("2026-09-02T00:00:00Z"),
-		Body:          types.StringValue(body),
-		AffectedItems: maintenanceWindowItemList(t, client.MaintenanceWindowAffectedItem{ItemType: "Host", ItemID: "host-uuid"}),
-	}
-	mapMaintenanceWindowToState(window, state)
-
-	if state.ID.ValueInt64() != 77 {
-		t.Errorf("expected id 77, got %d", state.ID.ValueInt64())
-	}
-	if state.StatusPageID.ValueInt64() != 12 {
-		t.Errorf("expected status_page_id 12, got %d", state.StatusPageID.ValueInt64())
-	}
-	if state.Title.ValueString() != "Database upgrade" {
-		t.Errorf("unexpected title: %q", state.Title.ValueString())
-	}
-	// Equivalent instants keep the practitioner's own formatting.
-	if state.StartsAt.ValueString() != "2026-09-01T22:00:00Z" {
-		t.Errorf("expected starts_at to keep the configured format, got %q", state.StartsAt.ValueString())
-	}
-	if state.EndsAt.ValueString() != "2026-09-02T00:00:00Z" {
-		t.Errorf("expected ends_at to keep the configured format, got %q", state.EndsAt.ValueString())
-	}
-	if state.TimeZone.ValueString() != "Europe/Paris" {
-		t.Errorf("unexpected time_zone: %q", state.TimeZone.ValueString())
-	}
-	if state.Status.ValueString() != "scheduled" || state.State.ValueString() != "in_progress" {
-		t.Errorf("unexpected status/state: %q/%q", state.Status.ValueString(), state.State.ValueString())
-	}
-	if len(state.AffectedItems.Elements()) != 1 {
-		t.Errorf("expected 1 affected item, got %d", len(state.AffectedItems.Elements()))
-	}
-}
-
-func TestMapMaintenanceWindowToState_NullBodyAndItems(t *testing.T) {
-	window := &client.StatusPageMaintenanceWindow{
-		ID:        78,
-		Title:     "Quick restart",
-		StartsAt:  "2026-09-02T00:00:00Z",
-		EndsAt:    "2026-09-02T00:30:00Z",
-		TimeZone:  "UTC",
-		Status:    "scheduled",
-		State:     "scheduled",
-		CreatedAt: "2026-09-01T00:00:00Z",
-		UpdatedAt: "2026-09-01T00:00:00Z",
-	}
-
-	state := &statusPageMaintenanceWindowModel{
-		StatusPageID:  types.Int64Value(12),
-		StartsAt:      types.StringValue("2026-09-02T00:00:00Z"),
-		EndsAt:        types.StringValue("2026-09-02T00:30:00Z"),
-		Body:          types.StringNull(),
-		AffectedItems: types.ListNull(types.ObjectType{AttrTypes: maintenanceWindowItemAttrTypes}),
-	}
-	mapMaintenanceWindowToState(window, state)
-
-	if !state.Body.IsNull() {
-		t.Errorf("expected body to stay null, got %q", state.Body.ValueString())
-	}
-	if !state.AffectedItems.IsNull() {
-		t.Errorf("expected affected_items to stay null, got %v", state.AffectedItems)
-	}
-}
-
-// --- schema & ValidateConfig ---
-
-func TestStatusPageMaintenanceWindowResource_SchemaImplementation(t *testing.T) {
-	ctx := context.Background()
-	resp := &fwresource.SchemaResponse{}
-	NewStatusPageMaintenanceWindowResource().Schema(ctx, fwresource.SchemaRequest{}, resp)
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("schema diagnostics: %+v", resp.Diagnostics)
-	}
-	if diags := resp.Schema.ValidateImplementation(ctx); diags.HasError() {
-		t.Fatalf("schema implementation diagnostics: %+v", diags)
-	}
-}
-
-func statusPageMaintenanceWindowConfig(t *testing.T, startsAt, endsAt string) tfsdk.Config {
-	t.Helper()
-
-	ctx := context.Background()
-	resp := &fwresource.SchemaResponse{}
-	NewStatusPageMaintenanceWindowResource().Schema(ctx, fwresource.SchemaRequest{}, resp)
-	if resp.Diagnostics.HasError() {
-		t.Fatalf("schema diagnostics: %+v", resp.Diagnostics)
-	}
-
-	// Start from an all-null object so the helper keeps working as attributes
-	// are added, then fill in only what the validation looks at.
-	objType := resp.Schema.Type().TerraformType(ctx).(tftypes.Object)
-	values := make(map[string]tftypes.Value, len(objType.AttributeTypes))
-	for name, attrType := range objType.AttributeTypes {
-		values[name] = tftypes.NewValue(attrType, nil)
-	}
-	values["status_page_id"] = tftypes.NewValue(tftypes.Number, int64(12))
-	values["title"] = tftypes.NewValue(tftypes.String, "Database upgrade")
-	values["starts_at"] = tftypes.NewValue(tftypes.String, startsAt)
-	values["ends_at"] = tftypes.NewValue(tftypes.String, endsAt)
-
-	return tfsdk.Config{Schema: resp.Schema, Raw: tftypes.NewValue(objType, values)}
-}
-
-func TestStatusPageMaintenanceWindowResource_ValidateConfig(t *testing.T) {
 	tests := []struct {
-		name             string
-		startsAt, endsAt string
-		wantError        bool
+		name      string
+		apiValue  []string
+		prior     types.List
+		wantNull  bool
+		wantElems int
 	}{
-		{"ordered utc", "2026-09-01T22:00:00Z", "2026-09-02T00:00:00Z", false},
-		{"ordered bare local", "2026-09-02T00:00:00", "2026-09-02T02:00:00", false},
-		{"inverted utc", "2026-09-02T00:00:00Z", "2026-09-01T22:00:00Z", true},
-		{"inverted bare local", "2026-09-02T02:00:00", "2026-09-02T00:00:00", true},
-		{"equal", "2026-09-01T22:00:00Z", "2026-09-01T22:00:00Z", true},
-		// The page timezone decides the ordering, so mixed forms are left to the API.
-		{"mixed offset information", "2026-09-02T00:00:00", "2026-09-01T22:00:00Z", false},
-		// An offset that actually resolves the apparent inversion.
-		{"inverted wall clock, ordered instants", "2026-09-02T00:00:00+02:00", "2026-09-01T23:00:00Z", false},
+		{
+			name:     "unset stays null",
+			prior:    types.ListNull(types.StringType),
+			wantNull: true,
+		},
+		{
+			// The API normalises a pinned [] to "no expectation" and reads it back
+			// as [], so a config of [] must not flip to null and diff forever.
+			name:      "explicit empty list is preserved",
+			prior:     emptyList,
+			wantNull:  false,
+			wantElems: 0,
+		},
+		{
+			name:      "records are read back",
+			apiValue:  []string{"1.2.3.4", "5.6.7.8"},
+			prior:     types.ListNull(types.StringType),
+			wantNull:  false,
+			wantElems: 2,
+		},
+		{
+			name:      "records replace a previously empty list",
+			apiValue:  []string{"1.2.3.4"},
+			prior:     emptyList,
+			wantNull:  false,
+			wantElems: 1,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewStatusPageMaintenanceWindowResource().(interface {
-				ValidateConfig(context.Context, fwresource.ValidateConfigRequest, *fwresource.ValidateConfigResponse)
-			})
-			resp := &fwresource.ValidateConfigResponse{}
-			r.ValidateConfig(context.Background(), fwresource.ValidateConfigRequest{
-				Config: statusPageMaintenanceWindowConfig(t, tt.startsAt, tt.endsAt),
-			}, resp)
+			state := &uptimeMonitorModel{DNSExpectedRecords: tt.prior}
+			mapUptimeMonitor(t, &client.UptimeMonitor{
+				ID:                 "mon-uuid",
+				Protocol:           "dns",
+				DNSExpectedRecords: tt.apiValue,
+			}, state)
 
-			if got := resp.Diagnostics.HasError(); got != tt.wantError {
-				t.Errorf("HasError() = %v, want %v (diagnostics: %+v)", got, tt.wantError, resp.Diagnostics)
+			if state.DNSExpectedRecords.IsNull() != tt.wantNull {
+				t.Fatalf("expected null=%v, got %v", tt.wantNull, state.DNSExpectedRecords)
+			}
+			if !tt.wantNull && len(state.DNSExpectedRecords.Elements()) != tt.wantElems {
+				t.Errorf("expected %d elements, got %v", tt.wantElems, state.DNSExpectedRecords.Elements())
 			}
 		})
 	}
 }
 
-func TestStatusPageMaintenanceWindowResource_ValidateConfig_NullConfig(t *testing.T) {
-	ctx := context.Background()
-	schemaResp := &fwresource.SchemaResponse{}
-	NewStatusPageMaintenanceWindowResource().Schema(ctx, fwresource.SchemaRequest{}, schemaResp)
+func TestIsEmptyList(t *testing.T) {
+	if isEmptyList(types.ListNull(types.StringType)) {
+		t.Error("null list is not an empty list")
+	}
+	if isEmptyList(types.ListUnknown(types.StringType)) {
+		t.Error("unknown list is not an empty list")
+	}
+	if !isEmptyList(types.ListValueMust(types.StringType, []attr.Value{})) {
+		t.Error("expected empty list")
+	}
+	if isEmptyList(types.ListValueMust(types.StringType, []attr.Value{types.StringValue("a")})) {
+		t.Error("populated list is not empty")
+	}
+}
 
-	r := NewStatusPageMaintenanceWindowResource().(interface {
-		ValidateConfig(context.Context, fwresource.ValidateConfigRequest, *fwresource.ValidateConfigResponse)
-	})
-	resp := &fwresource.ValidateConfigResponse{}
-	r.ValidateConfig(ctx, fwresource.ValidateConfigRequest{
-		Config: tfsdk.Config{
-			Schema: schemaResp.Schema,
-			Raw:    tftypes.NewValue(schemaResp.Schema.Type().TerraformType(ctx), nil),
+// --- uptime monitor: the inverse protocol table ---
+
+func TestForbiddenProtocolAttributes(t *testing.T) {
+	tests := []struct {
+		name   string
+		config uptimeMonitorModel
+		want   []string
+	}{
+		{
+			name: "https with a dns attribute left in config",
+			config: uptimeMonitorModel{
+				Protocol:      types.StringValue("https"),
+				DNSRecordType: types.StringValue("A"),
+			},
+			want: []string{"dns_record_type"},
 		},
-	}, resp)
+		{
+			// The switch that motivated the table: leaving headers on a dns monitor
+			// plans a known map that the apply nulls out.
+			name: "dns with http attributes left in config",
+			config: uptimeMonitorModel{
+				Protocol:      types.StringValue("dns"),
+				CustomHeaders: types.MapValueMust(types.StringType, map[string]attr.Value{"X": types.StringValue("y")}),
+				Keyword:       types.StringValue("ok"),
+			},
+			want: []string{"keyword", "custom_headers"},
+		},
+		{
+			name: "tcp with a keyword left in config",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("tcp"),
+				Keyword:  types.StringValue("ok"),
+			},
+			want: []string{"keyword"},
+		},
+		{
+			name:   "a clean https config forbids nothing",
+			config: uptimeMonitorModel{Protocol: types.StringValue("https"), URL: types.StringValue("https://example.com")},
+		},
+		{
+			// Unknown comes from an unresolved reference, not from the user setting
+			// a value the protocol cannot use.
+			name: "unknown values are not flagged",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("tcp"),
+				Keyword:  types.StringUnknown(),
+			},
+		},
+	}
 
-	if resp.Diagnostics.HasError() {
-		t.Errorf("a null config must not error: %+v", resp.Diagnostics)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := forbiddenProtocolAttributes(tt.config)
+			if len(got) != len(tt.want) {
+				t.Fatalf("expected %v, got %v", tt.want, got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("expected %v, got %v", tt.want, got)
+				}
+			}
+		})
+	}
+}
+
+// Every name in either protocol table must resolve in protocolScopedValues, or
+// the lookup hands .IsNull() a nil interface and panics mid-plan.
+func TestProtocolTablesResolve(t *testing.T) {
+	values := protocolScopedValues(uptimeMonitorModel{})
+	for _, table := range []map[string][]string{protocolRequirements, protocolForbidden} {
+		for protocol, names := range table {
+			for _, name := range names {
+				if _, ok := values[name]; !ok {
+					t.Errorf("protocol %q references %q, which protocolScopedValues does not provide", protocol, name)
+				}
+			}
+		}
+	}
+}
+
+func TestMapUptimeMonitorToState_KeywordEmptyVsNull(t *testing.T) {
+	// An explicitly configured "" must survive; an absent keyword must be null.
+	state := &uptimeMonitorModel{Keyword: types.StringValue("")}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", Keyword: ""}, state)
+	if state.Keyword.IsNull() {
+		t.Error("an explicitly empty keyword must stay an empty string, not become null")
+	}
+
+	state = &uptimeMonitorModel{Keyword: types.StringNull()}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", Keyword: ""}, state)
+	if !state.Keyword.IsNull() {
+		t.Errorf("an unset keyword must be null, got %q", state.Keyword.ValueString())
+	}
+
+	state = &uptimeMonitorModel{Keyword: types.StringNull()}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", Keyword: "healthy"}, state)
+	if state.Keyword.ValueString() != "healthy" {
+		t.Errorf("expected healthy, got %q", state.Keyword.ValueString())
+	}
+}
+
+func TestMapUptimeMonitorToState_ProbeRegionIDsPinnedEmpty(t *testing.T) {
+	// Sending [] is only half of clearable; the read side has to preserve it too,
+	// or the plan re-proposes [] and every apply fails.
+	state := &uptimeMonitorModel{ProbeRegionIDs: types.ListValueMust(types.Int64Type, []attr.Value{})}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid"}, state)
+	if state.ProbeRegionIDs.IsNull() {
+		t.Error("an explicitly empty probe_region_ids must stay [], not become null")
+	}
+
+	state = &uptimeMonitorModel{ProbeRegionIDs: types.ListNull(types.Int64Type)}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", ProbeRegionIDs: []int64{1, 2}}, state)
+	if len(state.ProbeRegionIDs.Elements()) != 2 {
+		t.Errorf("expected 2 regions, got %v", state.ProbeRegionIDs.Elements())
 	}
 }

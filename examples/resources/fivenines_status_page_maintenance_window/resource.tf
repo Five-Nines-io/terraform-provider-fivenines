@@ -20,8 +20,9 @@ resource "fivenines_status_page_maintenance_window" "database_upgrade" {
   starts_at = "2026-09-20T22:00:00"
   ends_at   = "2026-09-21T02:00:00"
 
-  # Every pair must already be listed on the status page, and must reference the
-  # underlying resource — not the status page item ID.
+  # Every pair must already be listed on the status page (the API rejects one
+  # that is not with a 422), and must reference the underlying resource — not
+  # the status page item ID, which is rebuilt on every dashboard save.
   affected_items = [
     {
       item_type = "UptimeMonitor"
@@ -29,7 +30,7 @@ resource "fivenines_status_page_maintenance_window" "database_upgrade" {
     },
     {
       item_type = "Host"
-      item_id   = fivenines_instance.db.id
+      item_id   = fivenines_instance.web.id
     },
   ]
 }

@@ -34,11 +34,20 @@ var (
 	_ resource.ResourceWithValidateConfig = &statusPageMaintenanceWindowResource{}
 )
 
-// maintenanceWindowTimestampRE mirrors the extended ISO 8601 form the API
-// accepts: a date, a T (or space) separator, a time, and an optional UTC
-// offset. Values without an offset are interpreted in the status page timezone.
+// maintenanceWindowTimestampRE is the API's own pattern for starts_at and
+// ends_at, copied verbatim from StatusPageMaintenanceWindowInput in
+// swagger/public/v1: a date, a T or space separator, a time, optional seconds
+// and fraction, and an optional Z or ±hh:mm offset. Values without an offset are
+// read as a local time in the status page timezone.
+//
+// Copied rather than paraphrased on purpose. It is deliberately looser than the
+// prose beside it — a space may replace the T, whitespace may precede the
+// offset, and the offset's colon is optional — so narrowing it to the prose
+// would reject configurations the server accepts. It stays wider than the
+// server in one direction only: an impossible date like 2026-02-30 matches here
+// and is rejected by the API with a 422, which the spec documents as intended.
 var maintenanceWindowTimestampRE = regexp.MustCompile(
-	`^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$`,
+	`^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*(Z|[+-]\d{2}:?\d{2})?$`,
 )
 
 type statusPageMaintenanceWindowResource struct {
@@ -268,7 +277,7 @@ func (r *statusPageMaintenanceWindowResource) Create(ctx context.Context, req re
 		return
 	}
 
-	mapMaintenanceWindowToState(window, &plan)
+	mapMaintenanceWindowToPlan(window, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -323,9 +332,18 @@ func (r *statusPageMaintenanceWindowResource) Update(ctx context.Context, req re
 		v := plan.Body.ValueString()
 		input.Body = &v
 	}
-	// affected_items is always sent as well. The API keeps the existing list
-	// when the key is omitted, which would strand items the practitioner has
-	// removed from the configuration.
+	// affected_items is always sent, including as the [] that an absent block
+	// means. The API keeps the current set when the key is omitted, which would
+	// strand items the practitioner has removed from the configuration.
+	//
+	// This is deliberately NOT itemsUpdate's rule on the status page, which
+	// omits an unchanged list so a dashboard edit survives an unrelated update.
+	// That exists because status page items are Optional+Computed, so an absent
+	// block plans the last refreshed list rather than null, and echoing it back
+	// would delete whatever was curated since. affected_items is Optional-only:
+	// an absent block plans null, null means "no affected services", and writing
+	// that is the configuration doing its job — the same reason the page's
+	// Optional-only logo clears on every update that omits it.
 	items := planAffectedItemsToClient(plan.AffectedItems)
 	input.AffectedItems = &items
 
@@ -348,7 +366,7 @@ func (r *statusPageMaintenanceWindowResource) Update(ctx context.Context, req re
 		break
 	}
 
-	mapMaintenanceWindowToState(window, &plan)
+	mapMaintenanceWindowToPlan(window, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -408,29 +426,70 @@ func parseMaintenanceWindowImportID(importID string) (int64, int64, error) {
 	return statusPageID, id, nil
 }
 
-// mapMaintenanceWindowToState copies an API window onto target, which arrives
-// holding the plan (create/update) or the prior state (read). That incoming
-// value is used to keep practitioner-chosen representations — timestamp
-// formatting, and null versus [] for affected_items — stable across a round
-// trip. status_page_id is deliberately untouched: it is always known from the
-// plan, prior state or import ID.
-func mapMaintenanceWindowToState(w *client.StatusPageMaintenanceWindow, target *statusPageMaintenanceWindowModel) {
-	priorStartsAt := target.StartsAt
-	priorEndsAt := target.EndsAt
-	priorBody := target.Body
-	priorItems := target.AffectedItems
+// mapMaintenanceWindowToPlan maps an API response onto the PLAN (Create and
+// Update), where a KNOWN planned value wins over the server echo. Terraform
+// fails the apply outright ("Provider produced inconsistent result after apply")
+// when the state a provider returns differs from what it planned, so anything
+// the plan already decided has to survive the round trip: a title the server
+// trimmed, a body whose trailing newline it dropped, or an affected_items list
+// it echoed back in its own storage order.
+//
+// This is the same rule mapStatusPageToPlan applies to status page items,
+// specialised for a nested object whose children are all Required. Because
+// item_type and item_id can never be unknown at apply time, the per-value half
+// of that rule ("an unknown planned value takes the server's") has an empty
+// domain here, and merging degenerates to keeping the planned list verbatim.
+// TestAffectedItemsChildrenAreAllRequired pins that premise, so making a child
+// Optional+Computed fails a test instead of silently resurrecting the bug
+// mergePlannedItems exists to prevent.
+func mapMaintenanceWindowToPlan(w *client.StatusPageMaintenanceWindow, plan *statusPageMaintenanceWindowModel) {
+	plannedTitle := plan.Title
+	plannedBody := plan.Body
+	plannedStartsAt := plan.StartsAt
+	plannedEndsAt := plan.EndsAt
+	plannedItems := plan.AffectedItems
 
-	target.ID = types.Int64Value(w.ID)
-	target.Title = types.StringValue(w.Title)
-	target.Body = preserveBlankString(w.Body, priorBody)
-	target.TimeZone = types.StringValue(w.TimeZone)
-	target.StartsAt = preserveTimestamp(priorStartsAt, w.StartsAt, w.TimeZone)
-	target.EndsAt = preserveTimestamp(priorEndsAt, w.EndsAt, w.TimeZone)
-	target.AffectedItems = affectedItemsToState(w.AffectedItems, priorItems)
-	target.Status = types.StringValue(w.Status)
-	target.State = types.StringValue(w.State)
-	target.CreatedAt = types.StringValue(w.CreatedAt)
-	target.UpdatedAt = types.StringValue(w.UpdatedAt)
+	mapMaintenanceWindowToState(w, plan)
+
+	if isKnown(plannedTitle) {
+		plan.Title = plannedTitle
+	}
+	if isKnown(plannedStartsAt) {
+		plan.StartsAt = plannedStartsAt
+	}
+	if isKnown(plannedEndsAt) {
+		plan.EndsAt = plannedEndsAt
+	}
+	// Null is a decision for these two, not an absence: the plan asked for the
+	// body to be cleared and the items list to be emptied, and the request said
+	// so explicitly. Only an unknown has nothing to assert.
+	if !plannedBody.IsUnknown() {
+		plan.Body = plannedBody
+	}
+	if !plannedItems.IsUnknown() {
+		plan.AffectedItems = plannedItems
+	}
+}
+
+// mapMaintenanceWindowToState maps an API response onto prior STATE (Read),
+// where the server is the truth: reporting it is how a window edited or advanced
+// outside Terraform shows up as drift. status_page_id is deliberately untouched
+// — it is always already known, from the plan, prior state, or the import ID.
+func mapMaintenanceWindowToState(w *client.StatusPageMaintenanceWindow, state *statusPageMaintenanceWindowModel) {
+	priorStartsAt := state.StartsAt
+	priorEndsAt := state.EndsAt
+
+	state.ID = types.Int64Value(w.ID)
+	state.Title = types.StringValue(w.Title)
+	state.Body = optionalNonEmptyStringOrKeep(w.Body, state.Body)
+	state.TimeZone = types.StringValue(w.TimeZone)
+	state.StartsAt = preserveTimestamp(priorStartsAt, w.StartsAt, w.TimeZone)
+	state.EndsAt = preserveTimestamp(priorEndsAt, w.EndsAt, w.TimeZone)
+	state.AffectedItems = affectedItemsToState(w.AffectedItems, state.AffectedItems)
+	state.Status = types.StringValue(w.Status)
+	state.State = types.StringValue(w.State)
+	state.CreatedAt = types.StringValue(w.CreatedAt)
+	state.UpdatedAt = types.StringValue(w.UpdatedAt)
 }
 
 // preserveTimestamp keeps the configured timestamp string whenever it denotes
@@ -476,7 +535,15 @@ var (
 // no UTC offset in loc. It reports whether the input carried its own offset,
 // and whether it parsed at all.
 func parseWindowTime(s string, loc *time.Location) (parsed time.Time, zoned bool, ok bool) {
-	s = strings.Replace(strings.TrimSpace(s), " ", "T", 1)
+	// Normalise the two spellings the API's pattern allows but Go's layouts do
+	// not: a space in place of the T, and whitespace before the offset. Replacing
+	// the first space blindly turns "...00:00 +02:00" into "...00:00T+02:00",
+	// which then fails to parse and makes the attribute drift on every read.
+	s = strings.TrimSpace(s)
+	if len(s) > 10 && s[10] == ' ' {
+		s = s[:10] + "T" + s[11:]
+	}
+	s = strings.Join(strings.Fields(s), "")
 	for _, layout := range maintenanceWindowZonedLayouts {
 		if t, err := time.Parse(layout, s); err == nil {
 			return t, true, true
@@ -488,22 +555,6 @@ func parseWindowTime(s string, loc *time.Location) (parsed time.Time, zoned bool
 		}
 	}
 	return time.Time{}, false, false
-}
-
-// preserveBlankString maps a nullable API string back to state, treating null
-// and "" as interchangeable so whichever of the two the practitioner wrote
-// survives the round trip and does not fail the apply as an inconsistent result.
-func preserveBlankString(apiValue *string, prior types.String) types.String {
-	if apiValue == nil || *apiValue == "" {
-		if isKnown(prior) && prior.ValueString() == "" {
-			return prior
-		}
-		if prior.IsNull() {
-			return prior
-		}
-		return types.StringNull()
-	}
-	return types.StringValue(*apiValue)
 }
 
 // affectedItemsToState converts the API list back to state. An empty API list
@@ -546,9 +597,4 @@ func planAffectedItemsToClient(itemsList types.List) []client.MaintenanceWindowA
 		}
 	}
 	return result
-}
-
-// isKnown reports whether an attribute holds a usable value.
-func isKnown(v attr.Value) bool {
-	return !v.IsNull() && !v.IsUnknown()
 }

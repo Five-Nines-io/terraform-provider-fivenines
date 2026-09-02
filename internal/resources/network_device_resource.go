@@ -29,28 +29,31 @@ type networkDeviceResource struct {
 }
 
 type networkDeviceModel struct {
-	ID                types.String `tfsdk:"id"`
-	Name              types.String `tfsdk:"name"`
-	IPAddress         types.String `tfsdk:"ip_address"`
-	PollingHostID     types.String `tfsdk:"polling_host_id"`
-	DeviceType        types.String `tfsdk:"device_type"`
-	PollingInterval   types.Int64  `tfsdk:"polling_interval"`
-	SNMPVersion       types.String `tfsdk:"snmp_version"`
-	SNMPCommunity     types.String `tfsdk:"snmp_community"`
-	SNMPUsername      types.String `tfsdk:"snmp_username"`
-	SNMPSecurityLevel types.String `tfsdk:"snmp_security_level"`
-	SNMPAuthProtocol  types.String `tfsdk:"snmp_auth_protocol"`
-	SNMPAuthPassword  types.String `tfsdk:"snmp_auth_password"`
-	SNMPPrivProtocol  types.String `tfsdk:"snmp_priv_protocol"`
-	SNMPPrivPassword  types.String `tfsdk:"snmp_priv_password"`
-	MaintenanceMode   types.Bool   `tfsdk:"maintenance_mode"`
-	Status            types.String `tfsdk:"status"`
-	Vendor            types.String `tfsdk:"vendor"`
-	Model             types.String `tfsdk:"model"`
-	SysName           types.String `tfsdk:"sys_name"`
-	LastPolledAt      types.String `tfsdk:"last_polled_at"`
-	CreatedAt         types.String `tfsdk:"created_at"`
-	UpdatedAt         types.String `tfsdk:"updated_at"`
+	ID                  types.String `tfsdk:"id"`
+	Name                types.String `tfsdk:"name"`
+	IPAddress           types.String `tfsdk:"ip_address"`
+	PollingHostID       types.String `tfsdk:"polling_host_id"`
+	DeviceType          types.String `tfsdk:"device_type"`
+	PollingInterval     types.Int64  `tfsdk:"polling_interval"`
+	SNMPVersion         types.String `tfsdk:"snmp_version"`
+	SNMPCommunity       types.String `tfsdk:"snmp_community"`
+	SNMPUsername        types.String `tfsdk:"snmp_username"`
+	SNMPSecurityLevel   types.String `tfsdk:"snmp_security_level"`
+	SNMPAuthProtocol    types.String `tfsdk:"snmp_auth_protocol"`
+	SNMPAuthPassword    types.String `tfsdk:"snmp_auth_password"`
+	SNMPPrivProtocol    types.String `tfsdk:"snmp_priv_protocol"`
+	SNMPPrivPassword    types.String `tfsdk:"snmp_priv_password"`
+	MaintenanceMode     types.Bool   `tfsdk:"maintenance_mode"`
+	Status              types.String `tfsdk:"status"`
+	Vendor              types.String `tfsdk:"vendor"`
+	Model               types.String `tfsdk:"model"`
+	SysName             types.String `tfsdk:"sys_name"`
+	LastPolledAt        types.String `tfsdk:"last_polled_at"`
+	ConsecutiveFailures types.Int64  `tfsdk:"consecutive_failures"`
+	LastErrorType       types.String `tfsdk:"last_error_type"`
+	LastErrorMessage    types.String `tfsdk:"last_error_message"`
+	CreatedAt           types.String `tfsdk:"created_at"`
+	UpdatedAt           types.String `tfsdk:"updated_at"`
 }
 
 func NewNetworkDeviceResource() resource.Resource {
@@ -63,7 +66,13 @@ func (r *networkDeviceResource) Metadata(_ context.Context, req resource.Metadat
 
 func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Manages a FiveNines network device (SNMP monitoring).",
+		Description: "Manages a FiveNines network device (SNMP monitoring).\n\n" +
+			"SNMP credentials are not verified on create or update — the API stores them " +
+			"without running a connectivity test, so a successful apply does not mean the " +
+			"device is reachable. To confirm reachability, re-read the device after apply " +
+			"(`terraform refresh`, or the next plan) until `last_polled_at` advances, then " +
+			"check `status`, `consecutive_failures` and `last_error_type` / " +
+			"`last_error_message`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Description: "Unique identifier (UUID).",
@@ -100,8 +109,12 @@ func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaReque
 				},
 			},
 			"snmp_version": schema.StringAttribute{
-				Description: "SNMP version (v2c or v3).",
-				Required:    true,
+				Description: "SNMP version (v2c or v3). Optional — the API picks a default when omitted.",
+				Optional:    true,
+				Computed:    true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 				Validators: []validator.String{
 					stringvalidator.OneOf("v2c", "v3"),
 				},
@@ -160,7 +173,7 @@ func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaReque
 				Default:     booldefault.StaticBool(false),
 			},
 			"status": schema.StringAttribute{
-				Description: "Current status (up, down, unknown, unreachable).",
+				Description: "Current status (up, down, unknown, unreachable). Flips to `unreachable` after 3 consecutive failed polls.",
 				Computed:    true,
 			},
 			"vendor": schema.StringAttribute{
@@ -177,6 +190,18 @@ func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaReque
 			},
 			"last_polled_at": schema.StringAttribute{
 				Description: "Last poll timestamp.",
+				Computed:    true,
+			},
+			"consecutive_failures": schema.Int64Attribute{
+				Description: "Number of failed polls in a row. Reset to 0 on the next successful poll; `status` flips to `unreachable` at 3.",
+				Computed:    true,
+			},
+			"last_error_type": schema.StringAttribute{
+				Description: "Type of the most recent polling error (e.g. `timeout`). Null once a poll succeeds.",
+				Computed:    true,
+			},
+			"last_error_message": schema.StringAttribute{
+				Description: "Message of the most recent polling error, truncated at 500 characters. Null once a poll succeeds.",
 				Computed:    true,
 			},
 			"created_at": schema.StringAttribute{
@@ -211,9 +236,8 @@ func (r *networkDeviceResource) Create(ctx context.Context, req resource.CreateR
 	}
 
 	input := client.CreateNetworkDeviceInput{
-		Name:        plan.Name.ValueString(),
-		IPAddress:   plan.IPAddress.ValueString(),
-		SNMPVersion: plan.SNMPVersion.ValueString(),
+		Name:      plan.Name.ValueString(),
+		IPAddress: plan.IPAddress.ValueString(),
 	}
 	if !plan.PollingHostID.IsNull() && !plan.PollingHostID.IsUnknown() {
 		v := plan.PollingHostID.ValueString()
@@ -225,6 +249,9 @@ func (r *networkDeviceResource) Create(ctx context.Context, req resource.CreateR
 	if !plan.PollingInterval.IsNull() && !plan.PollingInterval.IsUnknown() {
 		v := int(plan.PollingInterval.ValueInt64())
 		input.PollingInterval = &v
+	}
+	if !plan.SNMPVersion.IsNull() && !plan.SNMPVersion.IsUnknown() {
+		input.SNMPVersion = plan.SNMPVersion.ValueString()
 	}
 	if !plan.SNMPCommunity.IsNull() {
 		input.SNMPCommunity = plan.SNMPCommunity.ValueString()
@@ -256,15 +283,12 @@ func (r *networkDeviceResource) Create(ctx context.Context, req resource.CreateR
 		return
 	}
 
-	// Handle maintenance mode if requested
+	// Handle maintenance mode if requested. The endpoint returns the updated
+	// device, so no follow-up GET is needed.
 	if plan.MaintenanceMode.ValueBool() {
-		if err := r.client.EnterMaintenanceNetworkDevice(ctx, device.ID); err != nil {
-			resp.Diagnostics.AddError("Error entering maintenance mode", err.Error())
-			return
-		}
-		device, _, err = r.client.GetNetworkDevice(ctx, device.ID)
+		device, err = r.client.EnterMaintenanceNetworkDevice(ctx, device.ID)
 		if err != nil {
-			resp.Diagnostics.AddError("Error reading network device after maintenance", err.Error())
+			resp.Diagnostics.AddError("Error entering maintenance mode", err.Error())
 			return
 		}
 	}
@@ -328,7 +352,7 @@ func (r *networkDeviceResource) Update(ctx context.Context, req resource.UpdateR
 		v := int(plan.PollingInterval.ValueInt64())
 		input.PollingInterval = &v
 	}
-	if !plan.SNMPVersion.IsNull() {
+	if !plan.SNMPVersion.IsNull() && !plan.SNMPVersion.IsUnknown() {
 		v := plan.SNMPVersion.ValueString()
 		input.SNMPVersion = &v
 	}
@@ -381,25 +405,23 @@ func (r *networkDeviceResource) Update(ctx context.Context, req resource.UpdateR
 		break
 	}
 
-	// Handle maintenance mode transitions
+	// Handle maintenance mode transitions. Both endpoints return the updated
+	// device, so it stays the authoritative copy of the final state.
 	wantMaintenance := plan.MaintenanceMode.ValueBool()
 	if wantMaintenance && !device.MaintenanceMode {
-		if err := r.client.EnterMaintenanceNetworkDevice(ctx, id); err != nil {
+		updated, err := r.client.EnterMaintenanceNetworkDevice(ctx, id)
+		if err != nil {
 			resp.Diagnostics.AddError("Error entering maintenance mode", err.Error())
 			return
 		}
+		device = updated
 	} else if !wantMaintenance && device.MaintenanceMode {
-		if err := r.client.ExitMaintenanceNetworkDevice(ctx, id); err != nil {
+		updated, err := r.client.ExitMaintenanceNetworkDevice(ctx, id)
+		if err != nil {
 			resp.Diagnostics.AddError("Error exiting maintenance mode", err.Error())
 			return
 		}
-	}
-
-	// Re-read final state
-	device, _, err := r.client.GetNetworkDevice(ctx, id)
-	if err != nil {
-		resp.Diagnostics.AddError("Error reading network device after update", err.Error())
-		return
+		device = updated
 	}
 
 	mapNetworkDeviceToState(device, &plan)
@@ -453,6 +475,9 @@ func mapNetworkDeviceToState(d *client.NetworkDevice, state *networkDeviceModel)
 	state.Model = types.StringValue(d.Model)
 	state.SysName = types.StringValue(d.SysName)
 	state.LastPolledAt = optionalString(d.LastPolledAt)
+	state.ConsecutiveFailures = types.Int64Value(int64(d.ConsecutiveFailures))
+	state.LastErrorType = optionalString(d.LastErrorType)
+	state.LastErrorMessage = optionalString(d.LastErrorMessage)
 	state.CreatedAt = types.StringValue(d.CreatedAt)
 	state.UpdatedAt = types.StringValue(d.UpdatedAt)
 }

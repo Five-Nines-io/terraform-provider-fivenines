@@ -285,8 +285,14 @@ type NetworkDevice struct {
 	Model             string  `json:"model"`
 	SysName           string  `json:"sys_name"`
 	LastPolledAt      *string `json:"last_polled_at"`
-	CreatedAt         string  `json:"created_at"`
-	UpdatedAt         string  `json:"updated_at"`
+	// Reachability. ConsecutiveFailures counts failed polls in a row and resets
+	// on success; Status flips to "unreachable" at 3. LastErrorType/Message are
+	// cleared on the next successful poll (message truncated at 500 chars).
+	ConsecutiveFailures int     `json:"consecutive_failures"`
+	LastErrorType       *string `json:"last_error_type"`
+	LastErrorMessage    *string `json:"last_error_message"`
+	CreatedAt           string  `json:"created_at"`
+	UpdatedAt           string  `json:"updated_at"`
 }
 
 // CreateNetworkDeviceInput is the request body for creating a network device.

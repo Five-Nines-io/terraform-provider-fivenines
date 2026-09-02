@@ -25,3 +25,17 @@ resource "fivenines_network_device" "router" {
   # Poll from a specific instance
   polling_host_id = fivenines_instance.poller.id
 }
+
+# SNMP credentials are not verified at create/update time — the API stores them
+# without a connectivity test. Reachability only becomes known after the device
+# has been polled: re-run `terraform plan` (or `terraform refresh`) until
+# last_polled_at advances, then read these back.
+output "switch_reachability" {
+  value = {
+    status               = fivenines_network_device.switch.status
+    last_polled_at       = fivenines_network_device.switch.last_polled_at
+    consecutive_failures = fivenines_network_device.switch.consecutive_failures
+    last_error_type      = fivenines_network_device.switch.last_error_type
+    last_error_message   = fivenines_network_device.switch.last_error_message
+  }
+}

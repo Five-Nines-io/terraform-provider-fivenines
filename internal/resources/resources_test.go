@@ -198,6 +198,83 @@ func TestMapWorkflowToState_NilOptionals(t *testing.T) {
 	}
 }
 
+// --- mapNetworkDeviceToState ---
+
+func TestMapNetworkDeviceToState_Healthy(t *testing.T) {
+	polledAt := "2026-01-01T00:05:00Z"
+	dev := &client.NetworkDevice{
+		ID:                  "dev-uuid",
+		Name:                "Core Switch",
+		IPAddress:           "192.168.1.1",
+		DeviceType:          "switch",
+		PollingInterval:     60,
+		SNMPVersion:         "v2c",
+		Status:              "up",
+		Vendor:              "Cisco",
+		LastPolledAt:        &polledAt,
+		ConsecutiveFailures: 0,
+		CreatedAt:           "2026-01-01T00:00:00Z",
+		UpdatedAt:           "2026-01-01T00:00:00Z",
+	}
+
+	state := &networkDeviceModel{}
+	mapNetworkDeviceToState(dev, state)
+
+	if state.ID.ValueString() != "dev-uuid" {
+		t.Errorf("expected ID dev-uuid, got %s", state.ID.ValueString())
+	}
+	if state.SNMPVersion.ValueString() != "v2c" {
+		t.Errorf("expected snmp_version v2c, got %s", state.SNMPVersion.ValueString())
+	}
+	if state.ConsecutiveFailures.ValueInt64() != 0 {
+		t.Errorf("expected consecutive_failures 0, got %d", state.ConsecutiveFailures.ValueInt64())
+	}
+	if !state.LastErrorType.IsNull() {
+		t.Error("expected last_error_type to be null")
+	}
+	if !state.LastErrorMessage.IsNull() {
+		t.Error("expected last_error_message to be null")
+	}
+	if state.LastPolledAt.ValueString() != polledAt {
+		t.Errorf("expected last_polled_at %s, got %s", polledAt, state.LastPolledAt.ValueString())
+	}
+}
+
+func TestMapNetworkDeviceToState_Unreachable(t *testing.T) {
+	errType := "timeout"
+	errMsg := "no response after 5s"
+	dev := &client.NetworkDevice{
+		ID:                  "dev-uuid",
+		Name:                "Core Switch",
+		IPAddress:           "192.168.1.1",
+		Status:              "unreachable",
+		ConsecutiveFailures: 3,
+		LastErrorType:       &errType,
+		LastErrorMessage:    &errMsg,
+		CreatedAt:           "2026-01-01T00:00:00Z",
+		UpdatedAt:           "2026-01-01T00:00:00Z",
+	}
+
+	state := &networkDeviceModel{}
+	mapNetworkDeviceToState(dev, state)
+
+	if state.Status.ValueString() != "unreachable" {
+		t.Errorf("expected status unreachable, got %s", state.Status.ValueString())
+	}
+	if state.ConsecutiveFailures.ValueInt64() != 3 {
+		t.Errorf("expected consecutive_failures 3, got %d", state.ConsecutiveFailures.ValueInt64())
+	}
+	if state.LastErrorType.ValueString() != errType {
+		t.Errorf("expected last_error_type %s, got %s", errType, state.LastErrorType.ValueString())
+	}
+	if state.LastErrorMessage.ValueString() != errMsg {
+		t.Errorf("expected last_error_message %s, got %s", errMsg, state.LastErrorMessage.ValueString())
+	}
+	if !state.LastPolledAt.IsNull() {
+		t.Error("expected last_polled_at to be null")
+	}
+}
+
 // Verify types.String null behavior (framework contract test)
 func TestTypesStringNull(t *testing.T) {
 	s := types.StringNull()

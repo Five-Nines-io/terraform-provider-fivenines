@@ -914,28 +914,33 @@ func (c *Client) DeleteNetworkDevice(ctx context.Context, id string) error {
 	return nil
 }
 
-func (c *Client) EnterMaintenanceNetworkDevice(ctx context.Context, id string) error {
-	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/network_devices/%s/enter_maintenance", id), nil, nil)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return parseError(resp)
-	}
-	resp.Body.Close()
-	return nil
+// EnterMaintenanceNetworkDevice puts the device in maintenance mode and returns
+// the updated device, so callers don't need a follow-up GET.
+func (c *Client) EnterMaintenanceNetworkDevice(ctx context.Context, id string) (*NetworkDevice, error) {
+	return c.maintenanceNetworkDevice(ctx, id, "enter_maintenance")
 }
 
-func (c *Client) ExitMaintenanceNetworkDevice(ctx context.Context, id string) error {
-	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/network_devices/%s/exit_maintenance", id), nil, nil)
+// ExitMaintenanceNetworkDevice takes the device out of maintenance mode and
+// returns the updated device, so callers don't need a follow-up GET.
+func (c *Client) ExitMaintenanceNetworkDevice(ctx context.Context, id string) (*NetworkDevice, error) {
+	return c.maintenanceNetworkDevice(ctx, id, "exit_maintenance")
+}
+
+func (c *Client) maintenanceNetworkDevice(ctx context.Context, id, action string) (*NetworkDevice, error) {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/network_devices/%s/%s", id, action), nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return parseError(resp)
+		return nil, parseError(resp)
 	}
-	resp.Body.Close()
-	return nil
+	var result struct {
+		NetworkDevice NetworkDevice `json:"network_device"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.NetworkDevice, nil
 }
 
 // --- Status Pages ---

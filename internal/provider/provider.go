@@ -91,6 +91,7 @@ func (p *fiveninesProvider) Resources(_ context.Context) []func() resource.Resou
 		resources.NewNetworkDeviceResource,
 		resources.NewStatusPageResource,
 		resources.NewStatusPageMaintenanceWindowResource,
+		resources.NewIntegrationResource,
 	}
 }
 

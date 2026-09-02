@@ -13,6 +13,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_network_device` | SNMP-monitored network devices |
 | `fivenines_status_page` | Public status pages with items |
 | `fivenines_status_page_maintenance_window` | Scheduled maintenance announcements on a status page |
+| `fivenines_integration` | Notification channels (webhook, PagerDuty, Pushover) |
 
 ## Data Sources
 
@@ -66,6 +67,13 @@ resource "fivenines_task" "backup" {
   schedule_type = "cron"
   schedule      = "0 2 * * *"
   grace_period_minutes = 5
+}
+
+# Notify a webhook — workflow notification nodes reference it by integration_id
+resource "fivenines_integration" "ops_webhook" {
+  type = "webhook"
+  name = "Ops hook"
+  url  = "https://example.com/hooks/fivenines"
 }
 
 # Create a workflow with execution graph
@@ -150,6 +158,8 @@ What ends up there:
 |-----------|--------------------|
 | `fivenines_task.ping_key` / `ping_url` | Server-generated; the API returns the key on every read, and `ping_url` embeds it. This is what you feed to the job that pings the task, so it has to be readable as an output. |
 | `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
+| `fivenines_integration.url`, `secret`, `routing_key`, `user_key`, `app_token` | Write-only — the API never serializes an integration's metadata, so state holds the value you configured. |
+| `fivenines_integration.webhook_signing_secret`, `webhook_verification_token` | Returned once, by the create call, and never readable again. State is the **only** copy: lose it and the signing key has to be rotated by replacing the channel. |
 
 ### Upgrading: unset attributes are now null, not `""`
 
@@ -217,6 +227,12 @@ terraform import fivenines_network_device.switch <device-uuid>
 terraform import fivenines_status_page.public <status-page-id>
 terraform import fivenines_status_page_maintenance_window.db_upgrade <status-page-id>:<window-id>
 ```
+
+`fivenines_integration` has no import: the API never returns an integration's
+URL, routing key or tokens, so an imported channel would plan an immediate
+destroy-and-recreate. Reference channels created elsewhere — including Slack,
+Discord, Teams, Telegram and email, which cannot be created over the API at all —
+with the `fivenines_integrations` data source.
 
 ## Development
 

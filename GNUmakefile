@@ -17,6 +17,6 @@ fmt:
 	go fmt ./...
 
 docs:
-	tfplugindocs generate
+	tfplugindocs generate --provider-name fivenines --rendered-provider-name terraform-provider-fivenines
 
 .PHONY: default build install test testacc fmt docs

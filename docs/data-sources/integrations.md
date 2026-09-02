@@ -41,4 +41,5 @@ Read-Only:
 - `name` (String) Integration name.
 - `provider` (String) Provider (email, slack, discord, etc.).
 - `type` (String) Integration type.
+- `updated_at` (String) Last update timestamp.
 - `verified` (Boolean) Whether the integration is verified.

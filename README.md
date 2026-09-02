@@ -107,9 +107,45 @@ terraform apply   # create resources
 
 The API key can be provided in three ways (in order of precedence):
 
-1. Provider configuration: `api_key = "fn_live_..."`
-2. Environment variable: `export FIVENINES_API_KEY="fn_live_..."`
+1. Provider configuration: `api_key = "fn_..."`
+2. Environment variable: `export FIVENINES_API_KEY="fn_..."`
 3. Terraform variable: `var.fivenines_api_key`
+
+**The token must be write-scoped.** Tokens carry `read` and/or `write` scopes,
+and every create, update and delete this provider performs requires `write`. A
+read-scoped token lets `terraform plan` and every data source succeed, then
+fails the first `apply` with a 403.
+
+`401` and `403` are not interchangeable:
+
+- **401 — the credential is dead.** Membership is resolved from the *token's*
+  organization, never the holder's latest one, and the API fails the token
+  closed: once the user who minted it is no longer a member of that
+  organization, every request answers 401. No permission change repairs it —
+  mint a new token.
+- **403 — the credential is valid, the action is refused.** A read-scoped token
+  on a write, an authorization refusal, or a demo-restricted organization.
+- **402 — the organization is suspended or unpaid.** Writes only; reads keep
+  working, so `plan` and `refresh` still succeed.
+
+### Rate limits
+
+Limits are per organization, per minute, and plan-tiered (starter 300 →
+enterprise 2400). The provider retries a `429` automatically, honouring
+`Retry-After`. **The budget is shared with the FiveNines MCP server** — one
+counter serves both — so a busy MCP client competes with a Terraform run on the
+same organization. Lower `-parallelism` if you hit sustained 429s.
+
+### Reporting a failure
+
+Every diagnostic carries the API's request ID, which correlates your failed
+apply with the server-side logs:
+
+```
+API error 422: [Display name can't be blank] (request_id: 9f1c4e2a-...)
+```
+
+Quote that `request_id` in support tickets.
 
 ## Importing existing resources
 

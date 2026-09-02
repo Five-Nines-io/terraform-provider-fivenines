@@ -37,7 +37,7 @@ terraform {
   required_providers {
     fivenines = {
       source  = "Five-Nines-io/fivenines"
-      version = "~> 0.3"
+      version = "~> 0.6"
     }
   }
 }
@@ -90,10 +90,13 @@ resource "fivenines_status_page" "public" {
   name   = "Service Status"
   public = true
 
-  items {
-    item_type = "UptimeMonitor"
-    item_id   = fivenines_uptime_monitor.api.id
-  }
+  # items is a list attribute, not a block: assign it with `=`.
+  items = [
+    {
+      item_type = "UptimeMonitor"
+      item_id   = fivenines_uptime_monitor.api.id
+    },
+  ]
 }
 ```
 
@@ -233,8 +236,8 @@ must not see the key) via `.github/workflows/acceptance.yml`.
 Releases are automated via GitHub Actions. The git tag *is* the version — there is no `VERSION` file and no changelog to update. To create a release:
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 This triggers GoReleaser to build cross-platform binaries, sign checksums with GPG, and create a GitHub release, with release notes generated from the commit subjects since the last tag. The Terraform Registry picks up new releases automatically.

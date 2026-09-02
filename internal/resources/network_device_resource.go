@@ -63,7 +63,10 @@ func (r *networkDeviceResource) Metadata(_ context.Context, req resource.Metadat
 
 func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Manages a FiveNines network device (SNMP monitoring).",
+		Description: "Manages a FiveNines network device (SNMP monitoring).\n\n" +
+			"Destroying a device waits for the deletion to finish. The API answers 202 and removes " +
+			"the device asynchronously, so the provider polls until it is gone (up to five minutes) " +
+			"before releasing state.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Description: "Unique identifier (UUID).",
@@ -115,7 +118,7 @@ func (r *networkDeviceResource) Schema(_ context.Context, _ resource.SchemaReque
 				Sensitive:   true,
 			},
 			"snmp_username": schema.StringAttribute{
-				Description: "SNMPv3 username.",
+				Description: "SNMPv3 username. Omit it to clear it server-side.",
 				Optional:    true,
 				Sensitive:   true,
 				Validators: []validator.String{

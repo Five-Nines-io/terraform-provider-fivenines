@@ -4,11 +4,14 @@ page_title: "fivenines_network_device Resource - terraform-provider-fivenines"
 subcategory: ""
 description: |-
   Manages a FiveNines network device (SNMP monitoring).
+  Destroying a device waits for the deletion to finish. The API answers 202 and removes the device asynchronously, so the provider polls until it is gone (up to five minutes) before releasing state.
 ---
 
 # fivenines_network_device (Resource)
 
 Manages a FiveNines network device (SNMP monitoring).
+
+Destroying a device waits for the deletion to finish. The API answers 202 and removes the device asynchronously, so the provider polls until it is gone (up to five minutes) before releasing state.
 
 ## Example Usage
 
@@ -63,7 +66,7 @@ resource "fivenines_network_device" "router" {
 - `snmp_priv_password` (String, Sensitive) SNMPv3 privacy password. Write-only — not returned by the API.
 - `snmp_priv_protocol` (String) SNMPv3 privacy protocol.
 - `snmp_security_level` (String) SNMPv3 security level.
-- `snmp_username` (String, Sensitive) SNMPv3 username.
+- `snmp_username` (String, Sensitive) SNMPv3 username. Omit it to clear it server-side.
 
 ### Read-Only
 

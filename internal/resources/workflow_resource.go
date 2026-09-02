@@ -79,7 +79,7 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Computed:    true,
 			},
 			"execution_graph_json": schema.StringAttribute{
-				Description: "JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value. Compared semantically, so reformatting the graph (whitespace, key ordering) does not publish a new workflow version.",
+				Description: "JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value. Compared semantically, so reformatting the graph (whitespace, key ordering) does not publish a new workflow version. A pure reformat still shows as an in-place update in the plan, but the apply leaves the published version alone.",
 				Optional:    true,
 				CustomType:  jsontypes.NormalizedType{},
 			},

@@ -198,6 +198,23 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		input  interface{}
 		policy map[string]string
 	}{
+		input: CreateIntegrationInput{},
+		policy: map[string]string{
+			"type": always,
+			// Integrations are create-and-delete only — there is no update input
+			// and no field an unrelated apply could wipe, so the clear-vs-preserve
+			// hazard this table guards cannot arise. dropsZero is safe on every
+			// one of these because "" is not a legal value for any of them: the
+			// resource's ValidateConfig requires the type's own arguments, and the
+			// API rejects a blank url, routing key, user key or app token.
+			"name": dropsZero, "url": dropsZero, "secret": dropsZero,
+			"routing_key": dropsZero, "user_key": dropsZero,
+			"app_token": dropsZero, "email": dropsZero,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
 		input: CreateUptimeMonitorInput{},
 		policy: map[string]string{
 			"name": always, "protocol": always, "url": dropsZero,

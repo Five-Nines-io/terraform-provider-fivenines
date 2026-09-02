@@ -1055,3 +1055,100 @@ func (c *Client) GetIntegration(ctx context.Context, id int64) (*Integration, er
 	}
 	return &result.Integration, nil
 }
+
+// --- Status Page Maintenance Windows ---
+
+func maintenanceWindowPath(statusPageID int64) string {
+	return fmt.Sprintf("/api/v1/status_pages/%d/maintenance_windows", statusPageID)
+}
+
+func (c *Client) GetStatusPageMaintenanceWindow(ctx context.Context, statusPageID, id int64) (*StatusPageMaintenanceWindow, string, error) {
+	path := fmt.Sprintf("%s/%d", maintenanceWindowPath(statusPageID), id)
+	resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := sanitizeETag(resp.Header.Get("ETag"))
+	var result struct {
+		MaintenanceWindow StatusPageMaintenanceWindow `json:"maintenance_window"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.MaintenanceWindow, etag, nil
+}
+
+func (c *Client) CreateStatusPageMaintenanceWindow(ctx context.Context, statusPageID int64, input CreateStatusPageMaintenanceWindowInput) (*StatusPageMaintenanceWindow, error) {
+	body := map[string]interface{}{"maintenance_window": input}
+	resp, err := c.doRequest(ctx, "POST", maintenanceWindowPath(statusPageID), body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		MaintenanceWindow StatusPageMaintenanceWindow `json:"maintenance_window"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.MaintenanceWindow, nil
+}
+
+func (c *Client) UpdateStatusPageMaintenanceWindow(ctx context.Context, statusPageID, id int64, etag string, input UpdateStatusPageMaintenanceWindowInput) (*StatusPageMaintenanceWindow, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	path := fmt.Sprintf("%s/%d", maintenanceWindowPath(statusPageID), id)
+	body := map[string]interface{}{"maintenance_window": input}
+	resp, err := c.doRequest(ctx, "PATCH", path, body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		MaintenanceWindow StatusPageMaintenanceWindow `json:"maintenance_window"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.MaintenanceWindow, nil
+}
+
+// DeleteStatusPageMaintenanceWindow permanently removes the window, including
+// from the status page history. Use CancelStatusPageMaintenanceWindow to keep
+// the record.
+func (c *Client) DeleteStatusPageMaintenanceWindow(ctx context.Context, statusPageID, id int64) error {
+	path := fmt.Sprintf("%s/%d", maintenanceWindowPath(statusPageID), id)
+	resp, err := c.doRequest(ctx, "DELETE", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// CancelStatusPageMaintenanceWindow marks the window canceled while preserving
+// it in the status page history. The endpoint is idempotent.
+func (c *Client) CancelStatusPageMaintenanceWindow(ctx context.Context, statusPageID, id int64) error {
+	path := fmt.Sprintf("%s/%d/cancel", maintenanceWindowPath(statusPageID), id)
+	resp, err := c.doRequest(ctx, "PATCH", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}

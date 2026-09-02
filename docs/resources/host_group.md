@@ -25,10 +25,20 @@ resource "fivenines_host_group" "staging" {
   position = 2
 }
 
-# Leave position out and the group lands on top of the list.
 resource "fivenines_host_group" "lab" {
-  name = "Lab"
+  name     = "Lab"
+  position = 3
 }
+
+# Either pin every group, as above, or pin none of them:
+#
+#   resource "fivenines_host_group" "lab" {
+#     name = "Lab"
+#   }
+#
+# An unpinned group lands on top and renumbers the rest, so mixing the two in one
+# configuration means the unpinned group pushes the pinned ones out of the slots
+# they ask for, and every later plan shows a diff for them.
 
 # Hosts are put INTO a group from the instance side. The provider does not expose
 # that attribute yet: fivenines_instance has no host_group_id, so for now assign
@@ -56,10 +66,22 @@ resource "fivenines_host_group" "lab" {
 
 ### Optional
 
-- `position` (Number) 1-based position in the group list. Setting it slots the group in and renumbers the others, so repositioning one group shifts the position of every other group in the organisation. Omit it to let new groups land on top, which is the right choice unless you intend to manage the whole ordering. A configured position is the position you are asking for: the API clamps anything beyond the number of existing groups without reporting an error, so a position past the end settles at the last slot and every later plan shows a diff that can never converge. Keep configured positions within the number of groups you manage.
+- `position` (Number) 1-based position in the group list. Setting it slots the group in and renumbers the others, so repositioning one group shifts the position of every other group in the organization. Omit it to let new groups land on top, which is the right choice unless you intend to manage the whole ordering. A configured position is the position you are asking for: the API clamps anything beyond the number of existing groups without reporting an error, so a position past the end settles at the last slot and every later plan shows a diff that can never converge. Keep configured positions within the number of groups you manage.
 
 ### Read-Only
 
 - `created_at` (String) Creation timestamp.
 - `id` (Number) Unique identifier.
 - `updated_at` (String) Last update timestamp. Position changes do not bump it.
+
+## Import
+
+Import is supported using the following syntax:
+
+The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
+
+```shell
+# Host groups are identified by a numeric id, not a UUID like instances or
+# uptime monitors.
+terraform import fivenines_host_group.production 42
+```

@@ -10,10 +10,20 @@ resource "fivenines_host_group" "staging" {
   position = 2
 }
 
-# Leave position out and the group lands on top of the list.
 resource "fivenines_host_group" "lab" {
-  name = "Lab"
+  name     = "Lab"
+  position = 3
 }
+
+# Either pin every group, as above, or pin none of them:
+#
+#   resource "fivenines_host_group" "lab" {
+#     name = "Lab"
+#   }
+#
+# An unpinned group lands on top and renumbers the rest, so mixing the two in one
+# configuration means the unpinned group pushes the pinned ones out of the slots
+# they ask for, and every later plan shows a diff for them.
 
 # Hosts are put INTO a group from the instance side. The provider does not expose
 # that attribute yet: fivenines_instance has no host_group_id, so for now assign

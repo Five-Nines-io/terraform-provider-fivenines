@@ -105,7 +105,7 @@ func (r *hostGroupResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"position": schema.Int64Attribute{
 				Description: "1-based position in the group list. Setting it slots the group in and renumbers " +
 					"the others, so repositioning one group shifts the position of every other group in the " +
-					"organisation. Omit it to let new groups land on top, which is the right choice unless " +
+					"organization. Omit it to let new groups land on top, which is the right choice unless " +
 					"you intend to manage the whole ordering. A configured position is the position you are " +
 					"asking for: the API clamps anything beyond the number of existing groups without " +
 					"reporting an error, so a position past the end settles at the last slot and every " +

@@ -90,6 +90,9 @@ func (p *fiveninesProvider) Resources(_ context.Context) []func() resource.Resou
 		resources.NewUptimeMonitorResource,
 		resources.NewNetworkDeviceResource,
 		resources.NewStatusPageResource,
+		resources.NewStatusPageMaintenanceWindowResource,
+		resources.NewIntegrationResource,
+		resources.NewHostGroupResource,
 		resources.NewMQTTBrokerResource,
 		resources.NewMQTTTopicMonitorResource,
 	}
@@ -100,6 +103,10 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 		datasources.NewProbeRegionsDataSource,
 		datasources.NewIntegrationsDataSource,
 		datasources.NewWorkflowRunsDataSource,
+		datasources.NewWorkflowTemplatesDataSource,
+		datasources.NewWorkflowNodeTypesDataSource,
 		datasources.NewIncidentsDataSource,
+		datasources.NewUptimeMonitorsDataSource,
+		datasources.NewUptimeMonitorStatusDataSource,
 	}
 }

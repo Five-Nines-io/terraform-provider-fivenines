@@ -3,11 +3,17 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // newTestServer creates a test HTTP server with the given handler.
@@ -26,7 +32,7 @@ func TestClient_AuthHeader(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"instances": []interface{}{}, "meta": map[string]int{"count": 0, "total": 0, "offset": 0}})
+		json.NewEncoder(w).Encode(map[string]interface{}{"instances": []interface{}{}, "meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100}})
 	})
 
 	c.ListInstances(context.Background())
@@ -40,7 +46,7 @@ func TestClient_UserAgent(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		gotUA = r.Header.Get("User-Agent")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]interface{}{"instances": []interface{}{}, "meta": map[string]int{"count": 0, "total": 0, "offset": 0}})
+		json.NewEncoder(w).Encode(map[string]interface{}{"instances": []interface{}{}, "meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100}})
 	})
 
 	c.ListInstances(context.Background())
@@ -165,9 +171,12 @@ func TestClient_DeleteInstance_202(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
-	err := c.DeleteInstance(context.Background(), "abc-123")
+	accepted, err := c.DeleteInstance(context.Background(), "abc-123")
 	if err != nil {
 		t.Fatalf("expected no error for 202, got: %v", err)
+	}
+	if !accepted {
+		t.Error("expected 202 to report an asynchronous deletion")
 	}
 }
 
@@ -176,9 +185,202 @@ func TestClient_DeleteInstance_204(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	err := c.DeleteInstance(context.Background(), "abc-123")
+	accepted, err := c.DeleteInstance(context.Background(), "abc-123")
 	if err != nil {
 		t.Fatalf("expected no error for 204, got: %v", err)
+	}
+	if accepted {
+		t.Error("expected 204 to report a completed deletion")
+	}
+}
+
+func TestClient_WaitForInstanceDeletion(t *testing.T) {
+	shrinkDeletionPolling(t)
+	var gets int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Still there for the first two polls, gone afterwards.
+		if atomic.AddInt32(&gets, 1) <= 2 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"instance": map[string]interface{}{
+					"id":         "abc-123",
+					"created_at": "2026-01-01T00:00:00Z",
+					"updated_at": "2026-01-01T00:00:00Z",
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not found"})
+	})
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := atomic.LoadInt32(&gets); got != 3 {
+		t.Errorf("expected to poll until the 404, got %d requests", got)
+	}
+}
+
+func TestClient_WaitForInstanceDeletion_Timeout(t *testing.T) {
+	shrinkDeletionPolling(t)
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instance": map[string]interface{}{
+				"id":         "abc-123",
+				"created_at": "2026-01-01T00:00:00Z",
+				"updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected a timeout error while the instance still exists")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected a timeout error, got: %v", err)
+	}
+}
+
+// The DELETE was already accepted, so a proxy hiccup during the poll must not
+// turn a successful destroy into a failed one.
+func TestClient_WaitForInstanceDeletion_SurvivesTransientErrors(t *testing.T) {
+	shrinkDeletionPolling(t)
+	var gets int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&gets, 1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "bad gateway"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not found"})
+	})
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("expected the 502 to be retried, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&gets); got != 2 {
+		t.Errorf("expected a retry after the 502, got %d requests", got)
+	}
+}
+
+// A persistent server error still fails, but as a timeout that names the last
+// error rather than a bare deadline message.
+func TestClient_WaitForInstanceDeletion_ReportsLastTransientError(t *testing.T) {
+	shrinkDeletionPolling(t)
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "boom"})
+	})
+
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected an error when the poll never succeeds")
+	}
+	if !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("expected a timeout naming the last error, got: %v", err)
+	}
+}
+
+// A 4xx will not fix itself, so it must not burn the whole timeout window.
+func TestClient_WaitForInstanceDeletion_FailsFastOnClientError(t *testing.T) {
+	shrinkDeletionPolling(t)
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "forbidden"})
+	})
+
+	start := time.Now()
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second)
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected the 403 to surface immediately, got: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("expected a fast failure, took %s", elapsed)
+	}
+}
+
+// Regression: waitForDeletion used to check the context before the poll result,
+// so a GET that came back 404 on the very tick the deadline expired reported a
+// timeout for a resource that was in fact gone.
+func TestWaitForDeletion_GoneWinsOnTheDeadlineTick(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	err := waitForDeletion(context.Background(), time.Nanosecond, func(context.Context) (bool, error) {
+		<-expired.Done() // the deadline has already passed when "gone" reports true
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("expected success when the resource is gone, got: %v", err)
+	}
+}
+
+func TestClient_WaitForNetworkDeviceDeletion(t *testing.T) {
+	shrinkDeletionPolling(t)
+	var gets int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&gets, 1) == 1 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"network_device": map[string]interface{}{
+					"id": "dev-uuid", "name": "core-sw", "ip_address": "192.0.2.1",
+					"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not found"})
+	})
+
+	if err := c.WaitForNetworkDeviceDeletion(context.Background(), "dev-uuid", 30*time.Second); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := atomic.LoadInt32(&gets); got != 2 {
+		t.Errorf("expected to poll until the 404, got %d requests", got)
+	}
+}
+
+func TestRetryablePoll(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"transport failure", errors.New("connection reset by peer"), true},
+		{"bad gateway", &APIError{StatusCode: http.StatusBadGateway}, true},
+		{"server error", &APIError{StatusCode: http.StatusInternalServerError}, true},
+		{"forbidden", &APIError{StatusCode: http.StatusForbidden}, false},
+		{"unprocessable", &APIError{StatusCode: 422}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := retryablePoll(tt.err); got != tt.want {
+				t.Errorf("retryablePoll(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClient_WaitForInstanceDeletion_HonoursCancellation(t *testing.T) {
+	shrinkDeletionPolling(t)
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instance": map[string]interface{}{
+				"id":         "abc-123",
+				"created_at": "2026-01-01T00:00:00Z",
+				"updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := c.WaitForInstanceDeletion(ctx, "abc-123", 30*time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
 	}
 }
 
@@ -191,14 +393,14 @@ func TestClient_ListInstances_Pagination(t *testing.T) {
 				"instances": []map[string]interface{}{
 					{"id": "a", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
 				},
-				"meta": map[string]int{"count": 1, "total": 2, "offset": 0},
+				"meta": map[string]int{"current_page": 1, "total_pages": 2, "total_count": 2, "per_page": 100},
 			})
 		} else {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"instances": []map[string]interface{}{
 					{"id": "b", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
 				},
-				"meta": map[string]int{"count": 1, "total": 2, "offset": 1},
+				"meta": map[string]int{"current_page": 2, "total_pages": 2, "total_count": 2, "per_page": 100},
 			})
 		}
 	})
@@ -474,26 +676,123 @@ func TestClient_GetWorkflow_WithVersions(t *testing.T) {
 	}
 }
 
-func TestClient_ListWorkflows_FiltersArchived(t *testing.T) {
+// An unrecognised meta envelope must over-fetch by one page, never truncate.
+// This is the regression guard for the rename that silently capped every list at
+// 100 rows: the old struct decoded to zeros, the exit condition read 0 >= 0, and
+// the unit tests stayed green because their fixtures encoded the old shape too.
+func TestClient_ListInstances_UnrecognizedMetaDoesNotTruncate(t *testing.T) {
+	var requests int
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		instances := []interface{}{}
+		if page := r.URL.Query().Get("page"); page == "1" || page == "2" {
+			instances = append(instances, map[string]interface{}{
+				"id": "host-" + page, "display_name": "web-" + page,
+			})
+		}
+		// A meta shape the client does not know: every field decodes to zero.
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"workflows": []map[string]interface{}{
-				{"id": 1, "name": "active-wf", "status": "active", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
-				{"id": 2, "name": "archived-wf", "status": "archived", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
-			},
-			"meta": map[string]int{"count": 2, "total": 2, "offset": 0},
+			"instances": instances,
+			"meta":      map[string]interface{}{"page": 1, "pages": 3, "records": 3},
 		})
 	})
 
-	workflows, err := c.ListWorkflows(context.Background())
+	instances, err := c.ListInstances(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(workflows) != 1 {
-		t.Fatalf("expected 1 workflow (archived filtered), got %d", len(workflows))
+	if len(instances) != 2 {
+		t.Fatalf("expected both pages to be walked, got %d instances", len(instances))
 	}
-	if workflows[0].Name != "active-wf" {
-		t.Errorf("expected active-wf, got %s", workflows[0].Name)
+	// Two full pages plus the empty page that ends the walk.
+	if requests != 3 {
+		t.Errorf("expected 3 requests, got %d", requests)
+	}
+}
+
+// The archived filter moved server-side, so a page is walked for what the API
+// chose to return rather than for what survives a client-side predicate.
+func TestClient_ListWorkflows_WalksEveryPage(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflows": []interface{}{
+				map[string]interface{}{"id": page, "name": fmt.Sprintf("wf-%d", page), "status": "active"},
+			},
+			"meta": map[string]int{"current_page": page, "total_pages": 2, "total_count": 2, "per_page": 100},
+		})
+	})
+
+	workflows, err := c.ListWorkflows(context.Background(), WorkflowListOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(workflows) != 2 || workflows[0].Name != "wf-1" || workflows[1].Name != "wf-2" {
+		t.Errorf("expected both pages to be walked, got %v", workflows)
+	}
+}
+
+func TestClient_ListWorkflows_SendsServerSideFilters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflows": []map[string]interface{}{
+				{"id": 2, "name": "archived-wf", "status": "archived", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
+			},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
+		})
+	})
+
+	workflows, err := c.ListWorkflows(context.Background(), WorkflowListOptions{
+		Status:       "archived",
+		UpdatedSince: "2026-01-01T00:00:00Z",
+		Order:        "updated_at",
+		Direction:    "desc",
+		Q:            "cpu",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for key, want := range map[string]string{
+		"status":        "archived",
+		"updated_since": "2026-01-01T00:00:00Z",
+		"order":         "updated_at",
+		"direction":     "desc",
+		"q":             "cpu",
+		"page":          "1",
+		"per_page":      "100",
+	} {
+		if got := gotQuery.Get(key); got != want {
+			t.Errorf("expected query %s=%q, got %q", key, want, got)
+		}
+	}
+
+	// Archived workflows are filtered by the API, not by the client, so an
+	// explicit status=archived request must come back untouched.
+	if len(workflows) != 1 || workflows[0].Name != "archived-wf" {
+		t.Fatalf("expected the archived workflow to pass through, got %+v", workflows)
+	}
+}
+
+func TestClient_ListWorkflows_OmitsEmptyFilters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflows": []map[string]interface{}{},
+			"meta":      map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	if _, err := c.ListWorkflows(context.Background(), WorkflowListOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, key := range []string{"status", "updated_since", "order", "direction", "q"} {
+		if _, ok := gotQuery[key]; ok {
+			t.Errorf("expected %s to be omitted from the query, got %q", key, gotQuery.Get(key))
+		}
 	}
 }
 
@@ -521,6 +820,230 @@ func TestClient_CreateWorkflowVersion(t *testing.T) {
 	}
 	if ver.VersionNumber != 3 {
 		t.Errorf("expected version_number 3, got %d", ver.VersionNumber)
+	}
+}
+
+func TestClient_CreateWorkflowVersion_OmitsCanvasDataWhenUnset(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"version": map[string]interface{}{"id": 10, "version_number": 1, "created_at": "2026-01-01T00:00:00Z"},
+		})
+	})
+
+	_, err := c.CreateWorkflowVersion(context.Background(), 42, CreateWorkflowVersionInput{
+		ExecutionGraph: map[string]interface{}{"nodes": []interface{}{}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := gotBody["canvas_data"]; ok {
+		t.Error("expected canvas_data to be omitted so the API generates a layout")
+	}
+}
+
+func TestClient_CreateWorkflowVersion_SendsCanvasData(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"version": map[string]interface{}{"id": 10, "version_number": 1, "created_at": "2026-01-01T00:00:00Z"},
+		})
+	})
+
+	_, err := c.CreateWorkflowVersion(context.Background(), 42, CreateWorkflowVersionInput{
+		ExecutionGraph: map[string]interface{}{"nodes": []interface{}{}},
+		CanvasData:     map[string]interface{}{"viewport": map[string]interface{}{"zoom": 1.0}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	canvas, ok := gotBody["canvas_data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected canvas_data object, got %v", gotBody["canvas_data"])
+	}
+	if _, ok := canvas["viewport"]; !ok {
+		t.Errorf("expected canvas_data.viewport, got %v", canvas)
+	}
+}
+
+func TestClient_GetWorkflowVersion(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/api/v1/workflows/42/versions/10" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"version": map[string]interface{}{
+				"id":             10,
+				"version_number": 3,
+				"execution_graph": map[string]interface{}{
+					"nodes": []interface{}{map[string]interface{}{"id": "n1", "type": "trigger"}},
+					"edges": []interface{}{},
+				},
+				"canvas_data": map[string]interface{}{"viewport": map[string]interface{}{"zoom": 1.0}},
+				"created_at":  "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	ver, err := c.GetWorkflowVersion(context.Background(), 42, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ver.ID != 10 {
+		t.Errorf("expected version id 10, got %d", ver.ID)
+	}
+	nodes, ok := ver.ExecutionGraph["nodes"].([]interface{})
+	if !ok || len(nodes) != 1 {
+		t.Fatalf("expected 1 graph node, got %v", ver.ExecutionGraph["nodes"])
+	}
+	if ver.CanvasData["viewport"] == nil {
+		t.Error("expected canvas_data to be decoded")
+	}
+}
+
+// The version detail endpoint is documented with a "version" envelope; accept a
+// bare object too so a shape change does not break reads.
+func TestClient_GetWorkflowVersion_BareObject(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":              10,
+			"version_number":  3,
+			"execution_graph": map[string]interface{}{"nodes": []interface{}{}},
+			"created_at":      "2026-01-01T00:00:00Z",
+		})
+	})
+
+	ver, err := c.GetWorkflowVersion(context.Background(), 42, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ver.ID != 10 || ver.VersionNumber != 3 {
+		t.Errorf("expected version 10/3, got %d/%d", ver.ID, ver.VersionNumber)
+	}
+}
+
+func TestClient_UpdateWorkflow_SendsNoIfMatch(t *testing.T) {
+	var gotIfMatch string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotIfMatch = r.Header.Get("If-Match")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflow": map[string]interface{}{
+				"id": 42, "name": "Renamed", "status": "draft",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	name := "Renamed"
+	wf, err := c.UpdateWorkflow(context.Background(), 42, UpdateWorkflowInput{Name: &name})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotIfMatch != "" {
+		t.Errorf("workflow endpoints do not support If-Match, got %q", gotIfMatch)
+	}
+	if wf.Name != "Renamed" {
+		t.Errorf("expected name Renamed, got %s", wf.Name)
+	}
+}
+
+// --- Workflow Templates & Node Types ---
+
+func TestClient_ListWorkflowTemplates(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/api/v1/workflows/templates" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"templates": []map[string]interface{}{
+				{"slug": "high-cpu", "name": "High CPU", "category": "instances", "extra_field": "kept"},
+			},
+		})
+	})
+
+	templates, err := c.ListWorkflowTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(templates) != 1 || templates[0].Slug != "high-cpu" {
+		t.Fatalf("expected the high-cpu template, got %+v", templates)
+	}
+	if !strings.Contains(string(templates[0].Raw), "extra_field") {
+		t.Errorf("expected Raw to keep unmodelled fields, got %s", templates[0].Raw)
+	}
+}
+
+func TestClient_CreateWorkflowFromTemplate(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/workflows/templates" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflow": map[string]interface{}{
+				"id": 7, "name": "High CPU", "status": "draft", "published_version_id": 3,
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	wf, err := c.CreateWorkflowFromTemplate(context.Background(), "high-cpu")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotBody["slug"] != "high-cpu" {
+		t.Errorf("expected slug high-cpu in body, got %v", gotBody["slug"])
+	}
+	if wf.ID != 7 || wf.PublishedVersionID == nil || *wf.PublishedVersionID != 3 {
+		t.Errorf("expected workflow 7 with published version 3, got %+v", wf)
+	}
+}
+
+func TestClient_ListNodeTypes(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node_types" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"node_types": []map[string]interface{}{
+				{"type": "metric_threshold", "name": "Metric Threshold", "category": "trigger",
+					"config_schema": map[string]interface{}{"metric": "string"}},
+			},
+		})
+	})
+
+	nodeTypes, err := c.ListNodeTypes(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(nodeTypes) != 1 || nodeTypes[0].Type != "metric_threshold" {
+		t.Fatalf("expected the metric_threshold node type, got %+v", nodeTypes)
+	}
+	if !strings.Contains(string(nodeTypes[0].Raw), "config_schema") {
+		t.Errorf("expected Raw to carry the config schema, got %s", nodeTypes[0].Raw)
+	}
+}
+
+// A bare array with no envelope decodes the same way.
+func TestClient_ListNodeTypes_BareArray(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"type": "send_email", "name": "Send Email", "category": "action"},
+		})
+	})
+
+	nodeTypes, err := c.ListNodeTypes(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(nodeTypes) != 1 || nodeTypes[0].Type != "send_email" {
+		t.Fatalf("expected the send_email node type, got %+v", nodeTypes)
 	}
 }
 
@@ -632,6 +1155,318 @@ func TestClient_CreateUptimeMonitor_DNS(t *testing.T) {
 	}
 }
 
+func TestClient_UpdateUptimeMonitor_Protocol(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"uptime_monitor": map[string]interface{}{
+				"id": "mon-uuid", "name": "TCP Check", "protocol": "tcp", "status": "unknown",
+				"hostname": "db.example.com", "port": 5432,
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+			},
+		})
+	})
+
+	protocol := "tcp"
+	mon, err := c.UpdateUptimeMonitor(context.Background(), "mon-uuid", `"etag"`, UpdateUptimeMonitorInput{
+		Protocol: &protocol,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mon.Protocol != "tcp" {
+		t.Errorf("expected protocol tcp, got %s", mon.Protocol)
+	}
+	monitor := gotBody["uptime_monitor"].(map[string]interface{})
+	if monitor["protocol"] != "tcp" {
+		t.Errorf("expected protocol in update body, got %v", monitor["protocol"])
+	}
+}
+
+func TestClient_UpdateUptimeMonitor_ClearsDNSExpectedRecords(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"uptime_monitor": map[string]interface{}{
+				"id": "mon-uuid", "name": "DNS Check", "protocol": "dns", "status": "up",
+				"dns_expected_records": []string{},
+				"created_at":           "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+			},
+		})
+	})
+
+	empty := []string{}
+	_, err := c.UpdateUptimeMonitor(context.Background(), "mon-uuid", "", UpdateUptimeMonitorInput{
+		DNSExpectedRecords: &empty,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	monitor := gotBody["uptime_monitor"].(map[string]interface{})
+	records, ok := monitor["dns_expected_records"]
+	if !ok {
+		t.Fatal("expected dns_expected_records to be sent, key was omitted")
+	}
+	if list, ok := records.([]interface{}); !ok || len(list) != 0 {
+		t.Errorf("expected dns_expected_records to be [], got %v", records)
+	}
+}
+
+func TestClient_UpdateUptimeMonitor_SendsNullForUnsetProtocolFields(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"uptime_monitor": map[string]interface{}{
+				"id": "mon-uuid", "name": "DNS Check", "protocol": "dns", "status": "up",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+			},
+		})
+	})
+
+	name := "DNS Check"
+	if _, err := c.UpdateUptimeMonitor(context.Background(), "mon-uuid", "", UpdateUptimeMonitorInput{Name: &name}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Protocol-scoped fields carry no omitempty: a nil pointer must reach the API as
+	// an explicit null so switching protocol clears the previous protocol's values.
+	monitor := gotBody["uptime_monitor"].(map[string]interface{})
+	for _, key := range []string{
+		"dns_expected_records", "port", "keyword", "dns_record_type",
+		"custom_headers", "custom_body", "content_type",
+	} {
+		value, present := monitor[key]
+		if !present {
+			t.Errorf("expected %s to be sent as an explicit null, key was omitted", key)
+			continue
+		}
+		if value != nil {
+			t.Errorf("expected %s to be null, got %v", key, value)
+		}
+	}
+	// Fields the plan always carries a value for stay omitempty and must not appear.
+	if _, ok := monitor["interval_seconds"]; ok {
+		t.Error("expected interval_seconds to be omitted when nil")
+	}
+}
+
+func TestClient_UpdateUptimeMonitor_ClearsProbeRegionIDs(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"uptime_monitor": map[string]interface{}{
+				"id": "mon-uuid", "name": "API", "protocol": "https", "status": "up",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+			},
+		})
+	})
+
+	// `probe_region_ids = []` has no validator shielding it, so an omitted key
+	// would silently leave the server's old region set in place.
+	empty := []int64{}
+	if _, err := c.UpdateUptimeMonitor(context.Background(), "mon-uuid", "", UpdateUptimeMonitorInput{
+		ProbeRegionIDs: &empty,
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	monitor := gotBody["uptime_monitor"].(map[string]interface{})
+	ids, present := monitor["probe_region_ids"]
+	if !present {
+		t.Fatal("expected probe_region_ids to be sent, key was omitted")
+	}
+	if list, ok := ids.([]interface{}); !ok || len(list) != 0 {
+		t.Errorf("expected probe_region_ids to be [], got %v", ids)
+	}
+}
+
+func TestParseError_FallsBackToRawBody(t *testing.T) {
+	// A body keyed differently unmarshals without error and leaves both fields
+	// empty, which would render a diagnostic with no reason at all.
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"message":"protocol cannot be changed for this monitor"}`))
+	})
+
+	_, _, err := c.GetUptimeMonitor(context.Background(), "mon-uuid")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "protocol cannot be changed") {
+		t.Errorf("expected the raw body in the message, got %q", err.Error())
+	}
+}
+
+func TestClient_PauseUptimeMonitor(t *testing.T) {
+	var gotPath, gotMethod string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"uptime_monitor": map[string]interface{}{
+				"id": "mon-uuid", "name": "API Health", "protocol": "https", "status": "paused",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+			},
+		})
+	})
+
+	mon, err := c.PauseUptimeMonitor(context.Background(), "mon-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotMethod != "POST" || gotPath != "/api/v1/uptime_monitors/mon-uuid/pause" {
+		t.Errorf("expected POST /api/v1/uptime_monitors/mon-uuid/pause, got %s %s", gotMethod, gotPath)
+	}
+	if mon.Status != "paused" {
+		t.Errorf("expected status paused, got %s", mon.Status)
+	}
+}
+
+func TestClient_ResumeUptimeMonitor(t *testing.T) {
+	var gotPath string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"uptime_monitor": map[string]interface{}{
+				"id": "mon-uuid", "name": "API Health", "protocol": "https", "status": "recovering",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+			},
+		})
+	})
+
+	mon, err := c.ResumeUptimeMonitor(context.Background(), "mon-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v1/uptime_monitors/mon-uuid/resume" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+	// The resumed status comes from the API, not from an assumption in the provider.
+	if mon.Status != "recovering" {
+		t.Errorf("expected status recovering, got %s", mon.Status)
+	}
+}
+
+func TestClient_GetUptimeMonitorStatus(t *testing.T) {
+	var gotPath string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"uptime_monitor_status": map[string]interface{}{
+				"id":             "mon-uuid",
+				"status":         "up",
+				"last_check_at":  "2026-01-02T00:00:00Z",
+				"next_check_at":  "2026-01-02T00:01:00Z",
+				"last_error":     nil,
+				"ssl_expires_at": "2026-10-11T17:06:46Z",
+			},
+		})
+	})
+
+	status, err := c.GetUptimeMonitorStatus(context.Background(), "mon-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v1/uptime_monitors/mon-uuid/status" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+	if status.Status != "up" {
+		t.Errorf("expected status up, got %s", status.Status)
+	}
+	if status.LastError != nil {
+		t.Errorf("expected last_error nil, got %v", *status.LastError)
+	}
+	if status.SSLExpiresAt == nil || *status.SSLExpiresAt != "2026-10-11T17:06:46Z" {
+		t.Errorf("unexpected ssl_expires_at: %v", status.SSLExpiresAt)
+	}
+}
+
+func TestClient_GetUptimeMonitorStatus_BareBody(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "mon-uuid", "status": "down", "last_error": "connection refused",
+		})
+	})
+
+	status, err := c.GetUptimeMonitorStatus(context.Background(), "mon-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.Status != "down" {
+		t.Errorf("expected status down, got %s", status.Status)
+	}
+	if status.LastError == nil || *status.LastError != "connection refused" {
+		t.Errorf("unexpected last_error: %v", status.LastError)
+	}
+	// Absent keys must surface as null, not as a zero value.
+	if status.NextCheckAt != nil {
+		t.Errorf("expected next_check_at nil, got %v", *status.NextCheckAt)
+	}
+}
+
+func TestClient_ListUptimeMonitors_Filters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"uptime_monitors": []interface{}{},
+			"meta":            map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	_, err := c.ListUptimeMonitors(context.Background(), &ListUptimeMonitorsOptions{
+		Status:       "down",
+		Protocol:     "https",
+		Query:        "api",
+		UpdatedSince: "2026-01-01T00:00:00Z",
+		Order:        "name",
+		Direction:    "asc",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for key, want := range map[string]string{
+		"status": "down", "protocol": "https", "q": "api",
+		"updated_since": "2026-01-01T00:00:00Z", "order": "name", "direction": "asc",
+		"page": "1", "per_page": "100",
+	} {
+		if got := gotQuery.Get(key); got != want {
+			t.Errorf("expected %s=%q, got %q", key, want, got)
+		}
+	}
+}
+
+func TestClient_ListUptimeMonitors_NoFilters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"uptime_monitors": []interface{}{
+				map[string]interface{}{"id": "mon-uuid", "name": "API Health", "protocol": "https", "status": "up"},
+			},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
+		})
+	})
+
+	monitors, err := c.ListUptimeMonitors(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(monitors) != 1 {
+		t.Fatalf("expected 1 monitor, got %d", len(monitors))
+	}
+	for _, key := range []string{"status", "protocol", "q", "updated_since", "order", "direction"} {
+		if _, ok := gotQuery[key]; ok {
+			t.Errorf("expected %s to be omitted when unset", key)
+		}
+	}
+}
+
 // --- Probe Regions ---
 
 func TestClient_ListProbeRegions(t *testing.T) {
@@ -664,6 +1499,7 @@ func TestClient_ListIntegrations(t *testing.T) {
 			"integrations": []map[string]interface{}{
 				{"id": 1, "type": "SlackIntegration", "name": "Slack", "provider": "slack", "enabled": true, "verified": true, "created_at": "2026-01-01T00:00:00Z"},
 			},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
 		})
 	})
 
@@ -676,6 +1512,349 @@ func TestClient_ListIntegrations(t *testing.T) {
 	}
 	if integrations[0].Provider != "slack" {
 		t.Errorf("expected provider slack, got %s", integrations[0].Provider)
+	}
+}
+
+// The index went 25-per-page on 2026-09-01 while this client still sent a
+// single un-paginated GET, so an organisation with more channels than one page
+// silently lost the rest — and the data source fed that short list to for_each.
+func TestClient_ListIntegrations_Pagination(t *testing.T) {
+	var requestCount int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := int(atomic.AddInt32(&requestCount, 1))
+		if got := r.URL.Query().Get("page"); got != strconv.Itoa(page) {
+			t.Errorf("request %d asked for page %q, want %d", page, got, page)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integrations": []map[string]interface{}{
+				{"id": page, "type": "WebhookIntegration", "provider": "Webhook"},
+			},
+			"meta": map[string]int{"current_page": page, "total_pages": 3, "total_count": 3, "per_page": 1},
+		})
+	})
+
+	integrations, err := c.ListIntegrations(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(integrations) != 3 {
+		t.Fatalf("expected 3 integrations across 3 pages, got %d", len(integrations))
+	}
+	for i, want := range []int64{1, 2, 3} {
+		if integrations[i].ID != want {
+			t.Errorf("integration %d: expected id %d, got %d", i, want, integrations[i].ID)
+		}
+	}
+}
+
+// An envelope the client cannot read must over-fetch, not truncate: that is the
+// guard morePages exists for, and the reason the last meta rename cost eight
+// list loops instead of being caught by one.
+func TestClient_ListIntegrations_UnrecognisedMetaWalksToEmptyPage(t *testing.T) {
+	var requestCount int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := atomic.AddInt32(&requestCount, 1)
+		body := map[string]interface{}{
+			"integrations": []map[string]interface{}{},
+			// The pre-2026-09 envelope: every field decodes to zero.
+			"meta": map[string]int{"count": 1, "total": 2, "offset": 0},
+		}
+		if page == 1 {
+			body["integrations"] = []map[string]interface{}{{"id": 1, "type": "WebhookIntegration"}}
+		}
+		json.NewEncoder(w).Encode(body)
+	})
+
+	integrations, err := c.ListIntegrations(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(integrations) != 1 {
+		t.Errorf("expected 1 integration, got %d", len(integrations))
+	}
+	if requestCount != 2 {
+		t.Errorf("expected the walk to continue past the unreadable meta to an empty page (2 requests), got %d", requestCount)
+	}
+}
+
+func TestClient_GetIntegration(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/integrations/42" {
+			t.Errorf("expected path /api/v1/integrations/42, got %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{
+				"id": 42, "type": "WebhookIntegration", "name": "Ops hook",
+				"provider": "Webhook", "enabled": true, "verified": false,
+				"created_at": "2026-09-01T00:00:00Z", "updated_at": "2026-09-01T01:00:00Z",
+			},
+		})
+	})
+
+	integration, err := c.GetIntegration(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if integration.Type != "WebhookIntegration" {
+		t.Errorf("expected type WebhookIntegration, got %s", integration.Type)
+	}
+	if integration.UpdatedAt != "2026-09-01T01:00:00Z" {
+		t.Errorf("expected updated_at to be decoded, got %q", integration.UpdatedAt)
+	}
+}
+
+func TestClient_CreateIntegration_Webhook(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/integrations" {
+			t.Errorf("expected POST /api/v1/integrations, got %s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{
+				"id": 7, "type": "WebhookIntegration", "name": "https://example.com/hook",
+				"provider": "Webhook", "enabled": true, "verified": false,
+			},
+			"webhook": map[string]interface{}{
+				"verification_header":           "X-Fivenines-Verification",
+				"verification_token":            "tok_abc",
+				"verification_token_expires_at": "2026-09-02T00:00:00Z",
+				"secret":                        "whsec_generated",
+			},
+		})
+	})
+
+	result, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{
+		Type: "webhook",
+		URL:  "https://example.com/hook",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The API takes the short key, not the class name the response carries back.
+	if got := gotBody["integration"]["type"]; got != "webhook" {
+		t.Errorf("expected request type webhook, got %v", got)
+	}
+	if got := gotBody["integration"]["url"]; got != "https://example.com/hook" {
+		t.Errorf("expected request url, got %v", got)
+	}
+	if _, present := gotBody["integration"]["routing_key"]; present {
+		t.Error("expected unset fields to be omitted from the request body")
+	}
+	if result.Integration == nil || result.Integration.ID != 7 {
+		t.Fatalf("expected integration 7, got %+v", result.Integration)
+	}
+	if result.Webhook == nil {
+		t.Fatal("expected webhook verification block")
+	}
+	if result.Webhook.Secret != "whsec_generated" {
+		t.Errorf("expected generated signing secret, got %q", result.Webhook.Secret)
+	}
+	if result.Webhook.VerificationToken != "tok_abc" {
+		t.Errorf("expected verification token tok_abc, got %q", result.Webhook.VerificationToken)
+	}
+	if result.EmailVerification != nil {
+		t.Error("expected no email verification for a webhook")
+	}
+}
+
+func TestClient_CreateIntegration_Pagerduty(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{
+				"id": 8, "type": "PagerdutyIntegration", "name": "Ops",
+				"provider": "Pagerduty", "enabled": true, "verified": true,
+			},
+		})
+	})
+
+	result, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{
+		Type:       "pagerduty",
+		Name:       "Ops",
+		RoutingKey: "R0UT1NGK3Y",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gotBody["integration"]["routing_key"]; got != "R0UT1NGK3Y" {
+		t.Errorf("expected routing_key in request, got %v", got)
+	}
+	if result.Webhook != nil {
+		t.Error("expected no webhook block for pagerduty")
+	}
+	if !result.Integration.Verified {
+		t.Error("expected pagerduty integration to come back verified")
+	}
+}
+
+func TestClient_CreateIntegration_Email202(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "pending_verification",
+			"verification": map[string]interface{}{
+				"id": 42, "email": "ops@example.com",
+				"expires_at": "2026-09-01T00:15:00Z", "verify_path": "/api/v1/integrations/42/verify",
+			},
+		})
+	})
+
+	result, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{
+		Type:  "email",
+		Email: "ops@example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 202 means no channel was created — only a pending verification code.
+	if result.Integration != nil {
+		t.Errorf("expected no integration on 202, got %+v", result.Integration)
+	}
+	if result.EmailVerification == nil || result.EmailVerification.ID != 42 {
+		t.Fatalf("expected verification id 42, got %+v", result.EmailVerification)
+	}
+}
+
+func TestClient_CreateIntegration_422NotCreatable(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"errors": []string{"slack integrations must be connected from the dashboard"},
+		})
+	})
+
+	_, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{Type: "slack"})
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 422 {
+		t.Errorf("expected status 422, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestClient_CreateIntegration_403PlanGate(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "plan does not include PagerDuty alerts"})
+	})
+
+	_, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{Type: "pagerduty"})
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 403 {
+		t.Errorf("expected status 403, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestClient_DeleteIntegration(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" || r.URL.Path != "/api/v1/integrations/7" {
+			t.Errorf("expected DELETE /api/v1/integrations/7, got %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	if err := c.DeleteIntegration(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// Delete is the one integration call with no body to decode, so the status code
+// is the entire result. Swallowing a non-204 would drop the channel from state
+// while it still exists server-side and still delivers.
+func TestClient_DeleteIntegration_Errors(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
+		_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "nope"})
+		})
+
+		err := c.DeleteIntegration(context.Background(), 7)
+		apiErr, ok := err.(*APIError)
+		if !ok {
+			t.Fatalf("status %d: expected *APIError, got %T (%v)", status, err, err)
+		}
+		if apiErr.StatusCode != status {
+			t.Errorf("expected status %d, got %d", status, apiErr.StatusCode)
+		}
+	}
+}
+
+func TestClient_VerifyWebhookIntegration(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/integrations/7/verify_webhook" {
+			t.Errorf("expected POST /api/v1/integrations/7/verify_webhook, got %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{
+				"id": 7, "type": "WebhookIntegration", "verified": true, "enabled": true,
+			},
+		})
+	})
+
+	integration, err := c.VerifyWebhookIntegration(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !integration.Verified {
+		t.Error("expected verified true")
+	}
+}
+
+func TestClient_VerifyWebhookIntegration_422(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"errors": []string{"endpoint returned 404"},
+		})
+	})
+
+	_, err := c.VerifyWebhookIntegration(context.Background(), 7)
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 422 {
+		t.Errorf("expected status 422, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestClient_RegenerateWebhookToken(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/integrations/7/regenerate_webhook_token" {
+			t.Errorf("expected POST /api/v1/integrations/7/regenerate_webhook_token, got %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{"id": 7, "type": "WebhookIntegration", "verified": false},
+			"webhook": map[string]interface{}{
+				"verification_header":           "X-Fivenines-Verification",
+				"verification_token":            "tok_fresh",
+				"verification_token_expires_at": "2026-09-03T00:00:00Z",
+			},
+		})
+	})
+
+	integration, webhook, err := c.RegenerateWebhookToken(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if integration.ID != 7 {
+		t.Errorf("expected integration 7, got %d", integration.ID)
+	}
+	if webhook == nil || webhook.VerificationToken != "tok_fresh" {
+		t.Fatalf("expected fresh token, got %+v", webhook)
+	}
+	// Regenerating a token does not re-issue the signing secret.
+	if webhook.Secret != "" {
+		t.Errorf("expected no signing secret, got %q", webhook.Secret)
 	}
 }
 
@@ -824,7 +2003,7 @@ func TestClient_ListIncidents(t *testing.T) {
 					"updated_at": "2026-01-02T00:00:00Z",
 				},
 			},
-			"meta": map[string]int{"count": 2, "total": 2, "offset": 0},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 2, "per_page": 100},
 		})
 	})
 
@@ -916,6 +2095,7 @@ func TestClient_GetNetworkDevice(t *testing.T) {
 				"id": "dev-uuid", "name": "Core Switch", "ip_address": "192.168.1.1",
 				"device_type": "switch", "snmp_version": "v2c", "polling_interval": 60,
 				"status": "up", "maintenance_mode": false, "vendor": "Cisco", "model": "2960",
+				"consecutive_failures": 0, "last_error_type": nil, "last_error_message": nil,
 				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
 			},
 		})
@@ -928,8 +2108,47 @@ func TestClient_GetNetworkDevice(t *testing.T) {
 	if etag != `"dev-etag"` {
 		t.Errorf("expected etag %q, got %q", `"dev-etag"`, etag)
 	}
-	if dev.Vendor != "Cisco" {
-		t.Errorf("expected vendor Cisco, got %s", dev.Vendor)
+	if dev.Vendor == nil || *dev.Vendor != "Cisco" {
+		t.Errorf("expected vendor Cisco, got %v", dev.Vendor)
+	}
+	if dev.ConsecutiveFailures != 0 {
+		t.Errorf("expected consecutive_failures 0, got %d", dev.ConsecutiveFailures)
+	}
+	if dev.LastErrorType != nil {
+		t.Errorf("expected last_error_type nil, got %v", *dev.LastErrorType)
+	}
+	if dev.LastErrorMessage != nil {
+		t.Errorf("expected last_error_message nil, got %v", *dev.LastErrorMessage)
+	}
+}
+
+func TestClient_GetNetworkDevice_Unreachable(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"network_device": map[string]interface{}{
+				"id": "dev-uuid", "name": "Core Switch", "ip_address": "192.168.1.1",
+				"status": "unreachable", "consecutive_failures": 3,
+				"last_error_type": "timeout", "last_error_message": "no response after 5s",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	dev, _, err := c.GetNetworkDevice(context.Background(), "dev-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dev.Status == nil || *dev.Status != "unreachable" {
+		t.Errorf("expected status unreachable, got %v", dev.Status)
+	}
+	if dev.ConsecutiveFailures != 3 {
+		t.Errorf("expected consecutive_failures 3, got %d", dev.ConsecutiveFailures)
+	}
+	if dev.LastErrorType == nil || *dev.LastErrorType != "timeout" {
+		t.Errorf("expected last_error_type timeout, got %v", dev.LastErrorType)
+	}
+	if dev.LastErrorMessage == nil || *dev.LastErrorMessage != "no response after 5s" {
+		t.Errorf("expected last_error_message set, got %v", dev.LastErrorMessage)
 	}
 }
 
@@ -937,9 +2156,12 @@ func TestClient_DeleteNetworkDevice_202(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 	})
-	err := c.DeleteNetworkDevice(context.Background(), "dev-uuid")
+	accepted, err := c.DeleteNetworkDevice(context.Background(), "dev-uuid")
 	if err != nil {
 		t.Fatalf("expected no error for 202, got: %v", err)
+	}
+	if !accepted {
+		t.Error("expected 202 to report an asynchronous deletion")
 	}
 }
 
@@ -949,12 +2171,36 @@ func TestClient_EnterMaintenanceNetworkDevice(t *testing.T) {
 			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"network_device": map[string]interface{}{"id": "dev-uuid", "maintenance_mode": true},
+			"network_device": map[string]interface{}{"id": "dev-uuid", "maintenance_mode": true, "status": "up"},
 		})
 	})
-	err := c.EnterMaintenanceNetworkDevice(context.Background(), "dev-uuid")
+	dev, err := c.EnterMaintenanceNetworkDevice(context.Background(), "dev-uuid")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !dev.MaintenanceMode {
+		t.Error("expected maintenance_mode true in the returned device")
+	}
+	if dev.Status == nil || *dev.Status != "up" {
+		t.Errorf("expected status up in the returned device, got %v", dev.Status)
+	}
+}
+
+func TestClient_ExitMaintenanceNetworkDevice(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/network_devices/dev-uuid/exit_maintenance" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"network_device": map[string]interface{}{"id": "dev-uuid", "maintenance_mode": false},
+		})
+	})
+	dev, err := c.ExitMaintenanceNetworkDevice(context.Background(), "dev-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dev.MaintenanceMode {
+		t.Error("expected maintenance_mode false in the returned device")
 	}
 }
 
@@ -1017,8 +2263,8 @@ func TestClient_GetStatusPage(t *testing.T) {
 	if page.Items[0].ItemType != "Host" {
 		t.Errorf("expected first item type Host, got %s", page.Items[0].ItemType)
 	}
-	if page.ThemeVariant != "dark" {
-		t.Errorf("expected theme_variant dark, got %s", page.ThemeVariant)
+	if page.ThemeVariant == nil || *page.ThemeVariant != "dark" {
+		t.Errorf("expected theme_variant dark, got %v", page.ThemeVariant)
 	}
 }
 
@@ -1029,380 +2275,6 @@ func TestClient_DeleteStatusPage(t *testing.T) {
 	err := c.DeleteStatusPage(context.Background(), 1)
 	if err != nil {
 		t.Fatalf("expected no error for 204, got: %v", err)
-	}
-}
-
-// --- MQTT Brokers ---
-
-// brokerResponse is the read shape the API renders back: no username or
-// password, only whether one is stored.
-func brokerResponse(overrides map[string]interface{}) map[string]interface{} {
-	broker := map[string]interface{}{
-		"id": "broker-uuid", "name": "Factory-floor Mosquitto", "host": "mqtt.internal",
-		"port": 1883, "tls": false, "username_set": true, "password_set": true,
-		"watcher_host_id": "host-uuid", "status": "connected", "stale": false,
-		"topic_monitor_count": 300,
-		"created_at":          "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-	}
-	for k, v := range overrides {
-		broker[k] = v
-	}
-	return map[string]interface{}{"mqtt_broker": broker}
-}
-
-func TestClient_CreateMQTTBroker(t *testing.T) {
-	var gotBody map[string]map[string]interface{}
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.URL.Path != "/api/v1/mqtt_brokers" {
-			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
-		}
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(brokerResponse(nil))
-	})
-
-	watcher := "host-uuid"
-	broker, err := c.CreateMQTTBroker(context.Background(), MQTTBrokerInput{
-		Name: "Factory-floor Mosquitto", Host: "mqtt.internal", Port: 1883, TLS: false,
-		WatcherHostID: &watcher,
-		Username:      SetCredential("factory"),
-		Password:      SetCredential("s3cret"),
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if broker.ID != "broker-uuid" {
-		t.Errorf("expected ID broker-uuid, got %s", broker.ID)
-	}
-	if !broker.UsernameSet || !broker.PasswordSet {
-		t.Error("expected username_set and password_set to be true")
-	}
-	if broker.TopicMonitorCount != 300 {
-		t.Errorf("expected topic_monitor_count 300, got %d", broker.TopicMonitorCount)
-	}
-	if got := gotBody["mqtt_broker"]["username"]; got != "factory" {
-		t.Errorf("expected username factory, got %v", got)
-	}
-	if got := gotBody["mqtt_broker"]["password"]; got != "s3cret" {
-		t.Errorf("expected password s3cret, got %v", got)
-	}
-}
-
-// A credential the caller did not touch must not reach the wire at all: the
-// value is unreadable, so re-sending a blank would either wipe it or (per the
-// API's blank-means-keep rule) mean nothing. Omission is what says "keep".
-func TestClient_MQTTBroker_KeptCredentialsAreOmitted(t *testing.T) {
-	var gotBody map[string]map[string]interface{}
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		json.NewEncoder(w).Encode(brokerResponse(nil))
-	})
-
-	_, err := c.UpdateMQTTBroker(context.Background(), "broker-uuid", "", MQTTBrokerInput{
-		Name: "Factory-floor Mosquitto", Host: "mqtt.internal", Port: 8883, TLS: true,
-		Username: KeepCredential(),
-		Password: KeepCredential(),
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, present := gotBody["mqtt_broker"]["username"]; present {
-		t.Error("expected username to be omitted when kept")
-	}
-	if _, present := gotBody["mqtt_broker"]["password"]; present {
-		t.Error("expected password to be omitted when kept")
-	}
-}
-
-// Clearing is the other half: only an explicit null removes a stored credential.
-func TestClient_MQTTBroker_ClearedCredentialsSendNull(t *testing.T) {
-	var gotBody map[string]map[string]interface{}
-	var gotIfMatch string
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		gotIfMatch = r.Header.Get("If-Match")
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		json.NewEncoder(w).Encode(brokerResponse(map[string]interface{}{
-			"username_set": false, "password_set": false,
-		}))
-	})
-
-	broker, err := c.UpdateMQTTBroker(context.Background(), "broker-uuid", `"broker-etag"`, MQTTBrokerInput{
-		Name: "Factory-floor Mosquitto", Host: "mqtt.internal", Port: 1883,
-		Username: ClearCredential(),
-		Password: ClearCredential(),
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if gotIfMatch != `"broker-etag"` {
-		t.Errorf("expected If-Match %q, got %q", `"broker-etag"`, gotIfMatch)
-	}
-	body := gotBody["mqtt_broker"]
-	if v, present := body["username"]; !present || v != nil {
-		t.Errorf("expected explicit null username, got %v (present=%v)", v, present)
-	}
-	if v, present := body["password"]; !present || v != nil {
-		t.Errorf("expected explicit null password, got %v (present=%v)", v, present)
-	}
-	if broker.UsernameSet || broker.PasswordSet {
-		t.Error("expected username_set and password_set to be false after clearing")
-	}
-}
-
-// Unassigning the watcher host is a normal nullable field, not a credential:
-// nil has to marshal as null rather than disappear, or the broker keeps
-// collecting after Terraform says it should not.
-func TestClient_MQTTBroker_NilWatcherHostSendsNull(t *testing.T) {
-	var gotBody map[string]map[string]interface{}
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		json.NewEncoder(w).Encode(brokerResponse(map[string]interface{}{"watcher_host_id": nil}))
-	})
-
-	broker, err := c.UpdateMQTTBroker(context.Background(), "broker-uuid", "", MQTTBrokerInput{
-		Name: "Factory-floor Mosquitto", Host: "mqtt.internal", Port: 1883,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if v, present := gotBody["mqtt_broker"]["watcher_host_id"]; !present || v != nil {
-		t.Errorf("expected explicit null watcher_host_id, got %v (present=%v)", v, present)
-	}
-	if broker.WatcherHostID != nil {
-		t.Errorf("expected nil watcher_host_id, got %v", *broker.WatcherHostID)
-	}
-}
-
-func TestClient_GetMQTTBroker(t *testing.T) {
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		w.Header().Set("ETag", `"broker-etag"`)
-		json.NewEncoder(w).Encode(brokerResponse(map[string]interface{}{
-			"status": "config_error", "stale": true,
-			"last_error_message": "Connection refused: not authorised",
-			"last_connected_at":  "2026-01-01T00:00:00Z",
-			"last_synced_at":     "2026-01-01T00:05:00Z",
-		}))
-	})
-
-	broker, etag, err := c.GetMQTTBroker(context.Background(), "broker-uuid")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if etag != `"broker-etag"` {
-		t.Errorf("expected etag %q, got %q", `"broker-etag"`, etag)
-	}
-	if broker.Status != "config_error" {
-		t.Errorf("expected status config_error, got %s", broker.Status)
-	}
-	if !broker.Stale {
-		t.Error("expected stale true")
-	}
-	if broker.LastErrorMessage == nil || *broker.LastErrorMessage != "Connection refused: not authorised" {
-		t.Errorf("expected last_error_message, got %v", broker.LastErrorMessage)
-	}
-}
-
-func TestClient_ListMQTTBrokers_Pagination(t *testing.T) {
-	var requestCount int32
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		page := atomic.AddInt32(&requestCount, 1)
-		offset := 0
-		id := "a"
-		if page != 1 {
-			offset, id = 1, "b"
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"mqtt_brokers": []map[string]interface{}{{"id": id, "name": id, "host": "mqtt.internal"}},
-			"meta":         map[string]int{"count": 1, "total": 2, "offset": offset},
-		})
-	})
-
-	brokers, err := c.ListMQTTBrokers(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(brokers) != 2 {
-		t.Errorf("expected 2 brokers, got %d", len(brokers))
-	}
-}
-
-func TestClient_DeleteMQTTBroker(t *testing.T) {
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "DELETE" || r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid" {
-			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-	if err := c.DeleteMQTTBroker(context.Background(), "broker-uuid"); err != nil {
-		t.Fatalf("expected no error for 204, got: %v", err)
-	}
-}
-
-// MQTT is a gated feature, so a 403 is an org entitlement rather than a bad key.
-func TestClient_MQTTBroker_FeatureDisabled_403(t *testing.T) {
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusForbidden)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": "MQTT monitoring is not available for your organization",
-		})
-	})
-
-	_, err := c.CreateMQTTBroker(context.Background(), MQTTBrokerInput{Name: "b", Host: "h", Port: 1883})
-	apiErr, ok := err.(*APIError)
-	if !ok {
-		t.Fatalf("expected *APIError, got %T", err)
-	}
-	if apiErr.StatusCode != http.StatusForbidden {
-		t.Errorf("expected 403, got %d", apiErr.StatusCode)
-	}
-	if apiErr.Message != "MQTT monitoring is not available for your organization" {
-		t.Errorf("unexpected message: %s", apiErr.Message)
-	}
-}
-
-// --- MQTT Topic Monitors ---
-
-func topicMonitorResponse(overrides map[string]interface{}) map[string]interface{} {
-	monitor := map[string]interface{}{
-		"id": "monitor-uuid", "mqtt_broker_id": "broker-uuid",
-		"topic_filter": "sensors/+/temperature", "stale_after_seconds": 300,
-		"match_kind": nil, "expected_value": nil, "json_key": nil,
-		"capture_payload": true, "effective_capture_payload": true,
-		"freshness_check": true, "payload_check": false, "exact_topic": false,
-		"subscribed_since": nil, "capped": false,
-		"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-	}
-	for k, v := range overrides {
-		monitor[k] = v
-	}
-	return map[string]interface{}{"topic_monitor": monitor}
-}
-
-func TestClient_CreateMQTTTopicMonitor(t *testing.T) {
-	var gotBody map[string]map[string]interface{}
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" || r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid/topic_monitors" {
-			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
-		}
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(topicMonitorResponse(nil))
-	})
-
-	stale := int64(300)
-	monitor, err := c.CreateMQTTTopicMonitor(context.Background(), "broker-uuid", MQTTTopicMonitorInput{
-		TopicFilter: "sensors/+/temperature", StaleAfterSeconds: &stale, CapturePayload: true,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if monitor.ID != "monitor-uuid" {
-		t.Errorf("expected ID monitor-uuid, got %s", monitor.ID)
-	}
-	if !monitor.FreshnessCheck || monitor.PayloadCheck {
-		t.Error("expected a freshness check and no payload check")
-	}
-	if got := gotBody["topic_monitor"]["stale_after_seconds"]; got != float64(300) {
-		t.Errorf("expected stale_after_seconds 300, got %v", got)
-	}
-}
-
-func TestClient_GetMQTTTopicMonitor(t *testing.T) {
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid/topic_monitors/monitor-uuid" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		w.Header().Set("ETag", `"monitor-etag"`)
-		json.NewEncoder(w).Encode(topicMonitorResponse(map[string]interface{}{
-			"topic_filter": "devices/pump-1/status", "stale_after_seconds": nil,
-			"match_kind": "exact", "expected_value": "online",
-			"capture_payload": false, "effective_capture_payload": true,
-			"freshness_check": false, "payload_check": true, "exact_topic": true,
-			"subscribed_since": "2026-01-01T00:00:00Z",
-		}))
-	})
-
-	monitor, etag, err := c.GetMQTTTopicMonitor(context.Background(), "broker-uuid", "monitor-uuid")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if etag != `"monitor-etag"` {
-		t.Errorf("expected etag %q, got %q", `"monitor-etag"`, etag)
-	}
-	if monitor.StaleAfterSeconds != nil {
-		t.Errorf("expected nil stale_after_seconds, got %d", *monitor.StaleAfterSeconds)
-	}
-	if monitor.MatchKind == nil || *monitor.MatchKind != "exact" {
-		t.Errorf("expected match_kind exact, got %v", monitor.MatchKind)
-	}
-	// A payload expectation forces capture on, whatever the stored flag says.
-	if monitor.CapturePayload || !monitor.EffectiveCapturePayload {
-		t.Error("expected capture_payload false and effective_capture_payload true")
-	}
-	if !monitor.ExactTopic {
-		t.Error("expected exact_topic true for a wildcard-free filter")
-	}
-}
-
-// Dropping a check has to reach the API as an explicit null; an omitted key
-// would leave the old expectation in place.
-func TestClient_UpdateMQTTTopicMonitor_NullClearsPayloadCheck(t *testing.T) {
-	var gotBody map[string]map[string]interface{}
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "PATCH" || r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid/topic_monitors/monitor-uuid" {
-			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
-		}
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		json.NewEncoder(w).Encode(topicMonitorResponse(nil))
-	})
-
-	stale := int64(300)
-	_, err := c.UpdateMQTTTopicMonitor(context.Background(), "broker-uuid", "monitor-uuid", "", MQTTTopicMonitorInput{
-		TopicFilter: "sensors/+/temperature", StaleAfterSeconds: &stale, CapturePayload: true,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	for _, key := range []string{"match_kind", "expected_value", "json_key"} {
-		v, present := gotBody["topic_monitor"][key]
-		if !present || v != nil {
-			t.Errorf("expected explicit null %s, got %v (present=%v)", key, v, present)
-		}
-	}
-}
-
-func TestClient_DeleteMQTTTopicMonitor(t *testing.T) {
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "DELETE" || r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid/topic_monitors/monitor-uuid" {
-			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
-	if err := c.DeleteMQTTTopicMonitor(context.Background(), "broker-uuid", "monitor-uuid"); err != nil {
-		t.Fatalf("expected no error for 204, got: %v", err)
-	}
-}
-
-// Topic monitors are the billable unit, so a create at the plan limit is a 422.
-func TestClient_CreateMQTTTopicMonitor_MonitorLimit_422(t *testing.T) {
-	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		json.NewEncoder(w).Encode(map[string]string{"error": "Monitor limit reached for your plan"})
-	})
-
-	stale := int64(300)
-	_, err := c.CreateMQTTTopicMonitor(context.Background(), "broker-uuid", MQTTTopicMonitorInput{
-		TopicFilter: "sensors/#", StaleAfterSeconds: &stale, CapturePayload: true,
-	})
-	apiErr, ok := err.(*APIError)
-	if !ok {
-		t.Fatalf("expected *APIError, got %T", err)
-	}
-	if apiErr.StatusCode != http.StatusUnprocessableEntity {
-		t.Errorf("expected 422, got %d", apiErr.StatusCode)
 	}
 }
 
@@ -1418,5 +2290,327 @@ func TestClient_RateLimit_ContextCancellation(t *testing.T) {
 	_, err := c.ListProbeRegions(ctx)
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
+	}
+}
+
+// --- Update input clearing convention, outside the uptime monitor ---
+//
+// The same tag convention #9 established for protocol-scoped monitor fields
+// applies to the Optional-only attributes on the other resources: no omitempty,
+// so a nil pointer reaches the API as an explicit null and clears the value.
+
+func TestClient_UpdateTask_SendsNullForUnsetHostID(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"task": map[string]interface{}{
+				"id": "task-uuid", "name": "backup", "schedule_type": "interval", "status": "active",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+			},
+		})
+	})
+
+	name := "backup"
+	if _, err := c.UpdateTask(context.Background(), "task-uuid", "", UpdateTaskInput{Name: &name}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	task := gotBody["task"].(map[string]interface{})
+	value, present := task["host_id"]
+	if !present {
+		t.Fatal("expected host_id to be sent as an explicit null, key was omitted")
+	}
+	if value != nil {
+		t.Errorf("expected host_id to be null, got %v", value)
+	}
+	// schedule/interval_seconds are Optional+Computed: the API keeps the
+	// counterpart it stored across a schedule_type switch, so they stay omitted.
+	for _, key := range []string{"schedule", "interval_seconds"} {
+		if _, ok := task[key]; ok {
+			t.Errorf("expected %s to be omitted when nil", key)
+		}
+	}
+}
+
+func TestClient_UpdateNetworkDevice_ClearsIDsButKeepsSecrets(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"network_device": map[string]interface{}{
+				"id": "dev-uuid", "name": "core-sw", "ip_address": "192.0.2.1",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+			},
+		})
+	})
+
+	name := "core-sw"
+	if _, err := c.UpdateNetworkDevice(context.Background(), "dev-uuid", "", UpdateNetworkDeviceInput{Name: &name}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	device := gotBody["network_device"].(map[string]interface{})
+	for _, key := range []string{"polling_host_id", "snmp_username"} {
+		value, present := device[key]
+		if !present {
+			t.Errorf("expected %s to be sent as an explicit null, key was omitted", key)
+			continue
+		}
+		if value != nil {
+			t.Errorf("expected %s to be null, got %v", key, value)
+		}
+	}
+	// The write-only credentials are blank-means-keep server-side. Sending null
+	// would wipe a working credential on every unrelated update.
+	for _, key := range []string{"snmp_community", "snmp_auth_password", "snmp_priv_password"} {
+		if _, ok := device[key]; ok {
+			t.Errorf("expected %s to be omitted when unset, not sent as null", key)
+		}
+	}
+}
+
+func TestClient_UpdateStatusPage_EmptyItems(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status_page": map[string]interface{}{
+				"id": 1, "name": "Status", "slug": "status",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+			},
+		})
+	})
+
+	// Emptying a page needs an explicit []. A plain []StatusPageItem with
+	// omitempty marshals an empty list to nothing, which the API reads as
+	// "preserve the current items", so a page could never be emptied.
+	name := "Status"
+	if _, err := c.UpdateStatusPage(context.Background(), 1, "", UpdateStatusPageInput{
+		Name:  &name,
+		Items: &[]StatusPageItemInput{},
+	}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	page := gotBody["status_page"].(map[string]interface{})
+	items, present := page["items"]
+	if !present {
+		t.Fatal("expected items to be sent as an explicit [], key was omitted")
+	}
+	if list, ok := items.([]interface{}); !ok || len(list) != 0 {
+		t.Errorf("expected items to be [], got %v", items)
+	}
+
+	// Leaving items unmanaged must not touch them.
+	if _, err := c.UpdateStatusPage(context.Background(), 1, "", UpdateStatusPageInput{Name: &name}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	page = gotBody["status_page"].(map[string]interface{})
+	if _, ok := page["items"]; ok {
+		t.Error("expected items to be omitted when the pointer is nil")
+	}
+}
+
+// shrinkDeletionPolling makes the poll tests run in milliseconds instead of
+// sleeping at the production pace. Without it the deletion tests alone add
+// several seconds to every run of this package.
+func shrinkDeletionPolling(t *testing.T) {
+	t.Helper()
+	interval, maxInterval := deletionPollInterval, deletionPollMaxInterval
+	deletionPollInterval, deletionPollMaxInterval = time.Millisecond, 5*time.Millisecond
+	t.Cleanup(func() {
+		deletionPollInterval, deletionPollMaxInterval = interval, maxInterval
+	})
+}
+
+// A syntactically bad body will be just as bad next time, so it must not burn
+// the whole timeout window. Driven end to end: classifying on a message string
+// would pin nothing about the production path.
+func TestClient_WaitForInstanceDeletion_MalformedBodyFailsFast(t *testing.T) {
+	shrinkDeletionPolling(t)
+	var gets int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&gets, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("{ this is not json"))
+	})
+
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second)
+	if err == nil {
+		t.Fatal("expected an undecodable body to fail")
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected a fast failure, not a timeout: %v", err)
+	}
+	if got := atomic.LoadInt32(&gets); got != 1 {
+		t.Errorf("expected a single poll, got %d", got)
+	}
+}
+
+// A read that dies in transit is the transport failing, not the server sending
+// garbage — the case retrying exists for.
+func TestRetryablePoll_TruncatedReadIsRetried(t *testing.T) {
+	if !retryablePoll(fmt.Errorf("decoding response: %w", io.ErrUnexpectedEOF)) {
+		t.Error("expected a truncated read to be retried")
+	}
+	if retryablePoll(fmt.Errorf("%w: bad", errMalformedBody)) {
+		t.Error("expected a malformed body to fail fast")
+	}
+}
+
+// 429 is the one 4xx that fixes itself, and a fleet destroy is exactly the
+// workload that trips the limiter.
+func TestRetryablePoll_RateLimitIsRetried(t *testing.T) {
+	if !retryablePoll(&APIError{StatusCode: http.StatusTooManyRequests}) {
+		t.Error("expected 429 to be retried")
+	}
+}
+
+// deletionDone must see through a wrapped API error, or a 404 that arrives
+// wrapped reads as "still there" and the poll runs to timeout on a resource
+// that is already gone.
+func TestDeletionDone_UnwrapsAPIError(t *testing.T) {
+	wrapped := fmt.Errorf("checking instance: %w", &APIError{StatusCode: http.StatusNotFound})
+	done, err := deletionDone(wrapped)
+	if err != nil || !done {
+		t.Errorf("expected a wrapped 404 to report done, got (%v, %v)", done, err)
+	}
+}
+
+// --- deletion poll: the conditions that had no test before ---
+//
+// The poll took three fix cycles and each fix introduced the next defect, so the
+// terminal and transient conditions are enumerated rather than sampled. These
+// five cells were previously covered only by unit assertions on retryablePoll,
+// or not at all.
+
+// deletionPollServer answers `first` for the first n polls, then 404s.
+func deletionPollServer(t *testing.T, n int32, first http.HandlerFunc) (*Client, *int32) {
+	t.Helper()
+	var polls int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&polls, 1) <= n {
+			first(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not found"})
+	})
+	return c, &polls
+}
+
+func statusHandler(code int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(code)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "transient"})
+	}
+}
+
+// A fleet destroy at parallelism 10 is exactly the workload that trips the
+// limiter. doRequest absorbs a 429 itself, so the poll's own 429 branch is only
+// reachable once doRequest EXHAUSTS its five internal retries and hands the 429
+// up — which is what this drives. Retry-After: 0 keeps doRequest's own backoff
+// from adding a minute of sleeping.
+func TestClient_WaitForInstanceDeletion_RetriesExhaustedRateLimit(t *testing.T) {
+	shrinkDeletionPolling(t)
+
+	// doRequest makes 1 + 5 attempts before giving up, so 6 x 429 exhausts one
+	// poll; the seventh request is the next poll and reports the deletion.
+	c, requests := deletionPollServer(t, 6, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "rate limited"})
+	})
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("expected an exhausted 429 to be retried by the poll, got: %v", err)
+	}
+	if got := atomic.LoadInt32(requests); got != 7 {
+		t.Errorf("expected 6 rate-limited attempts then the 404, got %d requests", got)
+	}
+}
+
+func TestClient_WaitForInstanceDeletion_RetriesRequestTimeoutEndToEnd(t *testing.T) {
+	shrinkDeletionPolling(t)
+	c, polls := deletionPollServer(t, 1, statusHandler(http.StatusRequestTimeout))
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("expected the 408 to be retried, got: %v", err)
+	}
+	if got := atomic.LoadInt32(polls); got != 2 {
+		t.Errorf("expected a retry after the 408, got %d polls", got)
+	}
+}
+
+// The regression cycle 3 introduced and two reviewers demonstrated: a connection
+// dropped mid-body surfaces through the same wrapper as a syntactically bad
+// payload, and must stay retryable. Driven end to end, not through retryablePoll.
+func TestClient_WaitForInstanceDeletion_RetriesTruncatedReadEndToEnd(t *testing.T) {
+	shrinkDeletionPolling(t)
+	c, polls := deletionPollServer(t, 1, func(w http.ResponseWriter, r *http.Request) {
+		// Promise more than we send, then kill the connection mid-body.
+		w.Header().Set("Content-Length", "500")
+		w.Write([]byte(`{"instance":{"id":"abc`))
+		if hijacker, ok := w.(http.Hijacker); ok {
+			conn, _, err := hijacker.Hijack()
+			if err == nil {
+				conn.Close()
+			}
+		}
+	})
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("expected a truncated read to be retried, got: %v", err)
+	}
+	if got := atomic.LoadInt32(polls); got != 2 {
+		t.Errorf("expected a retry after the truncated read, got %d polls", got)
+	}
+}
+
+// Ctrl+C between polls, not during one — the poll spends most of its life
+// asleep, so this is the likeliest moment to be interrupted.
+func TestClient_WaitForInstanceDeletion_CancelDuringBackoffSleep(t *testing.T) {
+	interval, maxInterval := deletionPollInterval, deletionPollMaxInterval
+	deletionPollInterval, deletionPollMaxInterval = 50*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { deletionPollInterval, deletionPollMaxInterval = interval, maxInterval })
+
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instance": map[string]interface{}{
+				"id": "abc-123", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond) // lands inside the 50ms sleep
+		cancel()
+	}()
+
+	err := c.WaitForInstanceDeletion(ctx, "abc-123", 30*time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled when interrupted between polls, got: %v", err)
+	}
+}
+
+// Without a cap the interval doubles unboundedly and a slow teardown spends the
+// back half of its window asleep instead of polling.
+func TestWaitForDeletion_BackoffCaps(t *testing.T) {
+	interval, maxInterval := deletionPollInterval, deletionPollMaxInterval
+	deletionPollInterval, deletionPollMaxInterval = time.Millisecond, 4*time.Millisecond
+	t.Cleanup(func() { deletionPollInterval, deletionPollMaxInterval = interval, maxInterval })
+
+	var polls int
+	_ = waitForDeletion(context.Background(), 60*time.Millisecond, func(context.Context) (bool, error) {
+		polls++
+		return false, nil
+	})
+
+	// Uncapped, 1ms doubling reaches 64ms and fits ~7 polls in the window.
+	// Capped at 4ms it manages appreciably more.
+	if polls < 10 {
+		t.Errorf("expected the backoff to cap and keep polling, got %d polls in 60ms", polls)
 	}
 }

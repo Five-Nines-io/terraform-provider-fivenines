@@ -226,7 +226,14 @@ func (r *mqttTopicMonitorResource) Create(ctx context.Context, req resource.Crea
 	}
 
 	brokerID := plan.MQTTBrokerID.ValueString()
-	input := mqttTopicMonitorInput(plan)
+	input := client.CreateMQTTTopicMonitorInput{
+		TopicFilter:       plan.TopicFilter.ValueString(),
+		StaleAfterSeconds: int64Ptr(plan.StaleAfterSeconds),
+		MatchKind:         stringPtr(plan.MatchKind),
+		ExpectedValue:     stringPtr(plan.ExpectedValue),
+		JSONKey:           stringPtr(plan.JSONKey),
+		CapturePayload:    boolPtr(plan.CapturePayload),
+	}
 
 	tflog.Debug(ctx, "Creating MQTT topic monitor", map[string]interface{}{
 		"mqtt_broker_id": brokerID,
@@ -235,7 +242,7 @@ func (r *mqttTopicMonitorResource) Create(ctx context.Context, req resource.Crea
 
 	monitor, err := r.client.CreateMQTTTopicMonitor(ctx, brokerID, input)
 	if err != nil {
-		addMQTTAPIError(&resp.Diagnostics, "Error creating MQTT topic monitor", err)
+		resp.Diagnostics.AddError("Error creating MQTT topic monitor", mqttErrorDetail(err))
 		return
 	}
 
@@ -258,7 +265,7 @@ func (r *mqttTopicMonitorResource) Read(ctx context.Context, req resource.ReadRe
 			resp.State.RemoveResource(ctx)
 			return
 		}
-		addMQTTAPIError(&resp.Diagnostics, "Error reading MQTT topic monitor", err)
+		resp.Diagnostics.AddError("Error reading MQTT topic monitor", mqttErrorDetail(err))
 		return
 	}
 
@@ -281,14 +288,24 @@ func (r *mqttTopicMonitorResource) Update(ctx context.Context, req resource.Upda
 
 	brokerID := state.MQTTBrokerID.ValueString()
 	id := state.ID.ValueString()
-	input := mqttTopicMonitorInput(plan)
+	// Every check is sent on every update: dropping one from the configuration
+	// has to reach the API as an explicit null, or a monitor could never lose a
+	// check it once had. The tags on UpdateMQTTTopicMonitorInput carry that.
+	input := client.UpdateMQTTTopicMonitorInput{
+		TopicFilter:       stringPtr(plan.TopicFilter),
+		StaleAfterSeconds: int64Ptr(plan.StaleAfterSeconds),
+		MatchKind:         stringPtr(plan.MatchKind),
+		ExpectedValue:     stringPtr(plan.ExpectedValue),
+		JSONKey:           stringPtr(plan.JSONKey),
+		CapturePayload:    boolPtr(plan.CapturePayload),
+	}
 
 	// ETag retry loop
 	var monitor *client.MQTTTopicMonitor
 	for attempt := 0; attempt < 3; attempt++ {
 		_, etag, err := r.client.GetMQTTTopicMonitor(ctx, brokerID, id)
 		if err != nil {
-			addMQTTAPIError(&resp.Diagnostics, "Error reading MQTT topic monitor for update", err)
+			resp.Diagnostics.AddError("Error reading MQTT topic monitor for update", mqttErrorDetail(err))
 			return
 		}
 		monitor, err = r.client.UpdateMQTTTopicMonitor(ctx, brokerID, id, etag, input)
@@ -297,7 +314,7 @@ func (r *mqttTopicMonitorResource) Update(ctx context.Context, req resource.Upda
 				tflog.Debug(ctx, "ETag mismatch on MQTT topic monitor update, retrying", map[string]interface{}{"attempt": attempt + 1})
 				continue
 			}
-			addMQTTAPIError(&resp.Diagnostics, "Error updating MQTT topic monitor", err)
+			resp.Diagnostics.AddError("Error updating MQTT topic monitor", mqttErrorDetail(err))
 			return
 		}
 		break
@@ -321,7 +338,7 @@ func (r *mqttTopicMonitorResource) Delete(ctx context.Context, req resource.Dele
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
 		}
-		addMQTTAPIError(&resp.Diagnostics, "Error deleting MQTT topic monitor", err)
+		resp.Diagnostics.AddError("Error deleting MQTT topic monitor", mqttErrorDetail(err))
 	}
 }
 
@@ -341,29 +358,11 @@ func (r *mqttTopicMonitorResource) ImportState(ctx context.Context, req resource
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.StringValue(id))...)
 }
 
-// mqttTopicMonitorInput builds the write shape. Every check is sent on every
-// write: dropping one from the configuration has to reach the API as an explicit
-// null, or a monitor could never lose a check it once had.
-func mqttTopicMonitorInput(plan mqttTopicMonitorModel) client.MQTTTopicMonitorInput {
-	return client.MQTTTopicMonitorInput{
-		TopicFilter:       plan.TopicFilter.ValueString(),
-		StaleAfterSeconds: int64Pointer(plan.StaleAfterSeconds),
-		MatchKind:         stringPointer(plan.MatchKind),
-		ExpectedValue:     stringPointer(plan.ExpectedValue),
-		JSONKey:           stringPointer(plan.JSONKey),
-		CapturePayload:    plan.CapturePayload.ValueBool(),
-	}
-}
-
 func mapMQTTTopicMonitorToState(m *client.MQTTTopicMonitor, state *mqttTopicMonitorModel) {
 	state.ID = types.StringValue(m.ID)
 	state.MQTTBrokerID = types.StringValue(m.MQTTBrokerID)
 	state.TopicFilter = types.StringValue(m.TopicFilter)
-	if m.StaleAfterSeconds != nil {
-		state.StaleAfterSeconds = types.Int64Value(*m.StaleAfterSeconds)
-	} else {
-		state.StaleAfterSeconds = types.Int64Null()
-	}
+	state.StaleAfterSeconds = optionalInt64(m.StaleAfterSeconds)
 	state.MatchKind = optionalString(m.MatchKind)
 	state.ExpectedValue = optionalString(m.ExpectedValue)
 	state.JSONKey = optionalString(m.JSONKey)

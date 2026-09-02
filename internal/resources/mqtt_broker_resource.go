@@ -2,14 +2,12 @@ package resources
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
-	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -98,19 +96,21 @@ func (r *mqttBrokerResource) Schema(_ context.Context, _ resource.SchemaRequest,
 			},
 			"username": schema.StringAttribute{
 				Description: "Broker username. Write-only — the API never returns it, so `username_set` reports " +
-					"whether one is stored. Removing the attribute clears the stored username; a broker imported " +
-					"with credentials keeps them until Terraform is given a value to change.",
+					"whether one is stored. Setting it rotates the stored value; dropping it from the " +
+					"configuration leaves that value alone rather than wiping a credential Terraform cannot " +
+					"read back. Clear one from the dashboard.",
 				Optional:  true,
 				Sensitive: true,
 				Validators: []validator.String{
 					// An empty string means "keep the stored value" to the API, which would
-					// leave state claiming "" while the server still holds a credential.
+					// leave state claiming "" while the server still holds a credential. The
+					// same reason task.host_id and instance secrets reject one.
 					stringvalidator.LengthAtLeast(1),
 				},
 			},
 			"password": schema.StringAttribute{
 				Description: "Broker password. Write-only — the API never returns it, so `password_set` reports " +
-					"whether one is stored.",
+					"whether one is stored. Same preserve-on-omission rule as `username`.",
 				Optional:  true,
 				Sensitive: true,
 				Validators: []validator.String{
@@ -190,22 +190,21 @@ func (r *mqttBrokerResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 
-	input := client.MQTTBrokerInput{
+	input := client.CreateMQTTBrokerInput{
 		Name:          plan.Name.ValueString(),
 		Host:          plan.Host.ValueString(),
-		Port:          int(plan.Port.ValueInt64()),
-		TLS:           plan.TLS.ValueBool(),
-		WatcherHostID: stringPointer(plan.WatcherHostID),
-		// Nothing is stored yet, so an unconfigured credential is simply omitted.
-		Username: credentialWrite(plan.Username, types.StringNull()),
-		Password: credentialWrite(plan.Password, types.StringNull()),
+		Port:          intPtr(plan.Port),
+		TLS:           boolPtr(plan.TLS),
+		Username:      stringPtr(plan.Username),
+		Password:      stringPtr(plan.Password),
+		WatcherHostID: stringPtr(plan.WatcherHostID),
 	}
 
 	tflog.Debug(ctx, "Creating MQTT broker", map[string]interface{}{"name": input.Name, "host": input.Host})
 
 	broker, err := r.client.CreateMQTTBroker(ctx, input)
 	if err != nil {
-		addMQTTAPIError(&resp.Diagnostics, "Error creating MQTT broker", err)
+		resp.Diagnostics.AddError("Error creating MQTT broker", mqttErrorDetail(err))
 		return
 	}
 
@@ -226,7 +225,7 @@ func (r *mqttBrokerResource) Read(ctx context.Context, req resource.ReadRequest,
 			resp.State.RemoveResource(ctx)
 			return
 		}
-		addMQTTAPIError(&resp.Diagnostics, "Error reading MQTT broker", err)
+		resp.Diagnostics.AddError("Error reading MQTT broker", mqttErrorDetail(err))
 		return
 	}
 
@@ -248,14 +247,15 @@ func (r *mqttBrokerResource) Update(ctx context.Context, req resource.UpdateRequ
 	}
 
 	id := state.ID.ValueString()
-	input := client.MQTTBrokerInput{
-		Name:          plan.Name.ValueString(),
-		Host:          plan.Host.ValueString(),
-		Port:          int(plan.Port.ValueInt64()),
-		TLS:           plan.TLS.ValueBool(),
-		WatcherHostID: stringPointer(plan.WatcherHostID),
-		Username:      credentialWrite(plan.Username, state.Username),
-		Password:      credentialWrite(plan.Password, state.Password),
+	input := client.UpdateMQTTBrokerInput{
+		Name:     stringPtr(plan.Name),
+		Host:     stringPtr(plan.Host),
+		Port:     intPtr(plan.Port),
+		TLS:      boolPtr(plan.TLS),
+		Username: stringPtr(plan.Username),
+		Password: stringPtr(plan.Password),
+		// Optional-only: dropping it from the configuration unassigns the watcher.
+		WatcherHostID: stringPtr(plan.WatcherHostID),
 	}
 
 	// ETag retry loop
@@ -263,7 +263,7 @@ func (r *mqttBrokerResource) Update(ctx context.Context, req resource.UpdateRequ
 	for attempt := 0; attempt < 3; attempt++ {
 		_, etag, err := r.client.GetMQTTBroker(ctx, id)
 		if err != nil {
-			addMQTTAPIError(&resp.Diagnostics, "Error reading MQTT broker for update", err)
+			resp.Diagnostics.AddError("Error reading MQTT broker for update", mqttErrorDetail(err))
 			return
 		}
 		broker, err = r.client.UpdateMQTTBroker(ctx, id, etag, input)
@@ -272,7 +272,7 @@ func (r *mqttBrokerResource) Update(ctx context.Context, req resource.UpdateRequ
 				tflog.Debug(ctx, "ETag mismatch on MQTT broker update, retrying", map[string]interface{}{"attempt": attempt + 1})
 				continue
 			}
-			addMQTTAPIError(&resp.Diagnostics, "Error updating MQTT broker", err)
+			resp.Diagnostics.AddError("Error updating MQTT broker", mqttErrorDetail(err))
 			return
 		}
 		break
@@ -296,7 +296,7 @@ func (r *mqttBrokerResource) Delete(ctx context.Context, req resource.DeleteRequ
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
 		}
-		addMQTTAPIError(&resp.Diagnostics, "Error deleting MQTT broker", err)
+		resp.Diagnostics.AddError("Error deleting MQTT broker", mqttErrorDetail(err))
 	}
 }
 
@@ -325,69 +325,24 @@ func mapMQTTBrokerToState(b *client.MQTTBroker, state *mqttBrokerModel) {
 	state.UpdatedAt = types.StringValue(b.UpdatedAt)
 }
 
-// credentialWrite decides what a write should say about one broker credential,
-// which the API can never read back to Terraform.
-//
-// Unchanged configuration keeps the stored value rather than re-sending it: that
-// is what makes an imported broker survive an unrelated edit, since a broker
-// whose credentials Terraform has never seen has null on both sides here. A
-// value Terraform did know and no longer has is a deliberate removal, and only
-// an explicit null clears it — a blank string means "keep" server-side, which is
-// why the schema rejects one.
-func credentialWrite(plan, state types.String) json.RawMessage {
-	switch {
-	case plan.Equal(state):
-		return client.KeepCredential()
-	case plan.IsNull():
-		return client.ClearCredential()
-	default:
-		return client.SetCredential(plan.ValueString())
-	}
-}
-
-// stringPointer is the inverse of optionalString: an absent Terraform value
-// becomes a nil *string, which the MQTT write shapes marshal as the explicit
-// JSON null that clears a field.
-func stringPointer(v types.String) *string {
-	if v.IsNull() || v.IsUnknown() {
-		return nil
-	}
-	s := v.ValueString()
-	return &s
-}
-
-// int64Pointer is stringPointer for an optional integer.
-func int64Pointer(v types.Int64) *int64 {
-	if v.IsNull() || v.IsUnknown() {
-		return nil
-	}
-	i := v.ValueInt64()
-	return &i
-}
-
-// addMQTTAPIError reports an API failure, naming the account state behind the
-// two status codes that are about entitlement rather than about the request.
-// MQTT is a gated, billable feature, so the bare "API error 403" an operator
-// would otherwise read sends them to check an API key that is working fine.
-func addMQTTAPIError(diags *diag.Diagnostics, summary string, err error) {
+// mqttErrorDetail names the account state behind the two status codes that are
+// about entitlement rather than about the request. MQTT is a gated, billable
+// feature, so the bare "API error 403" an operator would otherwise read sends
+// them to check an API key that is working fine.
+func mqttErrorDetail(err error) string {
 	apiErr, ok := err.(*client.APIError)
 	if !ok {
-		diags.AddError(summary, err.Error())
-		return
+		return err.Error()
 	}
 
 	switch apiErr.StatusCode {
 	case http.StatusPaymentRequired:
-		diags.AddError(summary, fmt.Sprintf(
-			"%s\n\nThe organization's access is restricted — a suspended or lapsed subscription. Settle billing "+
-				"in the FiveNines dashboard; the API key itself is valid.",
-			apiErr.Error()))
+		return fmt.Sprintf("%s\n\nThe organization's access is restricted — a suspended or lapsed "+
+			"subscription. Settle billing in the FiveNines dashboard; the API key itself is valid.", apiErr.Error())
 	case http.StatusForbidden:
-		diags.AddError(summary, fmt.Sprintf(
-			"%s\n\nMQTT monitoring is enabled per organization, and writes need an API key with write scope. "+
-				"Check both under Settings > API — an invalid key would have failed with 401, not 403.",
-			apiErr.Error()))
-	default:
-		diags.AddError(summary, apiErr.Error())
+		return fmt.Sprintf("%s\n\nMQTT monitoring is enabled per organization, and writes need an API key "+
+			"with write scope. Check both under Settings > API — an invalid key would have failed with 401, "+
+			"not 403.", apiErr.Error())
 	}
+	return apiErr.Error()
 }

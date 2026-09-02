@@ -1,28 +1,16 @@
 package resources
 
 import (
+	"context"
 	"testing"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
-// --- optionalString ---
-
-func TestOptionalString_Nil(t *testing.T) {
-	result := optionalString(nil)
-	if !result.IsNull() {
-		t.Errorf("expected null, got %v", result)
-	}
-}
-
-func TestOptionalString_Value(t *testing.T) {
-	v := "hello"
-	result := optionalString(&v)
-	if result.ValueString() != "hello" {
-		t.Errorf("expected 'hello', got %q", result.ValueString())
-	}
-}
+func ptr[T any](v T) *T { return &v }
 
 // --- mapInstanceToState ---
 
@@ -30,10 +18,10 @@ func TestMapInstanceToState(t *testing.T) {
 	inst := &client.Instance{
 		ID:          "uuid-1",
 		DisplayName: "web-1",
-		Hostname:    "web-1.local",
+		Hostname:    ptr("web-1.local"),
 		Enabled:     true,
-		CPUCount:    4,
-		MemorySize:  8589934592,
+		CPUCount:    ptr(int64(4)),
+		MemorySize:  ptr(int64(8589934592)),
 		CreatedAt:   "2026-01-01T00:00:00Z",
 		UpdatedAt:   "2026-01-01T00:00:00Z",
 	}
@@ -58,6 +46,14 @@ func TestMapInstanceToState(t *testing.T) {
 	}
 	if !state.LastSyncAt.IsNull() {
 		t.Error("expected last_sync_at to be null")
+	}
+	// An instance that never synced reports null for everything the agent
+	// fills in; those must stay null instead of collapsing to "".
+	if !state.IPv4.IsNull() {
+		t.Errorf("expected ipv4 to be null, got %q", state.IPv4.ValueString())
+	}
+	if !state.KernelVersion.IsNull() {
+		t.Errorf("expected kernel_version to be null, got %q", state.KernelVersion.ValueString())
 	}
 }
 
@@ -91,7 +87,7 @@ func TestMapTaskToState_Paused(t *testing.T) {
 		ID:           "task-uuid",
 		Name:         "paused-task",
 		ScheduleType: "cron",
-		Schedule:     "0 * * * *",
+		Schedule:     ptr("0 * * * *"),
 		Status:       "paused",
 		CreatedAt:    "2026-01-01T00:00:00Z",
 		UpdatedAt:    "2026-01-01T00:00:00Z",
@@ -150,7 +146,7 @@ func TestMapTaskToState_EmptyScheduleIsNull(t *testing.T) {
 		Name:            "interval-task",
 		ScheduleType:    "interval",
 		Status:          "active",
-		Schedule:        "",
+		Schedule:        ptr(""),
 		IntervalSeconds: &interval,
 		CreatedAt:       "2026-01-01T00:00:00Z",
 		UpdatedAt:       "2026-01-01T00:00:00Z",
@@ -252,11 +248,11 @@ func TestMapWorkflowToState(t *testing.T) {
 	wf := &client.Workflow{
 		ID:                 42,
 		Name:               "CPU Alert",
-		Description:        "Alerts on high CPU",
+		Description:        ptr("Alerts on high CPU"),
 		Status:             "active",
 		IntervalSeconds:    &interval,
-		TriggerType:        "metric_threshold",
-		TriggerTypeLabel:   "Instance Metric",
+		TriggerType:        ptr("metric_threshold"),
+		TriggerTypeLabel:   ptr("Instance Metric"),
 		PublishedVersionID: &versionID,
 		CreatedAt:          "2026-01-01T00:00:00Z",
 		UpdatedAt:          "2026-01-01T00:00:00Z",
@@ -299,282 +295,301 @@ func TestMapWorkflowToState_NilOptionals(t *testing.T) {
 	}
 }
 
-// --- mapMQTTBrokerToState ---
-
-func TestMapMQTTBrokerToState(t *testing.T) {
-	watcher := "host-uuid"
-	lastError := "Connection refused: not authorised"
-	broker := &client.MQTTBroker{
-		ID:                "broker-uuid",
-		Name:              "Factory-floor Mosquitto",
-		Host:              "mqtt.internal",
-		Port:              8883,
-		TLS:               true,
-		UsernameSet:       true,
-		PasswordSet:       true,
-		WatcherHostID:     &watcher,
-		Status:            "config_error",
-		LastErrorMessage:  &lastError,
-		Stale:             true,
-		TopicMonitorCount: 300,
-		CreatedAt:         "2026-01-01T00:00:00Z",
-		UpdatedAt:         "2026-01-01T00:00:00Z",
-	}
-
-	// The configured credentials are already in state; the mapping must leave
-	// them alone, because the API never returns either one.
-	state := &mqttBrokerModel{
-		Username: types.StringValue("factory"),
-		Password: types.StringValue("s3cret"),
-	}
-	mapMQTTBrokerToState(broker, state)
-
-	if state.ID.ValueString() != "broker-uuid" {
-		t.Errorf("expected ID broker-uuid, got %s", state.ID.ValueString())
-	}
-	if state.Port.ValueInt64() != 8883 {
-		t.Errorf("expected port 8883, got %d", state.Port.ValueInt64())
-	}
-	if !state.TLS.ValueBool() {
-		t.Error("expected tls true")
-	}
-	if state.Username.ValueString() != "factory" || state.Password.ValueString() != "s3cret" {
-		t.Error("expected write-only credentials to be preserved from config")
-	}
-	if !state.UsernameSet.ValueBool() || !state.PasswordSet.ValueBool() {
-		t.Error("expected username_set and password_set true")
-	}
-	if state.WatcherHostID.ValueString() != "host-uuid" {
-		t.Errorf("expected watcher_host_id host-uuid, got %s", state.WatcherHostID.ValueString())
-	}
-	if !state.Stale.ValueBool() {
-		t.Error("expected stale true")
-	}
-	if state.TopicMonitorCount.ValueInt64() != 300 {
-		t.Errorf("expected topic_monitor_count 300, got %d", state.TopicMonitorCount.ValueInt64())
-	}
-	if state.LastErrorMessage.ValueString() != lastError {
-		t.Errorf("expected last_error_message %q, got %q", lastError, state.LastErrorMessage.ValueString())
-	}
-}
-
-func TestMapMQTTBrokerToState_Unassigned(t *testing.T) {
-	broker := &client.MQTTBroker{
-		ID: "broker-uuid", Name: "Unassigned", Host: "mqtt.internal", Port: 1883,
-		Status: "unknown", Stale: true,
-		CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z",
-	}
-
-	state := &mqttBrokerModel{}
-	mapMQTTBrokerToState(broker, state)
-
-	if !state.WatcherHostID.IsNull() {
-		t.Error("expected watcher_host_id to be null")
-	}
-	if !state.LastErrorMessage.IsNull() || !state.LastConnectedAt.IsNull() || !state.LastSyncedAt.IsNull() {
-		t.Error("expected the never-reported fields to be null")
-	}
-	if state.UsernameSet.ValueBool() || state.PasswordSet.ValueBool() {
-		t.Error("expected username_set and password_set false for an anonymous broker")
-	}
-}
-
-// --- credentialWrite ---
-
-func TestCredentialWrite_UnchangedIsOmitted(t *testing.T) {
-	// The import case: Terraform has never seen the credential, so an unrelated
-	// edit must not wipe the one the broker is working with.
-	if got := credentialWrite(types.StringNull(), types.StringNull()); got != nil {
-		t.Errorf("expected an omitted credential, got %s", got)
-	}
-	// And a value that did not change is not worth re-sending.
-	same := types.StringValue("factory")
-	if got := credentialWrite(same, same); got != nil {
-		t.Errorf("expected an omitted credential, got %s", got)
-	}
-}
-
-func TestCredentialWrite_RemovedIsCleared(t *testing.T) {
-	got := credentialWrite(types.StringNull(), types.StringValue("factory"))
-	if string(got) != "null" {
-		t.Errorf("expected explicit null, got %s", got)
-	}
-}
-
-func TestCredentialWrite_ChangedIsSent(t *testing.T) {
-	got := credentialWrite(types.StringValue("rotated"), types.StringValue("factory"))
-	if string(got) != `"rotated"` {
-		t.Errorf(`expected "rotated", got %s`, got)
-	}
-}
-
-// --- mapMQTTTopicMonitorToState ---
-
-func TestMapMQTTTopicMonitorToState_Freshness(t *testing.T) {
-	stale := int64(300)
-	subscribed := "2026-01-01T00:00:00Z"
-	monitor := &client.MQTTTopicMonitor{
-		ID:                      "monitor-uuid",
-		MQTTBrokerID:            "broker-uuid",
-		TopicFilter:             "sensors/+/temperature",
-		StaleAfterSeconds:       &stale,
-		CapturePayload:          true,
-		EffectiveCapturePayload: true,
-		FreshnessCheck:          true,
-		SubscribedSince:         &subscribed,
-		CreatedAt:               "2026-01-01T00:00:00Z",
-		UpdatedAt:               "2026-01-01T00:00:00Z",
-	}
-
-	state := &mqttTopicMonitorModel{}
-	mapMQTTTopicMonitorToState(monitor, state)
-
-	if state.MQTTBrokerID.ValueString() != "broker-uuid" {
-		t.Errorf("expected mqtt_broker_id broker-uuid, got %s", state.MQTTBrokerID.ValueString())
-	}
-	if state.StaleAfterSeconds.ValueInt64() != 300 {
-		t.Errorf("expected stale_after_seconds 300, got %d", state.StaleAfterSeconds.ValueInt64())
-	}
-	if !state.MatchKind.IsNull() || !state.ExpectedValue.IsNull() || !state.JSONKey.IsNull() {
-		t.Error("expected the payload check attributes to be null")
-	}
-	if !state.FreshnessCheck.ValueBool() || state.PayloadCheck.ValueBool() {
-		t.Error("expected freshness_check true and payload_check false")
-	}
-	if state.SubscribedSince.ValueString() != subscribed {
-		t.Errorf("expected subscribed_since %s, got %s", subscribed, state.SubscribedSince.ValueString())
-	}
-}
-
-func TestMapMQTTTopicMonitorToState_PayloadForcesCapture(t *testing.T) {
-	matchKind := "exact"
-	expected := "online"
-	monitor := &client.MQTTTopicMonitor{
-		ID: "monitor-uuid", MQTTBrokerID: "broker-uuid", TopicFilter: "devices/pump-1/status",
-		MatchKind: &matchKind, ExpectedValue: &expected,
-		// Stored false, but a payload expectation forces capture on server-side.
-		CapturePayload: false, EffectiveCapturePayload: true,
-		PayloadCheck: true, ExactTopic: true,
-		CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z",
-	}
-
-	state := &mqttTopicMonitorModel{}
-	mapMQTTTopicMonitorToState(monitor, state)
-
-	if !state.StaleAfterSeconds.IsNull() {
-		t.Error("expected stale_after_seconds to be null")
-	}
-	if state.MatchKind.ValueString() != "exact" || state.ExpectedValue.ValueString() != "online" {
-		t.Error("expected the payload expectation to be mapped")
-	}
-	if state.CapturePayload.ValueBool() || !state.EffectiveCapturePayload.ValueBool() {
-		t.Error("expected capture_payload false and effective_capture_payload true")
-	}
-	if !state.SubscribedSince.IsNull() {
-		t.Error("expected subscribed_since to be null when the watcher holds no subscription")
-	}
-}
-
-// --- mqttTopicMonitorInput ---
-
-func TestMQTTTopicMonitorInput_DroppedChecksSendNull(t *testing.T) {
-	plan := mqttTopicMonitorModel{
-		TopicFilter:       types.StringValue("sensors/+/temperature"),
-		StaleAfterSeconds: types.Int64Value(300),
-		MatchKind:         types.StringNull(),
-		ExpectedValue:     types.StringNull(),
-		JSONKey:           types.StringNull(),
-		CapturePayload:    types.BoolValue(true),
-	}
-
-	input := mqttTopicMonitorInput(plan)
-
-	if input.StaleAfterSeconds == nil || *input.StaleAfterSeconds != 300 {
-		t.Errorf("expected stale_after_seconds 300, got %v", input.StaleAfterSeconds)
-	}
-	if input.MatchKind != nil || input.ExpectedValue != nil || input.JSONKey != nil {
-		t.Error("expected the unset payload check to marshal as null")
-	}
-	if !input.CapturePayload {
-		t.Error("expected capture_payload true")
-	}
-}
-
-// --- validateMQTTTopicMonitorChecks ---
-
-func TestValidateMQTTTopicMonitorChecks_NoCheck(t *testing.T) {
-	config := mqttTopicMonitorModel{
-		TopicFilter:       types.StringValue("sensors/#"),
-		StaleAfterSeconds: types.Int64Null(),
-		MatchKind:         types.StringNull(),
-	}
-
-	if diags := validateMQTTTopicMonitorChecks(config); !diags.HasError() {
-		t.Error("expected an error for a monitor carrying no check")
-	}
-}
-
-func TestValidateMQTTTopicMonitorChecks_FreshnessOnly(t *testing.T) {
-	config := mqttTopicMonitorModel{
-		TopicFilter:       types.StringValue("sensors/#"),
-		StaleAfterSeconds: types.Int64Value(300),
-		MatchKind:         types.StringNull(),
-	}
-
-	if diags := validateMQTTTopicMonitorChecks(config); diags.HasError() {
-		t.Errorf("expected a freshness-only monitor to validate, got %v", diags)
-	}
-}
-
-func TestValidateMQTTTopicMonitorChecks_MatchKindNeedsExpectedValue(t *testing.T) {
-	config := mqttTopicMonitorModel{
-		TopicFilter:       types.StringValue("devices/pump-1/status"),
-		StaleAfterSeconds: types.Int64Null(),
-		MatchKind:         types.StringValue("exact"),
-		ExpectedValue:     types.StringNull(),
-	}
-
-	if diags := validateMQTTTopicMonitorChecks(config); !diags.HasError() {
-		t.Error("expected an error when match_kind has no expected_value")
-	}
-}
-
-func TestValidateMQTTTopicMonitorChecks_JSONKeyRequired(t *testing.T) {
-	config := mqttTopicMonitorModel{
-		TopicFilter:   types.StringValue("devices/pump-1/telemetry"),
-		MatchKind:     types.StringValue("json_key"),
-		ExpectedValue: types.StringValue("ok"),
-		JSONKey:       types.StringNull(),
-	}
-
-	if diags := validateMQTTTopicMonitorChecks(config); !diags.HasError() {
-		t.Error("expected an error when match_kind is json_key without json_key")
-	}
-
-	config.JSONKey = types.StringValue("battery.level")
-	if diags := validateMQTTTopicMonitorChecks(config); diags.HasError() {
-		t.Errorf("expected a complete json_key monitor to validate, got %v", diags)
-	}
-}
-
-// An unknown value only resolves at apply time, so the API owns the verdict
-// rather than the plan failing on something it cannot see yet.
-func TestValidateMQTTTopicMonitorChecks_UnknownDefersToAPI(t *testing.T) {
-	config := mqttTopicMonitorModel{
-		TopicFilter:       types.StringValue("sensors/#"),
-		StaleAfterSeconds: types.Int64Unknown(),
-		MatchKind:         types.StringNull(),
-	}
-
-	if diags := validateMQTTTopicMonitorChecks(config); diags.HasError() {
-		t.Errorf("expected no plan-time error for an unknown check, got %v", diags)
-	}
-}
-
 // Verify types.String null behavior (framework contract test)
 func TestTypesStringNull(t *testing.T) {
 	s := types.StringNull()
 	if !s.IsNull() {
 		t.Error("expected IsNull() to be true")
+	}
+}
+
+// --- uptime monitor: protocol cross-field validation ---
+
+func TestMissingProtocolAttributes(t *testing.T) {
+	tests := []struct {
+		name   string
+		config uptimeMonitorModel
+		want   []string
+	}{
+		{
+			name:   "https without url",
+			config: uptimeMonitorModel{Protocol: types.StringValue("https")},
+			want:   []string{"url"},
+		},
+		{
+			name: "https with url",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("https"),
+				URL:      types.StringValue("https://example.com"),
+			},
+		},
+		{
+			name:   "tcp without hostname or port",
+			config: uptimeMonitorModel{Protocol: types.StringValue("tcp")},
+			want:   []string{"hostname", "port"},
+		},
+		{
+			name: "tcp with hostname but no port",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("tcp"),
+				Hostname: types.StringValue("db.example.com"),
+			},
+			want: []string{"port"},
+		},
+		{
+			name:   "icmp without hostname",
+			config: uptimeMonitorModel{Protocol: types.StringValue("icmp")},
+			want:   []string{"hostname"},
+		},
+		{
+			name:   "dns without record type",
+			config: uptimeMonitorModel{Protocol: types.StringValue("dns")},
+			want:   []string{"dns_record_type"},
+		},
+		{
+			name: "dns with record type",
+			config: uptimeMonitorModel{
+				Protocol:      types.StringValue("dns"),
+				DNSRecordType: types.StringValue("A"),
+			},
+		},
+		{
+			name: "unknown value is not treated as missing",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("https"),
+				URL:      types.StringUnknown(),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := missingProtocolAttributes(tt.config)
+			if len(got) != len(tt.want) {
+				t.Fatalf("expected missing %v, got %v", tt.want, got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("expected missing %v, got %v", tt.want, got)
+				}
+			}
+		})
+	}
+}
+
+// --- uptime monitor: mapToState ---
+
+func mapUptimeMonitor(t *testing.T, m *client.UptimeMonitor, state *uptimeMonitorModel) {
+	t.Helper()
+	var diags diag.Diagnostics
+	(&uptimeMonitorResource{}).mapToState(context.Background(), m, state, &diags)
+	if diags.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", diags)
+	}
+}
+
+func TestMapUptimeMonitorToState_PausedFromStatus(t *testing.T) {
+	for status, wantPaused := range map[string]bool{
+		"paused": true, "up": false, "down": false, "unknown": false, "recovering": false,
+	} {
+		state := &uptimeMonitorModel{}
+		mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", Status: status}, state)
+
+		if state.Paused.ValueBool() != wantPaused {
+			t.Errorf("status %q: expected paused %v, got %v", status, wantPaused, state.Paused.ValueBool())
+		}
+		if state.Status.ValueString() != status {
+			t.Errorf("expected status %q, got %q", status, state.Status.ValueString())
+		}
+	}
+}
+
+func TestMapUptimeMonitorToState_DNSExpectedRecords(t *testing.T) {
+	emptyList := types.ListValueMust(types.StringType, []attr.Value{})
+
+	tests := []struct {
+		name      string
+		apiValue  []string
+		prior     types.List
+		wantNull  bool
+		wantElems int
+	}{
+		{
+			name:     "unset stays null",
+			prior:    types.ListNull(types.StringType),
+			wantNull: true,
+		},
+		{
+			// The API normalises a pinned [] to "no expectation" and reads it back
+			// as [], so a config of [] must not flip to null and diff forever.
+			name:      "explicit empty list is preserved",
+			prior:     emptyList,
+			wantNull:  false,
+			wantElems: 0,
+		},
+		{
+			name:      "records are read back",
+			apiValue:  []string{"1.2.3.4", "5.6.7.8"},
+			prior:     types.ListNull(types.StringType),
+			wantNull:  false,
+			wantElems: 2,
+		},
+		{
+			name:      "records replace a previously empty list",
+			apiValue:  []string{"1.2.3.4"},
+			prior:     emptyList,
+			wantNull:  false,
+			wantElems: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &uptimeMonitorModel{DNSExpectedRecords: tt.prior}
+			mapUptimeMonitor(t, &client.UptimeMonitor{
+				ID:                 "mon-uuid",
+				Protocol:           "dns",
+				DNSExpectedRecords: tt.apiValue,
+			}, state)
+
+			if state.DNSExpectedRecords.IsNull() != tt.wantNull {
+				t.Fatalf("expected null=%v, got %v", tt.wantNull, state.DNSExpectedRecords)
+			}
+			if !tt.wantNull && len(state.DNSExpectedRecords.Elements()) != tt.wantElems {
+				t.Errorf("expected %d elements, got %v", tt.wantElems, state.DNSExpectedRecords.Elements())
+			}
+		})
+	}
+}
+
+func TestIsEmptyList(t *testing.T) {
+	if isEmptyList(types.ListNull(types.StringType)) {
+		t.Error("null list is not an empty list")
+	}
+	if isEmptyList(types.ListUnknown(types.StringType)) {
+		t.Error("unknown list is not an empty list")
+	}
+	if !isEmptyList(types.ListValueMust(types.StringType, []attr.Value{})) {
+		t.Error("expected empty list")
+	}
+	if isEmptyList(types.ListValueMust(types.StringType, []attr.Value{types.StringValue("a")})) {
+		t.Error("populated list is not empty")
+	}
+}
+
+// --- uptime monitor: the inverse protocol table ---
+
+func TestForbiddenProtocolAttributes(t *testing.T) {
+	tests := []struct {
+		name   string
+		config uptimeMonitorModel
+		want   []string
+	}{
+		{
+			name: "https with a dns attribute left in config",
+			config: uptimeMonitorModel{
+				Protocol:      types.StringValue("https"),
+				DNSRecordType: types.StringValue("A"),
+			},
+			want: []string{"dns_record_type"},
+		},
+		{
+			// The switch that motivated the table: leaving headers on a dns monitor
+			// plans a known map that the apply nulls out.
+			name: "dns with http attributes left in config",
+			config: uptimeMonitorModel{
+				Protocol:      types.StringValue("dns"),
+				CustomHeaders: types.MapValueMust(types.StringType, map[string]attr.Value{"X": types.StringValue("y")}),
+				Keyword:       types.StringValue("ok"),
+			},
+			want: []string{"keyword", "custom_headers"},
+		},
+		{
+			name: "tcp with a keyword left in config",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("tcp"),
+				Keyword:  types.StringValue("ok"),
+			},
+			want: []string{"keyword"},
+		},
+		{
+			name:   "a clean https config forbids nothing",
+			config: uptimeMonitorModel{Protocol: types.StringValue("https"), URL: types.StringValue("https://example.com")},
+		},
+		{
+			// Unknown comes from an unresolved reference, not from the user setting
+			// a value the protocol cannot use.
+			name: "unknown values are not flagged",
+			config: uptimeMonitorModel{
+				Protocol: types.StringValue("tcp"),
+				Keyword:  types.StringUnknown(),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := forbiddenProtocolAttributes(tt.config)
+			if len(got) != len(tt.want) {
+				t.Fatalf("expected %v, got %v", tt.want, got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("expected %v, got %v", tt.want, got)
+				}
+			}
+		})
+	}
+}
+
+// Every name in either protocol table must resolve in protocolScopedValues, or
+// the lookup hands .IsNull() a nil interface and panics mid-plan.
+func TestProtocolTablesResolve(t *testing.T) {
+	values := protocolScopedValues(uptimeMonitorModel{})
+	for _, table := range []map[string][]string{protocolRequirements, protocolForbidden} {
+		for protocol, names := range table {
+			for _, name := range names {
+				if _, ok := values[name]; !ok {
+					t.Errorf("protocol %q references %q, which protocolScopedValues does not provide", protocol, name)
+				}
+			}
+		}
+	}
+}
+
+func TestMapUptimeMonitorToState_KeywordEmptyVsNull(t *testing.T) {
+	// An explicitly configured "" must survive; an absent keyword must be null.
+	state := &uptimeMonitorModel{Keyword: types.StringValue("")}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", Keyword: ""}, state)
+	if state.Keyword.IsNull() {
+		t.Error("an explicitly empty keyword must stay an empty string, not become null")
+	}
+
+	state = &uptimeMonitorModel{Keyword: types.StringNull()}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", Keyword: ""}, state)
+	if !state.Keyword.IsNull() {
+		t.Errorf("an unset keyword must be null, got %q", state.Keyword.ValueString())
+	}
+
+	state = &uptimeMonitorModel{Keyword: types.StringNull()}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", Keyword: "healthy"}, state)
+	if state.Keyword.ValueString() != "healthy" {
+		t.Errorf("expected healthy, got %q", state.Keyword.ValueString())
+	}
+}
+
+func TestMapUptimeMonitorToState_ProbeRegionIDsPinnedEmpty(t *testing.T) {
+	// Sending [] is only half of clearable; the read side has to preserve it too,
+	// or the plan re-proposes [] and every apply fails.
+	state := &uptimeMonitorModel{ProbeRegionIDs: types.ListValueMust(types.Int64Type, []attr.Value{})}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid"}, state)
+	if state.ProbeRegionIDs.IsNull() {
+		t.Error("an explicitly empty probe_region_ids must stay [], not become null")
+	}
+
+	state = &uptimeMonitorModel{ProbeRegionIDs: types.ListNull(types.Int64Type)}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", ProbeRegionIDs: []int64{1, 2}}, state)
+	if len(state.ProbeRegionIDs.Elements()) != 2 {
+		t.Errorf("expected 2 regions, got %v", state.ProbeRegionIDs.Elements())
 	}
 }

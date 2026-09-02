@@ -537,6 +537,266 @@ func TestClient_ListIntegrations(t *testing.T) {
 	}
 }
 
+func TestClient_GetIntegration(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/integrations/42" {
+			t.Errorf("expected path /api/v1/integrations/42, got %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{
+				"id": 42, "type": "WebhookIntegration", "name": "Ops hook",
+				"provider": "Webhook", "enabled": true, "verified": false,
+				"created_at": "2026-09-01T00:00:00Z", "updated_at": "2026-09-01T01:00:00Z",
+			},
+		})
+	})
+
+	integration, err := c.GetIntegration(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if integration.Type != "WebhookIntegration" {
+		t.Errorf("expected type WebhookIntegration, got %s", integration.Type)
+	}
+	if integration.UpdatedAt != "2026-09-01T01:00:00Z" {
+		t.Errorf("expected updated_at to be decoded, got %q", integration.UpdatedAt)
+	}
+}
+
+func TestClient_CreateIntegration_Webhook(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/integrations" {
+			t.Errorf("expected POST /api/v1/integrations, got %s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{
+				"id": 7, "type": "WebhookIntegration", "name": "https://example.com/hook",
+				"provider": "Webhook", "enabled": true, "verified": false,
+			},
+			"webhook": map[string]interface{}{
+				"verification_header":           "X-Fivenines-Verification",
+				"verification_token":            "tok_abc",
+				"verification_token_expires_at": "2026-09-02T00:00:00Z",
+				"secret":                        "whsec_generated",
+			},
+		})
+	})
+
+	result, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{
+		Type: "webhook",
+		URL:  "https://example.com/hook",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The API takes the short key, not the class name the response carries back.
+	if got := gotBody["integration"]["type"]; got != "webhook" {
+		t.Errorf("expected request type webhook, got %v", got)
+	}
+	if got := gotBody["integration"]["url"]; got != "https://example.com/hook" {
+		t.Errorf("expected request url, got %v", got)
+	}
+	if _, present := gotBody["integration"]["routing_key"]; present {
+		t.Error("expected unset fields to be omitted from the request body")
+	}
+	if result.Integration == nil || result.Integration.ID != 7 {
+		t.Fatalf("expected integration 7, got %+v", result.Integration)
+	}
+	if result.Webhook == nil {
+		t.Fatal("expected webhook verification block")
+	}
+	if result.Webhook.Secret != "whsec_generated" {
+		t.Errorf("expected generated signing secret, got %q", result.Webhook.Secret)
+	}
+	if result.Webhook.VerificationToken != "tok_abc" {
+		t.Errorf("expected verification token tok_abc, got %q", result.Webhook.VerificationToken)
+	}
+	if result.EmailVerification != nil {
+		t.Error("expected no email verification for a webhook")
+	}
+}
+
+func TestClient_CreateIntegration_Pagerduty(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{
+				"id": 8, "type": "PagerdutyIntegration", "name": "Ops",
+				"provider": "Pagerduty", "enabled": true, "verified": true,
+			},
+		})
+	})
+
+	result, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{
+		Type:       "pagerduty",
+		Name:       "Ops",
+		RoutingKey: "R0UT1NGK3Y",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gotBody["integration"]["routing_key"]; got != "R0UT1NGK3Y" {
+		t.Errorf("expected routing_key in request, got %v", got)
+	}
+	if result.Webhook != nil {
+		t.Error("expected no webhook block for pagerduty")
+	}
+	if !result.Integration.Verified {
+		t.Error("expected pagerduty integration to come back verified")
+	}
+}
+
+func TestClient_CreateIntegration_Email202(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "pending_verification",
+			"verification": map[string]interface{}{
+				"id": 42, "email": "ops@example.com",
+				"expires_at": "2026-09-01T00:15:00Z", "verify_path": "/api/v1/integrations/42/verify",
+			},
+		})
+	})
+
+	result, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{
+		Type:  "email",
+		Email: "ops@example.com",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 202 means no channel was created — only a pending verification code.
+	if result.Integration != nil {
+		t.Errorf("expected no integration on 202, got %+v", result.Integration)
+	}
+	if result.EmailVerification == nil || result.EmailVerification.ID != 42 {
+		t.Fatalf("expected verification id 42, got %+v", result.EmailVerification)
+	}
+}
+
+func TestClient_CreateIntegration_422NotCreatable(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"errors": []string{"slack integrations must be connected from the dashboard"},
+		})
+	})
+
+	_, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{Type: "slack"})
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 422 {
+		t.Errorf("expected status 422, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestClient_CreateIntegration_403PlanGate(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "plan does not include PagerDuty alerts"})
+	})
+
+	_, err := c.CreateIntegration(context.Background(), CreateIntegrationInput{Type: "pagerduty"})
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 403 {
+		t.Errorf("expected status 403, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestClient_DeleteIntegration(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" || r.URL.Path != "/api/v1/integrations/7" {
+			t.Errorf("expected DELETE /api/v1/integrations/7, got %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	if err := c.DeleteIntegration(context.Background(), 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClient_VerifyWebhookIntegration(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/integrations/7/verify_webhook" {
+			t.Errorf("expected POST /api/v1/integrations/7/verify_webhook, got %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{
+				"id": 7, "type": "WebhookIntegration", "verified": true, "enabled": true,
+			},
+		})
+	})
+
+	integration, err := c.VerifyWebhookIntegration(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !integration.Verified {
+		t.Error("expected verified true")
+	}
+}
+
+func TestClient_VerifyWebhookIntegration_422(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"errors": []string{"endpoint returned 404"},
+		})
+	})
+
+	_, err := c.VerifyWebhookIntegration(context.Background(), 7)
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 422 {
+		t.Errorf("expected status 422, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestClient_RegenerateWebhookToken(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/integrations/7/regenerate_webhook_token" {
+			t.Errorf("expected POST /api/v1/integrations/7/regenerate_webhook_token, got %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integration": map[string]interface{}{"id": 7, "type": "WebhookIntegration", "verified": false},
+			"webhook": map[string]interface{}{
+				"verification_header":           "X-Fivenines-Verification",
+				"verification_token":            "tok_fresh",
+				"verification_token_expires_at": "2026-09-03T00:00:00Z",
+			},
+		})
+	})
+
+	integration, webhook, err := c.RegenerateWebhookToken(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if integration.ID != 7 {
+		t.Errorf("expected integration 7, got %d", integration.ID)
+	}
+	if webhook == nil || webhook.VerificationToken != "tok_fresh" {
+		t.Fatalf("expected fresh token, got %+v", webhook)
+	}
+	// Regenerating a token does not re-issue the signing secret.
+	if webhook.Secret != "" {
+		t.Errorf("expected no signing secret, got %q", webhook.Secret)
+	}
+}
+
 // --- Error Handling ---
 
 func TestClient_APIError_404(t *testing.T) {

@@ -1038,6 +1038,99 @@ func (c *Client) DeleteStatusPage(ctx context.Context, id int64) error {
 	return nil
 }
 
+// CreateIntegration creates a notification channel.
+//
+// Required fields depend on input.Type:
+//
+//	webhook    URL (Name and Secret optional)
+//	pagerduty  Name + RoutingKey — proved with a live trigger/resolve round-trip
+//	pushover   Name + UserKey + AppToken
+//	email      Email — returns 202 with an EmailVerification and creates no channel
+//
+// slack, discord, teams and telegram are interactive OAuth/app installs with no
+// headless equivalent; the API rejects them with 422.
+func (c *Client) CreateIntegration(ctx context.Context, input CreateIntegrationInput) (*CreateIntegrationResult, error) {
+	body := map[string]interface{}{"integration": input}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/integrations", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		Integration  *Integration         `json:"integration"`
+		Webhook      *WebhookVerification `json:"webhook"`
+		Verification *EmailVerification   `json:"verification"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &CreateIntegrationResult{
+		Integration:       result.Integration,
+		Webhook:           result.Webhook,
+		EmailVerification: result.Verification,
+	}, nil
+}
+
+func (c *Client) DeleteIntegration(ctx context.Context, id int64) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/integrations/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// VerifyWebhookIntegration asks the API to GET the webhook URL and check that
+// the response echoes the verification token in the X-Fivenines-Verification
+// header. Until it succeeds the webhook stays unverified and workflow
+// notification nodes refuse to deliver to it.
+func (c *Client) VerifyWebhookIntegration(ctx context.Context, id int64) (*Integration, error) {
+	path := fmt.Sprintf("/api/v1/integrations/%d/verify_webhook", id)
+	resp, err := c.doRequest(ctx, "POST", path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		Integration Integration `json:"integration"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Integration, nil
+}
+
+// RegenerateWebhookToken issues a fresh 24 hour verification token and returns
+// it once. The token lives in metadata, which is never serialized on a read.
+func (c *Client) RegenerateWebhookToken(ctx context.Context, id int64) (*Integration, *WebhookVerification, error) {
+	path := fmt.Sprintf("/api/v1/integrations/%d/regenerate_webhook_token", id)
+	resp, err := c.doRequest(ctx, "POST", path, nil, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, parseError(resp)
+	}
+
+	var result struct {
+		Integration Integration          `json:"integration"`
+		Webhook     *WebhookVerification `json:"webhook"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Integration, result.Webhook, nil
+}
+
 func (c *Client) GetIntegration(ctx context.Context, id int64) (*Integration, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v1/integrations/"+strconv.FormatInt(id, 10), nil, nil)
 	if err != nil {

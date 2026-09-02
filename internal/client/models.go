@@ -240,14 +240,64 @@ type ProbeRegion struct {
 }
 
 // Integration represents a notification channel.
+//
+// The API never serializes an integration's metadata (webhook URLs and signing
+// secrets, verification tokens, PagerDuty routing keys), so none of the secrets
+// accepted by CreateIntegration can ever be read back.
 type Integration struct {
 	ID        int64  `json:"id"`
-	Type      string `json:"type"`
+	Type      string `json:"type"` // Backing class name, e.g. "WebhookIntegration"
 	Name      string `json:"name"`
 	Provider  string `json:"provider"`
 	Enabled   bool   `json:"enabled"`
 	Verified  bool   `json:"verified"`
 	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// CreateIntegrationInput is the request body for creating an integration.
+// Which fields are required depends on Type; see CreateIntegration.
+type CreateIntegrationInput struct {
+	Type       string `json:"type"`
+	Name       string `json:"name,omitempty"`
+	URL        string `json:"url,omitempty"`         // webhook
+	Secret     string `json:"secret,omitempty"`      // webhook
+	RoutingKey string `json:"routing_key,omitempty"` // pagerduty
+	UserKey    string `json:"user_key,omitempty"`    // pushover
+	AppToken   string `json:"app_token,omitempty"`   // pushover
+	Email      string `json:"email,omitempty"`       // email
+}
+
+// WebhookVerification carries the one-shot webhook credentials returned by the
+// call that mints them. They live in metadata and are never readable again.
+type WebhookVerification struct {
+	VerificationHeader         string `json:"verification_header"`
+	VerificationToken          string `json:"verification_token"`
+	VerificationTokenExpiresAt string `json:"verification_token_expires_at"`
+	Instructions               string `json:"instructions"`
+	// Secret is the HMAC-SHA256 signing key, returned on webhook creation only.
+	Secret string `json:"secret"`
+}
+
+// EmailVerification is returned by CreateIntegration for type=email. No
+// integration exists yet at that point: the ID addresses a pending
+// verification code, not a channel.
+type EmailVerification struct {
+	ID         int64  `json:"id"`
+	Email      string `json:"email"`
+	ExpiresAt  string `json:"expires_at"`
+	VerifyPath string `json:"verify_path"`
+}
+
+// CreateIntegrationResult is the outcome of CreateIntegration.
+//
+// Exactly one of Integration or EmailVerification is set: type=email returns
+// 202 with a pending verification and no channel, every other type returns 201
+// with the created channel. Webhook is set only for type=webhook.
+type CreateIntegrationResult struct {
+	Integration       *Integration
+	Webhook           *WebhookVerification
+	EmailVerification *EmailVerification
 }
 
 // Incident represents an alert triggered by a workflow or manually.

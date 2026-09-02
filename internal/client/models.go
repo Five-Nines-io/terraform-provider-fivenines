@@ -143,9 +143,13 @@ type WorkflowVersion struct {
 
 // CreateWorkflowInput is the request body for creating a workflow.
 type CreateWorkflowInput struct {
-	Name            string `json:"name"`
-	Description     string `json:"description,omitempty"`
-	IntervalSeconds *int64 `json:"interval_seconds,omitempty"`
+	Name string `json:"name"`
+	// Description is a pointer so that an empty string reaches the API. As a
+	// plain string, omitempty dropped `description = ""` from the body, the
+	// nullable column stored NULL, and the read answered null against a config
+	// that said "" — an inconsistent-result abort on every apply.
+	Description     *string `json:"description,omitempty"`
+	IntervalSeconds *int64  `json:"interval_seconds,omitempty"`
 }
 
 // UpdateWorkflowInput is the request body for updating a workflow.

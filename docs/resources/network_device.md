@@ -5,6 +5,7 @@ subcategory: ""
 description: |-
   Manages a FiveNines network device (SNMP monitoring).
   SNMP credentials are not verified on create or update — the API stores them without running a connectivity test, so a successful apply does not mean the device is reachable. To confirm reachability, re-read the device after apply (terraform refresh, or the next plan) until last_polled_at advances, then check status, consecutive_failures and last_error_type / last_error_message.
+  Destroying a device waits for the deletion to finish. The API answers 202 and removes the device asynchronously, so the provider polls until it is gone (up to five minutes) before releasing state.
 ---
 
 # fivenines_network_device (Resource)
@@ -12,6 +13,8 @@ description: |-
 Manages a FiveNines network device (SNMP monitoring).
 
 SNMP credentials are not verified on create or update — the API stores them without running a connectivity test, so a successful apply does not mean the device is reachable. To confirm reachability, re-read the device after apply (`terraform refresh`, or the next plan) until `last_polled_at` advances, then check `status`, `consecutive_failures` and `last_error_type` / `last_error_message`.
+
+Destroying a device waits for the deletion to finish. The API answers 202 and removes the device asynchronously, so the provider polls until it is gone (up to five minutes) before releasing state.
 
 ## Example Usage
 
@@ -79,16 +82,16 @@ output "switch_reachability" {
 - `snmp_priv_password` (String, Sensitive) SNMPv3 privacy password. Write-only — not returned by the API.
 - `snmp_priv_protocol` (String) SNMPv3 privacy protocol.
 - `snmp_security_level` (String) SNMPv3 security level.
-- `snmp_username` (String, Sensitive) SNMPv3 username.
-- `snmp_version` (String) SNMP version (v2c or v3). Optional — the API picks a default when omitted.
+- `snmp_username` (String, Sensitive) SNMPv3 username. Omit it to clear it server-side.
+- `snmp_version` (String) SNMP version (v2c or v3). Optional: the API requires only `name` and `ip_address`, and whatever it reports back settles into state.
 
 ### Read-Only
 
 - `consecutive_failures` (Number) Number of failed polls in a row. Reset to 0 on the next successful poll; `status` flips to `unreachable` at 3.
 - `created_at` (String) Creation timestamp.
 - `id` (String) Unique identifier (UUID).
-- `last_error_message` (String) Message of the most recent polling error, truncated at 500 characters. Null once a poll succeeds.
-- `last_error_type` (String) Type of the most recent polling error (e.g. `timeout`). Null once a poll succeeds.
+- `last_error_message` (String) The polling agent's error detail for the most recent failed attempt, truncated at 500 characters. Null once a poll succeeds.
+- `last_error_type` (String) Category of the most recent polling failure as reported by the polling agent (e.g. `timeout`). Null once a poll succeeds.
 - `last_polled_at` (String) Last poll timestamp.
 - `model` (String) Detected model.
 - `status` (String) Current status (up, down, unknown, unreachable). Flips to `unreachable` after 3 consecutive failed polls.

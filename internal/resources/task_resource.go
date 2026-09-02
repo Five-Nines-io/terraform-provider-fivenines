@@ -3,7 +3,9 @@ package resources
 import (
 	"context"
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -16,8 +18,9 @@ import (
 )
 
 var (
-	_ resource.Resource                = &taskResource{}
-	_ resource.ResourceWithImportState = &taskResource{}
+	_ resource.Resource                   = &taskResource{}
+	_ resource.ResourceWithImportState    = &taskResource{}
+	_ resource.ResourceWithValidateConfig = &taskResource{}
 )
 
 type taskResource struct {
@@ -68,13 +71,10 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Required:    true,
 			},
 			"schedule_type": schema.StringAttribute{
-				Description: `Schedule type: "cron" or "interval". Changing this forces recreation.`,
+				Description: `Schedule type: "cron" or "interval".`,
 				Required:    true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("cron", "interval"),
-				},
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"paused": schema.BoolAttribute{
@@ -83,12 +83,20 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Computed:    true,
 			},
 			"schedule": schema.StringAttribute{
-				Description: "Cron expression (required when schedule_type is cron).",
+				Description: `Cron expression. Required while schedule_type is "cron". Once schedule_type is "interval" you may drop it, but the API keeps the last value rather than clearing it.`,
 				Optional:    true,
+				Computed:    true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"interval_seconds": schema.Int64Attribute{
-				Description: "Interval in seconds (required when schedule_type is interval).",
+				Description: `Interval in seconds. Required while schedule_type is "interval". Once schedule_type is "cron" you may drop it, but the API keeps the last value rather than clearing it.`,
 				Optional:    true,
+				Computed:    true,
+				Validators: []validator.Int64{
+					int64validator.AtLeast(1),
+				},
 			},
 			"grace_period_minutes": schema.Int64Attribute{
 				Description: "Grace period in minutes before marking as missed.",
@@ -102,8 +110,11 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Default:     stringdefault.StaticString("UTC"),
 			},
 			"host_id": schema.StringAttribute{
-				Description: "Optional host ID to associate this task with.",
+				Description: "Optional host ID to associate this task with. Omit it to detach; an empty string is not a host id.",
 				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"status": schema.StringAttribute{
 				Description: "Current status.",
@@ -114,13 +125,14 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Computed:    true,
 			},
 			"ping_key": schema.StringAttribute{
-				Description: "Ping key for sending heartbeats.",
+				Description: "Ping key for sending heartbeats. Server-generated, and stored in Terraform state — treat the state file as a secret. The key only authenticates heartbeats for this one task; replace the task to issue a new one.",
 				Computed:    true,
 				Sensitive:   true,
 			},
 			"ping_url": schema.StringAttribute{
-				Description: "URL to send heartbeat pings to.",
+				Description: "URL to send heartbeat pings to. Embeds ping_key, so it carries the same secret and the same state-file caveat.",
 				Computed:    true,
+				Sensitive:   true,
 			},
 			"expected_ping_at": schema.StringAttribute{
 				Description: "Next expected ping time.",
@@ -153,6 +165,48 @@ func (r *taskResource) Configure(_ context.Context, req resource.ConfigureReques
 		return
 	}
 	r.client = c
+}
+
+func (r *taskResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var config taskModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	resp.Diagnostics.Append(validateTaskSchedule(config)...)
+}
+
+// validateTaskSchedule enforces the schedule_type-specific required fields.
+// schedule_type is updatable in place, so a config can move between the two shapes
+// and each half has to bring its own field along.
+func validateTaskSchedule(config taskModel) diag.Diagnostics {
+	var diags diag.Diagnostics
+
+	// Unknown values only resolve at apply time, so leave them to the API.
+	if config.ScheduleType.IsNull() || config.ScheduleType.IsUnknown() {
+		return diags
+	}
+
+	switch config.ScheduleType.ValueString() {
+	case "cron":
+		if config.Schedule.IsNull() {
+			diags.AddAttributeError(
+				path.Root("schedule"),
+				"Missing required attribute",
+				`"schedule" is required when "schedule_type" is "cron".`,
+			)
+		}
+	case "interval":
+		if config.IntervalSeconds.IsNull() {
+			diags.AddAttributeError(
+				path.Root("interval_seconds"),
+				"Missing required attribute",
+				`"interval_seconds" is required when "schedule_type" is "interval".`,
+			)
+		}
+	}
+
+	return diags
 }
 
 func (r *taskResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -194,11 +248,20 @@ func (r *taskResource) Create(ctx context.Context, req resource.CreateRequest, r
 
 	// Handle pause state after creation
 	if !plan.Paused.IsNull() && plan.Paused.ValueBool() {
-		if err := r.client.PauseTask(ctx, task.ID); err != nil {
-			resp.Diagnostics.AddError("Error pausing task after creation", err.Error())
+		paused, err := r.client.PauseTask(ctx, task.ID)
+		if err != nil {
+			// The task already exists server-side. Terraform taints a resource whose
+			// Create errors with state set, so the next apply replaces it — that still
+			// beats writing no state, which would leak this task and create a second
+			// one on the next apply.
+			mapTaskToState(task, &plan)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+			resp.Diagnostics.AddError("Error pausing task after creation",
+				"The task was created but could not be paused. It is recorded as tainted, so the next apply "+
+					"will destroy and recreate it (issuing a new ping_key).\n\n"+err.Error())
 			return
 		}
-		task.Status = "paused"
+		task = paused
 	}
 
 	mapTaskToState(task, &plan)
@@ -241,29 +304,18 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 
 	id := state.ID.ValueString()
 
-	name := plan.Name.ValueString()
+	// schedule/interval_seconds are Optional+Computed since #8 — the API keeps
+	// the counterpart it already stored when you switch schedule_type — so they
+	// are omitted rather than cleared when the plan has no value. host_id is
+	// Optional-only and provider-owned: dropping it has to clear it server-side.
 	input := client.UpdateTaskInput{
-		Name: &name,
-	}
-	if !plan.Schedule.IsNull() && !plan.Schedule.IsUnknown() {
-		v := plan.Schedule.ValueString()
-		input.Schedule = &v
-	}
-	if !plan.IntervalSeconds.IsNull() && !plan.IntervalSeconds.IsUnknown() {
-		v := plan.IntervalSeconds.ValueInt64()
-		input.IntervalSeconds = &v
-	}
-	if !plan.GracePeriodMinutes.IsNull() && !plan.GracePeriodMinutes.IsUnknown() {
-		v := int(plan.GracePeriodMinutes.ValueInt64())
-		input.GracePeriodMinutes = &v
-	}
-	if !plan.TimeZone.IsNull() && !plan.TimeZone.IsUnknown() {
-		v := plan.TimeZone.ValueString()
-		input.TimeZone = &v
-	}
-	if !plan.HostID.IsNull() && !plan.HostID.IsUnknown() {
-		v := plan.HostID.ValueString()
-		input.HostID = &v
+		Name:               stringPtr(plan.Name),
+		ScheduleType:       stringPtr(plan.ScheduleType),
+		Schedule:           stringPtr(plan.Schedule),
+		IntervalSeconds:    int64Ptr(plan.IntervalSeconds),
+		GracePeriodMinutes: intPtr(plan.GracePeriodMinutes),
+		TimeZone:           stringPtr(plan.TimeZone),
+		HostID:             stringPtr(plan.HostID),
 	}
 
 	var task *client.Task
@@ -286,21 +338,23 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	}
 
 	// Handle pause/resume state change
-	if !plan.Paused.IsNull() {
+	if !plan.Paused.IsNull() && !plan.Paused.IsUnknown() {
 		wantPaused := plan.Paused.ValueBool()
-		isPaused := task.Status == "paused"
+		isPaused := task.Status == client.StatusPaused
 		if wantPaused && !isPaused {
-			if err := r.client.PauseTask(ctx, id); err != nil {
+			paused, err := r.client.PauseTask(ctx, id)
+			if err != nil {
 				resp.Diagnostics.AddError("Error pausing task", err.Error())
 				return
 			}
-			task.Status = "paused"
+			task = paused
 		} else if !wantPaused && isPaused {
-			if err := r.client.ResumeTask(ctx, id); err != nil {
+			resumed, err := r.client.ResumeTask(ctx, id)
+			if err != nil {
 				resp.Diagnostics.AddError("Error resuming task", err.Error())
 				return
 			}
-			task.Status = "active"
+			task = resumed
 		}
 	}
 
@@ -334,16 +388,14 @@ func mapTaskToState(t *client.Task, state *taskModel) {
 	state.ID = types.StringValue(t.ID)
 	state.Name = types.StringValue(t.Name)
 	state.ScheduleType = types.StringValue(t.ScheduleType)
-	state.Paused = types.BoolValue(t.Status == "paused")
-	state.Schedule = types.StringValue(t.Schedule)
-	if t.IntervalSeconds != nil {
-		state.IntervalSeconds = types.Int64Value(*t.IntervalSeconds)
-	} else {
-		state.IntervalSeconds = types.Int64Null()
-	}
+	state.Paused = types.BoolValue(t.Status == client.StatusPaused)
+	// The API answers null for the schedule of an interval task, and has been
+	// seen to answer "" — both mean "no cron expression".
+	state.Schedule = optionalNonEmptyString(t.Schedule)
+	state.IntervalSeconds = optionalInt64(t.IntervalSeconds)
 	state.GracePeriodMinutes = types.Int64Value(int64(t.GracePeriodMinutes))
-	state.TimeZone = types.StringValue(t.TimeZone)
-	state.HostID = optionalString(t.HostID)
+	state.TimeZone = stringOrKeep(t.TimeZone, state.TimeZone)
+	state.HostID = optionalNonEmptyString(t.HostID)
 	state.Status = types.StringValue(t.Status)
 	state.MonitoringStatus = types.StringValue(t.MonitoringStatus)
 	state.PingKey = types.StringValue(t.PingKey)

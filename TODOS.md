@@ -88,11 +88,19 @@
   could cheaply assert the server honoured them
 - `updated_since` has no RFC3339 validator, so a malformed timestamp the server
   ignores yields a silent superset
+- `fivenines_host_groups` (#25) forwards `q`/`updated_since`/`order`/`direction`
+  the same way. `order`/`direction` are enumerated so they are validated at plan
+  time, but `q` and `updated_since` are not, and `name` is present on every
+  returned group, so the same cheap server-honoured-it assertion is available
 
 ### monitors is an ordered List with a server-defined default order
 - `order`/`direction` are optional, so default ordering is whatever the API
   returns. A server-side reordering shifts every index, causing spurious diffs in
   anything indexing positionally and unstable keys in an index-keyed `for_each`
+- `fivenines_host_groups.host_groups` (#25) has the same shape, and its default
+  order is `position` — the one column the API renumbers when any sibling moves,
+  without touching `updated_at`. Indexing it positionally is the least stable of
+  the two
 - Fix: a Set, or make `order` mandatory
 
 ### Offset pagination skips a row when an earlier one is deleted mid-walk
@@ -341,12 +349,14 @@
 - Fix: a shared `resourcePath(base, id, suffix...)` helper so the escaping cannot
   drift per-resource again
 
-### fivenines_uptime_monitors has no limit
-- The data source exposes `order`/`direction` but no `limit`/`per_page`, and the
-  client always walks to the last page. "The 5 most recently updated monitors"
-  still pulls every monitor in the org on every plan and refresh
-- Fix: optional `limit`, threaded into ListUptimeMonitorsOptions, stopping the
-  walk once `len(all) >= limit` and sizing per_page as `min(100, limit)`
+### The list data sources have no limit
+- `fivenines_uptime_monitors` exposes `order`/`direction` but no `limit`/`per_page`,
+  and the client always walks to the last page. "The 5 most recently updated
+  monitors" still pulls every monitor in the org on every plan and refresh
+- `fivenines_host_groups` (#25) is the same, though it costs less: a host group
+  list is small and its `q` filter narrows server-side before the walk
+- Fix: optional `limit`, threaded into the ListXOptions struct, stopping the walk
+  once `len(all) >= limit` and sizing per_page as `min(100, limit)`
 
 ### dns monitors may also require hostname
 - `protocolRequirements` maps dns to `{dns_record_type}` only, but a DNS monitor

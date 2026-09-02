@@ -153,7 +153,8 @@ func decodeResponse(resp *http.Response, target interface{}) error {
 const AsyncDeletionTimeout = 5 * time.Minute
 
 // deletionDone turns the result of a "does it still exist?" GET into a poll
-// verdict: a 404 means the record is gone, anything else is a real error.
+// verdict: a 404 means the record is gone, anything else is an error for
+// waitForDeletion to classify.
 func deletionDone(err error) (bool, error) {
 	if err == nil {
 		return false, nil
@@ -162,6 +163,19 @@ func deletionDone(err error) (bool, error) {
 		return true, nil
 	}
 	return false, err
+}
+
+// retryablePoll reports whether an error from a deletion poll is worth another
+// attempt. The DELETE was already accepted, so a proxy 502 or a dropped
+// connection mid-teardown should not turn a successful destroy into a failure.
+// A 4xx will not fix itself, so those fail immediately.
+func retryablePoll(err error) bool {
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		// Transport-level: connection reset, DNS blip, timeout on one request.
+		return true
+	}
+	return apiErr.StatusCode >= 500
 }
 
 // waitForDeletion polls gone until it reports the record has disappeared,
@@ -175,6 +189,20 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 	const maxInterval = 5 * time.Second
 	interval := 500 * time.Millisecond
 
+	// Kept so a poll that only ever saw transient failures reports why, rather
+	// than a bare timeout.
+	var lastErr error
+
+	timedOut := func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if lastErr != nil {
+			return fmt.Errorf("timed out after %s waiting for the deletion to complete; last error: %w", timeout, lastErr)
+		}
+		return fmt.Errorf("timed out after %s waiting for the deletion to complete", timeout)
+	}
+
 	for {
 		done, err := gone(pollCtx)
 		switch {
@@ -185,18 +213,17 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 		case ctx.Err() != nil:
 			return ctx.Err()
 		case pollCtx.Err() != nil:
-			return fmt.Errorf("timed out after %s waiting for the deletion to complete", timeout)
-		case err != nil:
+			return timedOut()
+		case err != nil && !retryablePoll(err):
 			return err
+		case err != nil:
+			lastErr = err
 		}
 
 		select {
 		case <-time.After(interval):
 		case <-pollCtx.Done():
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return fmt.Errorf("timed out after %s waiting for the deletion to complete", timeout)
+			return timedOut()
 		}
 
 		if interval *= 2; interval > maxInterval {

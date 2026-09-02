@@ -414,7 +414,10 @@ func mapNetworkDeviceToState(d *client.NetworkDevice, state *networkDeviceModel)
 	state.DeviceType = stringOrKeep(d.DeviceType, state.DeviceType)
 	state.PollingInterval = types.Int64Value(int64(d.PollingInterval))
 	state.SNMPVersion = stringOrKeep(d.SNMPVersion, state.SNMPVersion)
-	state.SNMPUsername = stringOrKeep(d.SNMPUsername, state.SNMPUsername)
+	// snmp_username has no default and is not Computed, so the config owns it:
+	// keeping the prior value on a null would hide an out-of-band change forever
+	// instead of letting the next plan repair it.
+	state.SNMPUsername = optionalString(d.SNMPUsername)
 	state.SNMPSecurityLevel = stringOrKeep(d.SNMPSecurityLevel, state.SNMPSecurityLevel)
 	state.SNMPAuthProtocol = stringOrKeep(d.SNMPAuthProtocol, state.SNMPAuthProtocol)
 	state.SNMPPrivProtocol = stringOrKeep(d.SNMPPrivProtocol, state.SNMPPrivProtocol)

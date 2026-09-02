@@ -8,6 +8,7 @@ import (
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-jsontypes/jsontypes"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -253,24 +254,16 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 		break
 	}
 
-	// If execution_graph_json changed, create a new version and publish. The
-	// comparison is semantic: reformatting the graph must not cut a new version.
-	if !plan.ExecutionGraphJSON.IsNull() && !plan.ExecutionGraphJSON.IsUnknown() {
-		graphChanged := true
-		if !state.ExecutionGraphJSON.IsNull() {
-			unchanged, d := plan.ExecutionGraphJSON.StringSemanticEquals(ctx, state.ExecutionGraphJSON)
-			resp.Diagnostics.Append(d...)
-			if resp.Diagnostics.HasError() {
-				return
-			}
-			graphChanged = !unchanged
-		}
-
-		if graphChanged {
-			if err := r.publishGraph(ctx, id, plan.ExecutionGraphJSON.ValueString()); err != nil {
-				resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
-				return
-			}
+	// If execution_graph_json changed, create a new version and publish.
+	publish, d := shouldPublishGraph(ctx, plan.ExecutionGraphJSON, state.ExecutionGraphJSON)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if publish {
+		if err := r.publishGraph(ctx, id, plan.ExecutionGraphJSON.ValueString()); err != nil {
+			resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
+			return
 		}
 	}
 
@@ -325,6 +318,28 @@ func (r *workflowResource) ImportState(ctx context.Context, req resource.ImportS
 		return
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
+}
+
+// shouldPublishGraph decides whether an update has to cut a new workflow
+// version. The comparison is semantic, so reformatting the graph — a different
+// key order, different indentation — publishes nothing. A plan with no graph
+// publishes nothing either; a graph that was never in state always publishes.
+func shouldPublishGraph(ctx context.Context, planned, stored jsontypes.Normalized) (bool, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	if planned.IsNull() || planned.IsUnknown() {
+		return false, diags
+	}
+	if stored.IsNull() || stored.IsUnknown() {
+		return true, diags
+	}
+
+	unchanged, d := planned.StringSemanticEquals(ctx, stored)
+	diags.Append(d...)
+	if diags.HasError() {
+		return false, diags
+	}
+	return !unchanged, diags
 }
 
 // publishGraph creates a new workflow version from JSON and publishes it.

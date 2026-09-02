@@ -274,10 +274,10 @@ func (r *statusPageResource) Update(ctx context.Context, req resource.UpdateRequ
 
 	id := state.ID.ValueInt64()
 
-	// Every field here is either Required or Optional+Computed, so a null plan
-	// value means "keep the server value" and the key is omitted. items is the
-	// exception: Terraform owns the list, and the API needs an explicit [] to
-	// empty a page, so null and empty both send [].
+	// A null plan value means "keep the server value" and the key is omitted.
+	// items needs the pointer-to-slice shape for one reason: an explicit
+	// `items = []` has to reach the API as [], which a plain slice with
+	// omitempty cannot express.
 	input := client.UpdateStatusPageInput{
 		Name:                    stringPtr(plan.Name),
 		Description:             stringPtr(plan.Description),
@@ -378,14 +378,14 @@ func mapStatusPageToState(p *client.StatusPage, state *statusPageModel) {
 }
 
 // planItemsToUpdateInput turns the planned item list into an update value.
-// Unknown omits the key; null and empty both send an explicit [], which is the
-// only thing the API accepts as "remove every item".
+//
+// A config with no `items` at all omits the key, so a page whose items are
+// curated in the dashboard is left alone — the API spec warns Go clients about
+// exactly this. Writing `items = []` is the explicit way to empty a page, and
+// that reaches the API as [] rather than being swallowed by omitempty.
 func planItemsToUpdateInput(itemsList types.List) *[]client.StatusPageItem {
-	if itemsList.IsUnknown() {
+	if itemsList.IsNull() || itemsList.IsUnknown() {
 		return nil
-	}
-	if itemsList.IsNull() {
-		return &[]client.StatusPageItem{}
 	}
 	items := planItemsToClient(itemsList)
 	return &items

@@ -239,16 +239,121 @@ func TestClient_WaitForInstanceDeletion_Timeout(t *testing.T) {
 	}
 }
 
-func TestClient_WaitForInstanceDeletion_PropagatesErrors(t *testing.T) {
+// The DELETE was already accepted, so a proxy hiccup during the poll must not
+// turn a successful destroy into a failed one.
+func TestClient_WaitForInstanceDeletion_SurvivesTransientErrors(t *testing.T) {
+	var gets int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&gets, 1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "bad gateway"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not found"})
+	})
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("expected the 502 to be retried, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&gets); got != 2 {
+		t.Errorf("expected a retry after the 502, got %d requests", got)
+	}
+}
+
+// A persistent server error still fails, but as a timeout that names the last
+// error rather than a bare deadline message.
+func TestClient_WaitForInstanceDeletion_ReportsLastTransientError(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "boom"})
 	})
 
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected an error when the poll never succeeds")
+	}
+	if !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("expected a timeout naming the last error, got: %v", err)
+	}
+}
+
+// A 4xx will not fix itself, so it must not burn the whole timeout window.
+func TestClient_WaitForInstanceDeletion_FailsFastOnClientError(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "forbidden"})
+	})
+
+	start := time.Now()
 	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second)
 	apiErr, ok := err.(*APIError)
-	if !ok || apiErr.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("expected the 500 to surface, got: %v", err)
+	if !ok || apiErr.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected the 403 to surface immediately, got: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("expected a fast failure, took %s", elapsed)
+	}
+}
+
+// Regression: waitForDeletion used to check the context before the poll result,
+// so a GET that came back 404 on the very tick the deadline expired reported a
+// timeout for a resource that was in fact gone.
+func TestWaitForDeletion_GoneWinsOnTheDeadlineTick(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	err := waitForDeletion(context.Background(), time.Nanosecond, func(context.Context) (bool, error) {
+		<-expired.Done() // the deadline has already passed when "gone" reports true
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("expected success when the resource is gone, got: %v", err)
+	}
+}
+
+func TestClient_WaitForNetworkDeviceDeletion(t *testing.T) {
+	var gets int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&gets, 1) == 1 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"network_device": map[string]interface{}{
+					"id": "dev-uuid", "name": "core-sw", "ip_address": "192.0.2.1",
+					"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not found"})
+	})
+
+	if err := c.WaitForNetworkDeviceDeletion(context.Background(), "dev-uuid", 30*time.Second); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := atomic.LoadInt32(&gets); got != 2 {
+		t.Errorf("expected to poll until the 404, got %d requests", got)
+	}
+}
+
+func TestRetryablePoll(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"transport failure", errors.New("connection reset by peer"), true},
+		{"bad gateway", &APIError{StatusCode: http.StatusBadGateway}, true},
+		{"server error", &APIError{StatusCode: http.StatusInternalServerError}, true},
+		{"forbidden", &APIError{StatusCode: http.StatusForbidden}, false},
+		{"unprocessable", &APIError{StatusCode: 422}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := retryablePoll(tt.err); got != tt.want {
+				t.Errorf("retryablePoll(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

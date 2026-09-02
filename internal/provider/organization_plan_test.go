@@ -423,3 +423,129 @@ output "emails" {
 		}},
 	})
 }
+
+// Fix 4 returns from Update having written state assembled from PRIOR state plus
+// the planned email, rather than from an API response. That is exactly the shape
+// that trips "Provider produced inconsistent result after apply" — every
+// attribute Terraform planned as KNOWN must come back identical. A direct-call
+// unit test cannot see that check; only real Terraform can.
+func TestOrganizationInvitationPlan_RecasingAppliesConsistently(t *testing.T) {
+	var posts int
+	invitation := map[string]interface{}{
+		"id": 12, "email": "newhire@acme.com", "role": "member", "status": "pending",
+		"invited_by": "admin@acme.com", "expires_at": "2026-09-08T00:00:00Z",
+		"accepted_at": nil, "created_at": "2026-09-01T00:00:00Z",
+		"updated_at": "2026-09-01T00:00:00Z",
+	}
+	planTest(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			posts++
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]interface{}{"invitation": invitation})
+		case http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"invitations": []map[string]interface{}{invitation},
+				"meta":        map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
+			})
+		}
+	})
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: providerConfig + `
+resource "fivenines_organization_invitation" "new_hire" {
+  email = "newhire@acme.com"
+  role  = "member"
+}`,
+			},
+			{
+				// Only the casing moves. The apply must COMPLETE (no consistency
+				// error), converge (no perpetual diff), and send no second email.
+				Config: providerConfig + `
+resource "fivenines_organization_invitation" "new_hire" {
+  email = "NewHire@Acme.com"
+  role  = "member"
+}`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("fivenines_organization_invitation.new_hire", "email", "NewHire@Acme.com"),
+					resource.TestCheckResourceAttr("fivenines_organization_invitation.new_hire", "id", "12"),
+					resource.TestCheckResourceAttr("fivenines_organization_invitation.new_hire", "status", "pending"),
+					// The computed fields must survive the state-only write.
+					resource.TestCheckResourceAttr("fivenines_organization_invitation.new_hire", "created_at", "2026-09-01T00:00:00Z"),
+					resource.TestCheckResourceAttr("fivenines_organization_invitation.new_hire", "invited_by", "admin@acme.com"),
+					func(*terraform.State) error {
+						// One POST for the create, none for the re-casing.
+						if posts != 1 {
+							return fmt.Errorf("re-casing sent %d extra invitation email(s), invalidating the live link", posts-1)
+						}
+						return nil
+					},
+				),
+			},
+			{
+				// Third step, same config: proves the state written by fix 4
+				// converges instead of showing a perpetual diff.
+				Config: providerConfig + `
+resource "fivenines_organization_invitation" "new_hire" {
+  email = "NewHire@Acme.com"
+  role  = "member"
+}`,
+				PlanOnly: true,
+			},
+		},
+	})
+}
+
+// The member half of the same shape (fix 8), through real Terraform.
+func TestOrganizationMemberPlan_RecasingAppliesConsistently(t *testing.T) {
+	planTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method == http.MethodPatch {
+			json.NewEncoder(w).Encode(map[string]interface{}{"member": memberJSON("member")})
+			return
+		}
+		json.NewEncoder(w).Encode(membersPage("member"))
+	})
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: providerConfig + `
+resource "fivenines_organization_member" "engineer" {
+  email = "engineer@acme.com"
+  role  = "member"
+}`,
+			},
+			{
+				Config: providerConfig + `
+resource "fivenines_organization_member" "engineer" {
+  email = "Engineer@Acme.com"
+  role  = "member"
+}`,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("fivenines_organization_member.engineer", "email", "Engineer@Acme.com"),
+					resource.TestCheckResourceAttr("fivenines_organization_member.engineer", "id", "7"),
+					resource.TestCheckResourceAttr("fivenines_organization_member.engineer", "user_id", "91"),
+					resource.TestCheckResourceAttr("fivenines_organization_member.engineer", "joined_at", "2026-01-01T00:00:00Z"),
+				),
+			},
+			{
+				Config: providerConfig + `
+resource "fivenines_organization_member" "engineer" {
+  email = "Engineer@Acme.com"
+  role  = "member"
+}`,
+				PlanOnly: true,
+			},
+		},
+	})
+}

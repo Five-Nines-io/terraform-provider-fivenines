@@ -128,9 +128,14 @@ func (r *organizationMemberResource) Configure(_ context.Context, req resource.C
 // this the refusal only lands halfway through an apply.
 func (r *organizationMemberResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
 	// No client during `terraform validate`, and nothing to check on create.
-	if r.client == nil || r.client.SkipPlanValidation || req.State.Raw.IsNull() {
+	if r.client == nil || req.State.Raw.IsNull() {
 		return
 	}
+	// skip_plan_validation suppresses the DRY-RUN WRITES, which is all it claims
+	// to do: it exists for a key that cannot perform them. The successor lookup
+	// below is a plain read, and it is the only thing between a mistyped address
+	// and an irreversible offboarding, so it runs either way.
+	skipPreflight := r.client.SkipPlanValidation
 
 	var state organizationMemberModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -140,6 +145,9 @@ func (r *organizationMemberResource) ModifyPlan(ctx context.Context, req resourc
 	id := state.ID.ValueInt64()
 
 	if req.Plan.Raw.IsNull() {
+		if skipPreflight {
+			return
+		}
 		tflog.Debug(ctx, "Dry-run validating member removal", map[string]interface{}{"id": id})
 		err := r.client.DeleteOrganizationMember(client.WithDryRun(ctx), id)
 		reportDryRun(err, "removal", state.Email.ValueString(), &resp.Diagnostics)
@@ -152,6 +160,13 @@ func (r *organizationMemberResource) ModifyPlan(ctx context.Context, req resourc
 		return
 	}
 
+	// An address that resolves at apply time is not yet a DIFFERENT address.
+	// ValueString() flattens unknown to "", which would read as a replacement
+	// pointed at nobody and refuse a perfectly valid configuration.
+	if plan.Email.IsUnknown() {
+		return
+	}
+
 	// A different address replaces the resource. Terraform destroys before it
 	// creates, so the removal offboards the incumbent — irreversibly, tokens and
 	// all — and only THEN does adoption look the successor up. If the successor
@@ -159,11 +174,13 @@ func (r *organizationMemberResource) ModifyPlan(ctx context.Context, req resourc
 	// that apply deletes somebody's account and then fails having achieved
 	// nothing. Both halves are therefore validated before either runs.
 	if !strings.EqualFold(plan.Email.ValueString(), state.Email.ValueString()) {
-		tflog.Debug(ctx, "Dry-run validating member removal for replacement", map[string]interface{}{"id": id})
-		err := r.client.DeleteOrganizationMember(client.WithDryRun(ctx), id)
-		reportDryRun(err, "removal", state.Email.ValueString(), &resp.Diagnostics)
-		if resp.Diagnostics.HasError() {
-			return
+		if !skipPreflight {
+			tflog.Debug(ctx, "Dry-run validating member removal for replacement", map[string]interface{}{"id": id})
+			err := r.client.DeleteOrganizationMember(client.WithDryRun(ctx), id)
+			reportDryRun(err, "removal", state.Email.ValueString(), &resp.Diagnostics)
+			if resp.Diagnostics.HasError() {
+				return
+			}
 		}
 
 		successor := plan.Email.ValueString()
@@ -198,7 +215,7 @@ func (r *organizationMemberResource) ModifyPlan(ctx context.Context, req resourc
 		return
 	}
 
-	if plan.Role.IsUnknown() || plan.Role.ValueString() == state.Role.ValueString() {
+	if skipPreflight || plan.Role.IsUnknown() || plan.Role.ValueString() == state.Role.ValueString() {
 		return
 	}
 
@@ -333,7 +350,23 @@ func (r *organizationMemberResource) Read(ctx context.Context, req resource.Read
 		}
 	}
 
-	tflog.Debug(ctx, "Membership no longer present, removing from state", map[string]interface{}{"id": id})
+	// The membership id is not durable — leaving and rejoining mints a new one —
+	// so an id that vanished does not mean the person did. If they are still on
+	// the roster, REBIND: this resource tracks a person, and dropping them here
+	// would leave a later destroy with nothing to remove while their access, and
+	// every token they own, stays live.
+	email := state.Email.ValueString()
+	for i := range members {
+		if strings.EqualFold(members[i].Email, email) {
+			tflog.Debug(ctx, "Membership id changed, rebinding to the current one",
+				map[string]interface{}{"old": id, "new": members[i].ID, "email": email})
+			mapMemberToState(&members[i], &state)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+			return
+		}
+	}
+
+	tflog.Debug(ctx, "Member no longer in the organization, removing from state", map[string]interface{}{"id": id})
 	resp.State.RemoveResource(ctx)
 }
 
@@ -420,6 +453,25 @@ func (r *organizationMemberResource) Delete(ctx context.Context, req resource.De
 // ImportState accepts either a membership id or the member's email address.
 func (r *organizationMemberResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	if id, err := strconv.ParseInt(req.ID, 10, 64); err == nil {
+		// The roster read costs one request on import and buys the same owner
+		// refusal the address path makes — importing the owner otherwise
+		// succeeds into a resource whose every later plan is refused.
+		members, listErr := r.client.ListOrganizationMembers(ctx)
+		if listErr != nil {
+			resp.Diagnostics.AddError("Error listing organization members", listErr.Error())
+			return
+		}
+		for i := range members {
+			if members[i].ID == id && members[i].Role == roleOwner {
+				resp.Diagnostics.AddError(
+					"Cannot manage the organization owner",
+					fmt.Sprintf("Membership %d belongs to %s, the organization owner. Importing them would "+
+						"produce a resource whose every subsequent plan is refused, since `role` accepts only "+
+						"admin and member and the API refuses to change or remove an owner.", id, members[i].Email),
+				)
+				return
+			}
+		}
 		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
 		return
 	}

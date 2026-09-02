@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -150,6 +151,12 @@ func (r *organizationInvitationResource) ModifyPlan(ctx context.Context, req res
 	if state.Status.ValueString() != statusAccepted {
 		return
 	}
+	// A changed address REPLACES the resource: the role travels with the new
+	// invitation being created, not with the spent one. Only an in-place role
+	// change on the accepted invitation is the thing to refuse.
+	if plan.Email.IsUnknown() || !strings.EqualFold(plan.Email.ValueString(), state.Email.ValueString()) {
+		return
+	}
 	if plan.Role.IsUnknown() || plan.Role.ValueString() == state.Role.ValueString() {
 		return
 	}
@@ -275,6 +282,16 @@ func (r *organizationInvitationResource) Update(ctx context.Context, req resourc
 		return
 	}
 
+	// Nothing to send: only the role can change without replacing the resource,
+	// so an unchanged role means this is a cosmetic edit. This has to precede the
+	// accepted refusal below, or re-casing the address of an accepted invitation
+	// fails forever.
+	if plan.Role.ValueString() == state.Role.ValueString() {
+		state.Email = plan.Email
+		resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+		return
+	}
+
 	if state.Status.ValueString() == statusAccepted {
 		resp.Diagnostics.AddError(
 			"Invitation has already been accepted",
@@ -286,14 +303,8 @@ func (r *organizationInvitationResource) Update(ctx context.Context, req resourc
 	}
 
 	// Re-issuing sends a new email and invalidates the outstanding acceptance
-	// link, so a cosmetic edit must not trigger one. Only the role can change
-	// without replacing the resource, so if it did not, there is nothing to send.
-	if plan.Role.ValueString() == state.Role.ValueString() {
-		state.Email = plan.Email
-		resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
-		return
-	}
-
+	// link, which is why the cosmetic-edit branch above returns before reaching
+	// this point.
 	tflog.Debug(ctx, "Re-issuing organization invitation", map[string]interface{}{
 		"email": plan.Email.ValueString(),
 		"role":  plan.Role.ValueString(),
@@ -347,7 +358,17 @@ func (r *organizationInvitationResource) Delete(ctx context.Context, req resourc
 		return
 	}
 	member, lookupErr := findMemberByEmail(ctx, r.client, state.Email.ValueString())
-	if lookupErr != nil || member == nil {
+	if lookupErr != nil {
+		resp.Diagnostics.AddWarning(
+			"Could not confirm the invitation was revoked rather than accepted",
+			fmt.Sprintf("Invitation %d for %s was already gone, and the member roster could not be read to tell "+
+				"a revoke apart from an acceptance that beat it: %s\n\nIf they accepted, they are now a member "+
+				"and revoking did not withdraw that access — check before assuming it did.",
+				state.ID.ValueInt64(), state.Email.ValueString(), lookupErr),
+		)
+		return
+	}
+	if member == nil {
 		return
 	}
 	resp.Diagnostics.AddWarning(

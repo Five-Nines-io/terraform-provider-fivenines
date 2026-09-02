@@ -1509,3 +1509,234 @@ func TestOrganizationMemberModifyPlan_RateLimitWarnsRatherThanRefuses(t *testing
 		t.Error("expected a warning that the pre-flight could not run")
 	}
 }
+
+// --- Codex post-fix re-review regressions ---
+
+// skip_plan_validation suppresses the dry-run WRITES. It must not also suppress
+// the read-only successor lookup: with the flag on, a mistyped address would
+// otherwise offboard the incumbent deterministically and then fail to adopt.
+func TestOrganizationMemberModifyPlan_SkipPlanValidationKeepsSuccessorCheck(t *testing.T) {
+	var writes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete || r.Method == http.MethodPatch {
+			writes++
+		}
+		json.NewEncoder(w).Encode(membersEnvelope(map[string]interface{}{
+			"id": 7, "user_id": 91, "email": "engineer@acme.com", "role": "member",
+		}))
+	}))
+	t.Cleanup(srv.Close)
+	c := client.NewClient(srv.URL, "test-key")
+	c.SkipPlanValidation = true
+
+	s := organizationMemberSchemaForTest(t)
+	plan := seededState(t, s, &organizationMemberModel{
+		ID: types.Int64Value(7), Email: types.StringValue("typo@acme.com"), Role: types.StringValue("member"),
+	})
+	state := seededState(t, s, &organizationMemberModel{
+		ID: types.Int64Value(7), Email: types.StringValue("engineer@acme.com"), Role: types.StringValue("member"),
+	})
+
+	resp := modifyMemberPlan(t, c, plan, state)
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("skip_plan_validation must not disable the successor check — it guards an irreversible offboarding")
+	}
+	if writes != 0 {
+		t.Errorf("skip_plan_validation must still suppress the dry-run writes, got %d", writes)
+	}
+}
+
+// An address that resolves at apply time is not yet a different address.
+// ValueString() flattens unknown to "", which would read as a replacement
+// pointed at nobody.
+func TestOrganizationMemberModifyPlan_UnknownEmailIsNotAReplacement(t *testing.T) {
+	var requests int
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		json.NewEncoder(w).Encode(membersEnvelope())
+	})
+
+	s := organizationMemberSchemaForTest(t)
+	plan := seededState(t, s, &organizationMemberModel{
+		ID: types.Int64Value(7), Email: types.StringUnknown(), Role: types.StringValue("member"),
+	})
+	state := seededState(t, s, &organizationMemberModel{
+		ID: types.Int64Value(7), Email: types.StringValue("engineer@acme.com"), Role: types.StringValue("member"),
+	})
+
+	resp := modifyMemberPlan(t, c, plan, state)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("an address that resolves later must not be refused: %v", resp.Diagnostics.Errors())
+	}
+	if requests != 0 {
+		t.Errorf("expected no requests for an unresolved address, got %d", requests)
+	}
+}
+
+// The membership id is not durable. Erroring in Delete only helps if the next
+// refresh does not quietly drop the resource — otherwise a removed config block
+// offboards nobody and the rejoined member keeps their access.
+func TestOrganizationMemberRead_RebindsWhenTheMembershipIDChanged(t *testing.T) {
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Same person, rejoined under a new membership id.
+		json.NewEncoder(w).Encode(membersEnvelope(map[string]interface{}{
+			"id": 12, "user_id": 91, "email": "engineer@acme.com", "role": "member",
+		}))
+	})
+
+	ctx := context.Background()
+	s := organizationMemberSchemaForTest(t)
+	state := seededState(t, s, &organizationMemberModel{
+		ID: types.Int64Value(7), Email: types.StringValue("engineer@acme.com"), Role: types.StringValue("member"),
+	})
+
+	resp := &resource.ReadResponse{State: state}
+	(&organizationMemberResource{client: c}).Read(ctx, resource.ReadRequest{State: state}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if resp.State.Raw.IsNull() {
+		t.Fatal("dropping a member who is still in the organization leaves a later destroy with nothing to remove")
+	}
+	var got organizationMemberModel
+	resp.State.Get(ctx, &got)
+	if got.ID.ValueInt64() != 12 {
+		t.Errorf("expected the resource to rebind to membership 12, got %d", got.ID.ValueInt64())
+	}
+}
+
+// A member who really left must still be dropped — the rebind must not resurrect
+// somebody who is genuinely gone.
+func TestOrganizationMemberRead_StillDropsAGenuinelyDepartedMember(t *testing.T) {
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(membersEnvelope(map[string]interface{}{
+			"id": 12, "user_id": 92, "email": "somebody.else@acme.com", "role": "member",
+		}))
+	})
+
+	ctx := context.Background()
+	s := organizationMemberSchemaForTest(t)
+	state := seededState(t, s, &organizationMemberModel{
+		ID: types.Int64Value(7), Email: types.StringValue("engineer@acme.com"), Role: types.StringValue("member"),
+	})
+
+	resp := &resource.ReadResponse{State: state}
+	(&organizationMemberResource{client: c}).Read(ctx, resource.ReadRequest{State: state}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if !resp.State.Raw.IsNull() {
+		t.Error("a member who left must be dropped from state")
+	}
+}
+
+// Importing the owner by membership id has to be refused for the same reason the
+// address path refuses it: the resulting resource can never plan cleanly.
+func TestOrganizationMemberImportState_RefusesTheOwnerByNumericID(t *testing.T) {
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(membersEnvelope(map[string]interface{}{
+			"id": 1, "user_id": 2, "email": "founder@acme.com", "role": "owner",
+		}))
+	})
+
+	ctx := context.Background()
+	resp := &resource.ImportStateResponse{State: emptyState(t, organizationMemberSchemaForTest(t))}
+	(&organizationMemberResource{client: c}).ImportState(ctx,
+		resource.ImportStateRequest{ID: "1"}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected importing the owner by id to be refused, as the address path already is")
+	}
+}
+
+// Re-casing the address of an ACCEPTED invitation was a permanent apply failure:
+// ModifyPlan allowed it and Update then refused it, every time.
+func TestOrganizationInvitationUpdate_AcceptedRecasingIsANoOpNotAFailure(t *testing.T) {
+	var requests int
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{"invitation": map[string]interface{}{
+			"id": 12, "email": "newhire@acme.com", "role": "member", "status": "pending",
+		}})
+	})
+
+	ctx := context.Background()
+	s := organizationInvitationSchemaForTest(t)
+	plan := seededState(t, s, &organizationInvitationModel{
+		ID: types.Int64Value(12), Email: types.StringValue("NewHire@Acme.com"), Role: types.StringValue("member"),
+	})
+	state := seededState(t, s, &organizationInvitationModel{
+		ID: types.Int64Value(12), Email: types.StringValue("newhire@acme.com"),
+		Role: types.StringValue("member"), Status: types.StringValue(statusAccepted),
+	})
+
+	resp := &resource.UpdateResponse{State: state}
+	(&organizationInvitationResource{client: c}).Update(ctx, resource.UpdateRequest{
+		Plan: tfsdk.Plan{Schema: plan.Schema, Raw: plan.Raw}, State: state,
+	}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("a cosmetic edit on a spent invitation must not fail forever: %v", resp.Diagnostics.Errors())
+	}
+	if requests != 0 {
+		t.Errorf("expected no API call for a cosmetic edit, got %d", requests)
+	}
+}
+
+// Repointing a spent invitation at a DIFFERENT person is a replacement, and the
+// role travels with the new invitation — refusing it as an in-place role change
+// on the accepted one blocks a legitimate change.
+func TestOrganizationInvitationModifyPlan_ReplacementIsNotAnAcceptedRoleChange(t *testing.T) {
+	s := organizationInvitationSchemaForTest(t)
+	plan := seededState(t, s, &organizationInvitationModel{
+		ID: types.Int64Value(12), Email: types.StringValue("someone.else@acme.com"), Role: types.StringValue("admin"),
+	})
+	state := seededState(t, s, &organizationInvitationModel{
+		ID: types.Int64Value(12), Email: types.StringValue("newhire@acme.com"),
+		Role: types.StringValue("member"), Status: types.StringValue(statusAccepted),
+	})
+
+	ctx := context.Background()
+	resp := &resource.ModifyPlanResponse{Plan: tfsdk.Plan{Schema: plan.Schema, Raw: plan.Raw}}
+	(&organizationInvitationResource{}).ModifyPlan(ctx, resource.ModifyPlanRequest{
+		Plan:  tfsdk.Plan{Schema: plan.Schema, Raw: plan.Raw},
+		State: state,
+	}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("a replacement is not an in-place role change: %v", resp.Diagnostics.Errors())
+	}
+}
+
+// An unreadable roster must not silently swallow the acceptance-race question.
+func TestOrganizationInvitationDelete_WarnsWhenTheRaceCannotBeResolved(t *testing.T) {
+	c := testServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "Not found", "request_id": "req-404"})
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "Insufficient role"})
+	})
+
+	ctx := context.Background()
+	s := organizationInvitationSchemaForTest(t)
+	state := seededState(t, s, &organizationInvitationModel{
+		ID: types.Int64Value(12), Email: types.StringValue("newhire@acme.com"),
+		Role: types.StringValue("member"), Status: types.StringValue("pending"),
+	})
+
+	resp := &resource.DeleteResponse{State: state}
+	(&organizationInvitationResource{client: c}).Delete(ctx, resource.DeleteRequest{State: state}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("the destroy must still complete: %v", resp.Diagnostics.Errors())
+	}
+	if resp.Diagnostics.WarningsCount() == 0 {
+		t.Fatal("an unresolvable acceptance race must be reported, not swallowed")
+	}
+}

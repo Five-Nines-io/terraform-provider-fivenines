@@ -289,6 +289,24 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 	}
 }
 
+// decodeKeyed decodes a JSON response body that may or may not be wrapped in a
+// single-key envelope, e.g. both {"version": {...}} and {...} decode into the
+// same target for key "version".
+func decodeKeyed(resp *http.Response, key string, target interface{}) error {
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response: %w", err)
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal(body, &envelope) == nil {
+		if inner, ok := envelope[key]; ok {
+			return json.Unmarshal(inner, target)
+		}
+	}
+	return json.Unmarshal(body, target)
+}
+
 // listResponse is a generic list response envelope.
 type listResponse struct {
 	Meta PaginationMeta `json:"meta"`
@@ -617,13 +635,28 @@ func (c *Client) taskAction(ctx context.Context, id string, action string) (*Tas
 
 // --- Workflows ---
 
-func (c *Client) ListWorkflows(ctx context.Context) ([]Workflow, error) {
+// ListWorkflows returns every workflow matching opts. Archived workflows are
+// excluded by the API unless opts.Status asks for them.
+func (c *Client) ListWorkflows(ctx context.Context, opts WorkflowListOptions) ([]Workflow, error) {
 	var all []Workflow
 	page := 1
 	for {
-		// The API already excludes archived workflows, but filter client-side as well
-		path := fmt.Sprintf("/api/v1/workflows?page=%d&per_page=100", page)
-		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		query := url.Values{}
+		query.Set("page", strconv.Itoa(page))
+		query.Set("per_page", "100")
+		for key, value := range map[string]string{
+			"status":        opts.Status,
+			"updated_since": opts.UpdatedSince,
+			"order":         opts.Order,
+			"direction":     opts.Direction,
+			"q":             opts.Q,
+		} {
+			if value != "" {
+				query.Set(key, value)
+			}
+		}
+
+		resp, err := c.doRequest(ctx, "GET", "/api/v1/workflows?"+query.Encode(), nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -638,11 +671,9 @@ func (c *Client) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 		if err := decodeResponse(resp, &result); err != nil {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
-		for _, w := range result.Workflows {
-			if w.Status != "archived" {
-				all = append(all, w)
-			}
-		}
+		// Archived workflows are excluded by the API unless opts.Status asks for
+		// them, so there is no client-side filter to apply here.
+		all = append(all, result.Workflows...)
 		more, err := morePages(len(result.Workflows), result.Meta, page)
 		if err != nil {
 			return nil, err
@@ -730,13 +761,11 @@ func (c *Client) CreateWorkflow(ctx context.Context, input CreateWorkflowInput) 
 	return &result.Workflow, nil
 }
 
-func (c *Client) UpdateWorkflow(ctx context.Context, id int64, etag string, input UpdateWorkflowInput) (*Workflow, error) {
-	headers := map[string]string{}
-	if etag != "" {
-		headers["If-Match"] = etag
-	}
+// UpdateWorkflow patches a workflow. Unlike instances, tasks and monitors, the
+// workflow endpoints do not support If-Match, so there is no ETag to pass.
+func (c *Client) UpdateWorkflow(ctx context.Context, id int64, input UpdateWorkflowInput) (*Workflow, error) {
 	body := map[string]interface{}{"workflow": input}
-	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/workflows/"+strconv.FormatInt(id, 10), body, headers)
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/workflows/"+strconv.FormatInt(id, 10), body, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -817,6 +846,102 @@ func (c *Client) PublishWorkflowVersion(ctx context.Context, workflowID int64, v
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// GetWorkflowVersion returns a single version including its full execution
+// graph and canvas data, which the workflow and version list responses omit.
+func (c *Client) GetWorkflowVersion(ctx context.Context, workflowID, versionID int64) (*WorkflowVersion, error) {
+	path := fmt.Sprintf("/api/v1/workflows/%d/versions/%d", workflowID, versionID)
+	resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var version WorkflowVersion
+	if err := decodeKeyed(resp, "version", &version); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &version, nil
+}
+
+// --- Workflow Templates ---
+
+// ListWorkflowTemplates returns the catalogue of instantiable templates.
+func (c *Client) ListWorkflowTemplates(ctx context.Context) ([]WorkflowTemplate, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/workflows/templates", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var items []json.RawMessage
+	if err := decodeKeyed(resp, "templates", &items); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	templates := make([]WorkflowTemplate, 0, len(items))
+	for _, item := range items {
+		var t WorkflowTemplate
+		if err := json.Unmarshal(item, &t); err != nil {
+			return nil, fmt.Errorf("decoding template: %w", err)
+		}
+		t.Raw = item
+		templates = append(templates, t)
+	}
+	return templates, nil
+}
+
+// CreateWorkflowFromTemplate instantiates a template as a draft workflow whose
+// graph is already published.
+func (c *Client) CreateWorkflowFromTemplate(ctx context.Context, slug string) (*Workflow, error) {
+	body := map[string]interface{}{"slug": slug}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/workflows/templates", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var workflow Workflow
+	if err := decodeKeyed(resp, "workflow", &workflow); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &workflow, nil
+}
+
+// --- Node Types ---
+
+// ListNodeTypes returns the node kinds available to execution graphs.
+func (c *Client) ListNodeTypes(ctx context.Context) ([]NodeType, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/node_types", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var items []json.RawMessage
+	if err := decodeKeyed(resp, "node_types", &items); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+
+	nodeTypes := make([]NodeType, 0, len(items))
+	for _, item := range items {
+		var n NodeType
+		if err := json.Unmarshal(item, &n); err != nil {
+			return nil, fmt.Errorf("decoding node type: %w", err)
+		}
+		n.Raw = item
+		nodeTypes = append(nodeTypes, n)
+	}
+	return nodeTypes, nil
 }
 
 // --- Uptime Monitors ---

@@ -252,6 +252,22 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 			// an absent position and lets the API put the group on top.
 			"position": preserves,
 		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateWorkflowVersionInput{},
+		policy: map[string]string{
+			// A version is meaningless without its graph, and the resource always
+			// unmarshals one before building this struct, so nil never reaches the
+			// tag. Leaving omitempty off keeps a future nil loud — an explicit
+			// null draws a 400 rather than a version published without a graph.
+			"execution_graph": clears,
+			// Omitted rather than nulled when the configuration pins no layout:
+			// that is precisely how the API is asked to generate one, and an
+			// explicit null is documented as a 400.
+			"canvas_data": preserves,
+		},
 	})
 
 	for _, spec := range specs {

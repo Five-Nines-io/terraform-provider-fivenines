@@ -710,49 +710,89 @@ func TestClient_ListInstances_UnrecognizedMetaDoesNotTruncate(t *testing.T) {
 	}
 }
 
-// A page whose records are all filtered out still means there is more to fetch.
-func TestClient_ListWorkflows_FullyArchivedPageContinues(t *testing.T) {
+// The archived filter moved server-side, so a page is walked for what the API
+// chose to return rather than for what survives a client-side predicate.
+func TestClient_ListWorkflows_WalksEveryPage(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		workflow := map[string]interface{}{"id": 1, "name": "archived", "status": "archived"}
-		if page == 2 {
-			workflow = map[string]interface{}{"id": 2, "name": "live", "status": "active"}
-		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"workflows": []interface{}{workflow},
-			"meta":      map[string]int{"current_page": page, "total_pages": 2, "total_count": 2, "per_page": 100},
+			"workflows": []interface{}{
+				map[string]interface{}{"id": page, "name": fmt.Sprintf("wf-%d", page), "status": "active"},
+			},
+			"meta": map[string]int{"current_page": page, "total_pages": 2, "total_count": 2, "per_page": 100},
 		})
 	})
 
-	workflows, err := c.ListWorkflows(context.Background())
+	workflows, err := c.ListWorkflows(context.Background(), WorkflowListOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(workflows) != 1 || workflows[0].Name != "live" {
-		t.Errorf("expected the live workflow from page 2, got %v", workflows)
+	if len(workflows) != 2 || workflows[0].Name != "wf-1" || workflows[1].Name != "wf-2" {
+		t.Errorf("expected both pages to be walked, got %v", workflows)
 	}
 }
 
-func TestClient_ListWorkflows_FiltersArchived(t *testing.T) {
+func TestClient_ListWorkflows_SendsServerSideFilters(t *testing.T) {
+	var gotQuery url.Values
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"workflows": []map[string]interface{}{
-				{"id": 1, "name": "active-wf", "status": "active", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
 				{"id": 2, "name": "archived-wf", "status": "archived", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"},
 			},
-			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 2, "per_page": 100},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
 		})
 	})
 
-	workflows, err := c.ListWorkflows(context.Background())
+	workflows, err := c.ListWorkflows(context.Background(), WorkflowListOptions{
+		Status:       "archived",
+		UpdatedSince: "2026-01-01T00:00:00Z",
+		Order:        "updated_at",
+		Direction:    "desc",
+		Q:            "cpu",
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(workflows) != 1 {
-		t.Fatalf("expected 1 workflow (archived filtered), got %d", len(workflows))
+
+	for key, want := range map[string]string{
+		"status":        "archived",
+		"updated_since": "2026-01-01T00:00:00Z",
+		"order":         "updated_at",
+		"direction":     "desc",
+		"q":             "cpu",
+		"page":          "1",
+		"per_page":      "100",
+	} {
+		if got := gotQuery.Get(key); got != want {
+			t.Errorf("expected query %s=%q, got %q", key, want, got)
+		}
 	}
-	if workflows[0].Name != "active-wf" {
-		t.Errorf("expected active-wf, got %s", workflows[0].Name)
+
+	// Archived workflows are filtered by the API, not by the client, so an
+	// explicit status=archived request must come back untouched.
+	if len(workflows) != 1 || workflows[0].Name != "archived-wf" {
+		t.Fatalf("expected the archived workflow to pass through, got %+v", workflows)
+	}
+}
+
+func TestClient_ListWorkflows_OmitsEmptyFilters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflows": []map[string]interface{}{},
+			"meta":      map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	if _, err := c.ListWorkflows(context.Background(), WorkflowListOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, key := range []string{"status", "updated_since", "order", "direction", "q"} {
+		if _, ok := gotQuery[key]; ok {
+			t.Errorf("expected %s to be omitted from the query, got %q", key, gotQuery.Get(key))
+		}
 	}
 }
 
@@ -780,6 +820,230 @@ func TestClient_CreateWorkflowVersion(t *testing.T) {
 	}
 	if ver.VersionNumber != 3 {
 		t.Errorf("expected version_number 3, got %d", ver.VersionNumber)
+	}
+}
+
+func TestClient_CreateWorkflowVersion_OmitsCanvasDataWhenUnset(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"version": map[string]interface{}{"id": 10, "version_number": 1, "created_at": "2026-01-01T00:00:00Z"},
+		})
+	})
+
+	_, err := c.CreateWorkflowVersion(context.Background(), 42, CreateWorkflowVersionInput{
+		ExecutionGraph: map[string]interface{}{"nodes": []interface{}{}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := gotBody["canvas_data"]; ok {
+		t.Error("expected canvas_data to be omitted so the API generates a layout")
+	}
+}
+
+func TestClient_CreateWorkflowVersion_SendsCanvasData(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"version": map[string]interface{}{"id": 10, "version_number": 1, "created_at": "2026-01-01T00:00:00Z"},
+		})
+	})
+
+	_, err := c.CreateWorkflowVersion(context.Background(), 42, CreateWorkflowVersionInput{
+		ExecutionGraph: map[string]interface{}{"nodes": []interface{}{}},
+		CanvasData:     map[string]interface{}{"viewport": map[string]interface{}{"zoom": 1.0}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	canvas, ok := gotBody["canvas_data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected canvas_data object, got %v", gotBody["canvas_data"])
+	}
+	if _, ok := canvas["viewport"]; !ok {
+		t.Errorf("expected canvas_data.viewport, got %v", canvas)
+	}
+}
+
+func TestClient_GetWorkflowVersion(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/api/v1/workflows/42/versions/10" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"version": map[string]interface{}{
+				"id":             10,
+				"version_number": 3,
+				"execution_graph": map[string]interface{}{
+					"nodes": []interface{}{map[string]interface{}{"id": "n1", "type": "trigger"}},
+					"edges": []interface{}{},
+				},
+				"canvas_data": map[string]interface{}{"viewport": map[string]interface{}{"zoom": 1.0}},
+				"created_at":  "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	ver, err := c.GetWorkflowVersion(context.Background(), 42, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ver.ID != 10 {
+		t.Errorf("expected version id 10, got %d", ver.ID)
+	}
+	nodes, ok := ver.ExecutionGraph["nodes"].([]interface{})
+	if !ok || len(nodes) != 1 {
+		t.Fatalf("expected 1 graph node, got %v", ver.ExecutionGraph["nodes"])
+	}
+	if ver.CanvasData["viewport"] == nil {
+		t.Error("expected canvas_data to be decoded")
+	}
+}
+
+// The version detail endpoint is documented with a "version" envelope; accept a
+// bare object too so a shape change does not break reads.
+func TestClient_GetWorkflowVersion_BareObject(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id":              10,
+			"version_number":  3,
+			"execution_graph": map[string]interface{}{"nodes": []interface{}{}},
+			"created_at":      "2026-01-01T00:00:00Z",
+		})
+	})
+
+	ver, err := c.GetWorkflowVersion(context.Background(), 42, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ver.ID != 10 || ver.VersionNumber != 3 {
+		t.Errorf("expected version 10/3, got %d/%d", ver.ID, ver.VersionNumber)
+	}
+}
+
+func TestClient_UpdateWorkflow_SendsNoIfMatch(t *testing.T) {
+	var gotIfMatch string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotIfMatch = r.Header.Get("If-Match")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflow": map[string]interface{}{
+				"id": 42, "name": "Renamed", "status": "draft",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	name := "Renamed"
+	wf, err := c.UpdateWorkflow(context.Background(), 42, UpdateWorkflowInput{Name: &name})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotIfMatch != "" {
+		t.Errorf("workflow endpoints do not support If-Match, got %q", gotIfMatch)
+	}
+	if wf.Name != "Renamed" {
+		t.Errorf("expected name Renamed, got %s", wf.Name)
+	}
+}
+
+// --- Workflow Templates & Node Types ---
+
+func TestClient_ListWorkflowTemplates(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/api/v1/workflows/templates" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"templates": []map[string]interface{}{
+				{"slug": "high-cpu", "name": "High CPU", "category": "instances", "extra_field": "kept"},
+			},
+		})
+	})
+
+	templates, err := c.ListWorkflowTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(templates) != 1 || templates[0].Slug != "high-cpu" {
+		t.Fatalf("expected the high-cpu template, got %+v", templates)
+	}
+	if !strings.Contains(string(templates[0].Raw), "extra_field") {
+		t.Errorf("expected Raw to keep unmodelled fields, got %s", templates[0].Raw)
+	}
+}
+
+func TestClient_CreateWorkflowFromTemplate(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/workflows/templates" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"workflow": map[string]interface{}{
+				"id": 7, "name": "High CPU", "status": "draft", "published_version_id": 3,
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	wf, err := c.CreateWorkflowFromTemplate(context.Background(), "high-cpu")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotBody["slug"] != "high-cpu" {
+		t.Errorf("expected slug high-cpu in body, got %v", gotBody["slug"])
+	}
+	if wf.ID != 7 || wf.PublishedVersionID == nil || *wf.PublishedVersionID != 3 {
+		t.Errorf("expected workflow 7 with published version 3, got %+v", wf)
+	}
+}
+
+func TestClient_ListNodeTypes(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/node_types" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"node_types": []map[string]interface{}{
+				{"type": "metric_threshold", "name": "Metric Threshold", "category": "trigger",
+					"config_schema": map[string]interface{}{"metric": "string"}},
+			},
+		})
+	})
+
+	nodeTypes, err := c.ListNodeTypes(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(nodeTypes) != 1 || nodeTypes[0].Type != "metric_threshold" {
+		t.Fatalf("expected the metric_threshold node type, got %+v", nodeTypes)
+	}
+	if !strings.Contains(string(nodeTypes[0].Raw), "config_schema") {
+		t.Errorf("expected Raw to carry the config schema, got %s", nodeTypes[0].Raw)
+	}
+}
+
+// A bare array with no envelope decodes the same way.
+func TestClient_ListNodeTypes_BareArray(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]interface{}{
+			{"type": "send_email", "name": "Send Email", "category": "action"},
+		})
+	})
+
+	nodeTypes, err := c.ListNodeTypes(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(nodeTypes) != 1 || nodeTypes[0].Type != "send_email" {
+		t.Fatalf("expected the send_email node type, got %+v", nodeTypes)
 	}
 }
 

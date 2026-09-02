@@ -22,6 +22,8 @@ import (
 var (
 	_ datasource.DataSourceWithConfigure = &uptimeMonitorStatusDataSource{}
 	_ datasource.DataSourceWithConfigure = &uptimeMonitorsDataSource{}
+	_ datasource.DataSourceWithConfigure = &workflowTemplatesDataSource{}
+	_ datasource.DataSourceWithConfigure = &workflowNodeTypesDataSource{}
 )
 
 // newTestServer creates a test HTTP server with the given handler.

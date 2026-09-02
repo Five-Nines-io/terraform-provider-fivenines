@@ -488,6 +488,40 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 			// explicit null is documented as a 400.
 			"canvas_data": preserves,
 		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: UpdateOrganizationInput{},
+		policy: map[string]string{
+			// Required attribute on the singleton, and the only writable field
+			// the endpoint has: the plan always holds a name, so nil never
+			// reaches the tag. There is no "clear" for it either — the API has
+			// no way to un-name an organization once it is named.
+			"name": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: UpdateOrganizationMemberInput{},
+		policy: map[string]string{
+			// Required, non-pointer: a role change with no role is not a thing
+			// the endpoint accepts, so there is no nil case and no omitempty.
+			"role": always,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateOrganizationInvitationInput{},
+		policy: map[string]string{
+			"email": always,
+			// Optional+Computed with a schema default of "member", so the plan
+			// always holds a value and the zero string never reaches the tag.
+			// Nothing to clear on an invitation that does not exist yet.
+			"role": dropsZero,
+		},
 	})
 
 	for _, spec := range specs {

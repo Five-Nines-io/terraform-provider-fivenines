@@ -7,7 +7,9 @@ import (
 	"strconv"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework-jsontypes/jsontypes"
 	"github.com/hashicorp/terraform-plugin-framework-validators/resourcevalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -30,22 +32,22 @@ type workflowResource struct {
 }
 
 type workflowModel struct {
-	ID                 types.Int64  `tfsdk:"id"`
-	Name               types.String `tfsdk:"name"`
-	Description        types.String `tfsdk:"description"`
-	IntervalSeconds    types.Int64  `tfsdk:"interval_seconds"`
-	ExecutionGraphJSON types.String `tfsdk:"execution_graph_json"`
-	CanvasDataJSON     types.String `tfsdk:"canvas_data_json"`
-	TemplateSlug       types.String `tfsdk:"template_slug"`
-	Active             types.Bool   `tfsdk:"active"`
-	Status             types.String `tfsdk:"status"`
-	TriggerType        types.String `tfsdk:"trigger_type"`
-	TriggerTypeLabel   types.String `tfsdk:"trigger_type_label"`
-	PublishedVersionID types.Int64  `tfsdk:"published_version_id"`
-	NextEvaluationAt   types.String `tfsdk:"next_evaluation_at"`
-	LastEvaluationAt   types.String `tfsdk:"last_evaluation_at"`
-	CreatedAt          types.String `tfsdk:"created_at"`
-	UpdatedAt          types.String `tfsdk:"updated_at"`
+	ID                 types.Int64          `tfsdk:"id"`
+	Name               types.String         `tfsdk:"name"`
+	Description        types.String         `tfsdk:"description"`
+	IntervalSeconds    types.Int64          `tfsdk:"interval_seconds"`
+	ExecutionGraphJSON jsontypes.Normalized `tfsdk:"execution_graph_json"`
+	CanvasDataJSON     jsontypes.Normalized `tfsdk:"canvas_data_json"`
+	TemplateSlug       types.String         `tfsdk:"template_slug"`
+	Active             types.Bool           `tfsdk:"active"`
+	Status             types.String         `tfsdk:"status"`
+	TriggerType        types.String         `tfsdk:"trigger_type"`
+	TriggerTypeLabel   types.String         `tfsdk:"trigger_type_label"`
+	PublishedVersionID types.Int64          `tfsdk:"published_version_id"`
+	NextEvaluationAt   types.String         `tfsdk:"next_evaluation_at"`
+	LastEvaluationAt   types.String         `tfsdk:"last_evaluation_at"`
+	CreatedAt          types.String         `tfsdk:"created_at"`
+	UpdatedAt          types.String         `tfsdk:"updated_at"`
 }
 
 func NewWorkflowResource() resource.Resource {
@@ -81,23 +83,25 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Optional:    true,
 				Computed:    true,
 			},
+			// Computed as well as Optional so the published graph can be read
+			// back: that is what makes an import complete, and what turns a graph
+			// edited outside Terraform into drift instead of silence.
 			"execution_graph_json": schema.StringAttribute{
-				Description: "JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value. When left unset, it is read back from the published version. Formatting differences (key order, whitespace) are ignored.",
+				Description: "JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value. Left unset, it is read back from the workflow's published version. Compared semantically, so reformatting the graph (whitespace, key ordering) does not publish a new workflow version.",
 				Optional:    true,
 				Computed:    true,
-				PlanModifiers: []planmodifier.String{
-					jsonSemanticEquality{},
-				},
+				CustomType:  jsontypes.NormalizedType{},
 			},
+			// Optional-only on purpose. Computed, the API's auto-generated layout
+			// would land in state, and every republish would then owe that
+			// generated value an update the practitioner never asked for.
 			"canvas_data_json": schema.StringAttribute{
-				Description: "JSON-encoded React Flow canvas layout published alongside the execution graph. Leave unset to let the API generate a layout for the graph. Formatting differences (key order, whitespace) are ignored.",
+				Description: "JSON-encoded React Flow canvas layout, published alongside the execution graph. Leave unset to let the API generate a layout for the graph. Compared semantically, so reformatting it does not publish a new workflow version.",
 				Optional:    true,
-				PlanModifiers: []planmodifier.String{
-					jsonSemanticEquality{},
-				},
+				CustomType:  jsontypes.NormalizedType{},
 			},
 			"template_slug": schema.StringAttribute{
-				Description: "Slug of a workflow template to instantiate. Only used at creation time — changing it replaces the workflow. Conflicts with execution_graph_json and canvas_data_json.",
+				Description: "Slug of a workflow template to instantiate, as listed by the fivenines_workflow_templates data source. The template arrives with its graph already published. Only read at creation time, so changing it replaces the workflow. Conflicts with execution_graph_json and canvas_data_json.",
 				Optional:    true,
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.RequiresReplace(),
@@ -145,21 +149,9 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 	}
 }
 
-func (r *workflowResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	c, ok := req.ProviderData.(*client.Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected Resource Configure Type",
-			"Expected *client.Client, got unexpected type.")
-		return
-	}
-	r.client = c
-}
-
-// ConfigValidators enforces that a workflow is bootstrapped either from a
-// template or from an inline graph, never both.
+// ConfigValidators keeps the two ways of getting a graph onto a workflow apart.
+// A template arrives with its own published graph and canvas, so pinning either
+// alongside it would lose to whichever the resource wrote last.
 func (r *workflowResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
 	return []resource.ConfigValidator{
 		resourcevalidator.Conflicting(
@@ -173,10 +165,28 @@ func (r *workflowResource) ConfigValidators(_ context.Context) []resource.Config
 	}
 }
 
+func (r *workflowResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+	if req.ProviderData == nil {
+		return
+	}
+	c, ok := req.ProviderData.(*client.Client)
+	if !ok {
+		resp.Diagnostics.AddError("Unexpected Resource Configure Type",
+			"Expected *client.Client, got unexpected type.")
+		return
+	}
+	r.client = c
+}
+
 func (r *workflowResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan workflowModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if d := canvasNeedsGraphDiagnostic(plan.ExecutionGraphJSON, plan.CanvasDataJSON); d != nil {
+		resp.Diagnostics.Append(d)
 		return
 	}
 
@@ -193,23 +203,20 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 			return
 		}
 
-		// The template supplies its own name, description and interval, so patch
-		// the configured values over them.
-		workflow, err = r.client.UpdateWorkflow(ctx, workflow.ID, r.updateInput(plan))
+		// The template names the workflow and picks its own interval, so the
+		// configured values have to be patched over them.
+		workflow, err = r.client.UpdateWorkflow(ctx, workflow.ID, workflowUpdateInput(plan))
 		if err != nil {
 			resp.Diagnostics.AddError("Error applying configuration to templated workflow", err.Error())
 			return
 		}
 	} else {
 		input := client.CreateWorkflowInput{
-			Name: plan.Name.ValueString(),
+			Name:            plan.Name.ValueString(),
+			IntervalSeconds: int64Ptr(plan.IntervalSeconds),
 		}
 		if !plan.Description.IsNull() && !plan.Description.IsUnknown() {
 			input.Description = plan.Description.ValueString()
-		}
-		if !plan.IntervalSeconds.IsNull() && !plan.IntervalSeconds.IsUnknown() {
-			v := plan.IntervalSeconds.ValueInt64()
-			input.IntervalSeconds = &v
 		}
 
 		tflog.Debug(ctx, "Creating workflow", map[string]interface{}{"name": input.Name})
@@ -229,8 +236,9 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 		}
 	}
 
-	// Activation is independent of how the graph got there: a template or a
-	// version published out-of-band is enough for the API to accept it.
+	// Activation does not care how the graph got there. Nesting it inside the
+	// block above meant `active = true` on a workflow whose version came from a
+	// template, or from the UI, silently did nothing.
 	if plan.Active.ValueBool() {
 		if err := r.client.ActivateWorkflow(ctx, workflow.ID); err != nil {
 			resp.Diagnostics.AddError("Error activating workflow", activationErrorDetail(err))
@@ -238,7 +246,8 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 		}
 	}
 
-	// Re-read: publishing, templating and activating all move the workflow on.
+	// Publishing, templating and activating each move the workflow on, so the
+	// authoritative state is what comes back from a fresh read.
 	workflow, _, err = r.client.GetWorkflow(ctx, workflow.ID)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading workflow after create", err.Error())
@@ -246,7 +255,7 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 	}
 
 	mapWorkflowToState(workflow, &plan)
-	if err := r.fillUnknownGraph(ctx, workflow, &plan); err != nil {
+	if err := r.resolveUnknownGraph(ctx, workflow, &plan); err != nil {
 		resp.Diagnostics.AddError("Error reading published workflow version", err.Error())
 		return
 	}
@@ -272,16 +281,21 @@ func (r *workflowResource) Read(ctx context.Context, req resource.ReadRequest, r
 
 	mapWorkflowToState(workflow, &state)
 
-	// Read the published graph back so imports are complete and edits made
-	// outside Terraform show up as drift.
+	// The graph lives on the published version, not on the workflow. Reading it
+	// back is what completes an import and what surfaces a graph edited in the
+	// UI as drift. jsontypes.Normalized collapses a pure re-serialisation back
+	// onto the stored value, so this does not diff on formatting.
 	graph, canvas, err := r.readPublishedGraph(ctx, workflow)
 	if err != nil {
 		resp.Diagnostics.AddError("Error reading published workflow version", err.Error())
 		return
 	}
-	state.ExecutionGraphJSON = preserveJSONIfEqual(state.ExecutionGraphJSON, graph)
+	state.ExecutionGraphJSON = graph
+	// canvas_data_json is Optional-only, so a layout the configuration never
+	// pinned must stay out of state: Terraform rejects an apply that turns a
+	// null Optional attribute into a value.
 	if !state.CanvasDataJSON.IsNull() {
-		state.CanvasDataJSON = preserveJSONIfEqual(state.CanvasDataJSON, canvas)
+		state.CanvasDataJSON = canvas
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -300,26 +314,36 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
+	if d := canvasNeedsGraphDiagnostic(plan.ExecutionGraphJSON, plan.CanvasDataJSON); d != nil {
+		resp.Diagnostics.Append(d)
+		return
+	}
+
 	id := state.ID.ValueInt64()
 
-	// Workflow endpoints do not support If-Match, so there is no optimistic
-	// locking to retry here.
-	workflow, err := r.client.UpdateWorkflow(ctx, id, r.updateInput(plan))
+	// The workflow endpoints do not document ETag/If-Match, so there is no
+	// optimistic locking to send and no 412 to retry.
+	workflow, err := r.client.UpdateWorkflow(ctx, id, workflowUpdateInput(plan))
 	if err != nil {
 		resp.Diagnostics.AddError("Error updating workflow", err.Error())
 		return
 	}
 
-	// Publish a new version when the graph or the canvas layout changed.
-	if !plan.ExecutionGraphJSON.IsNull() && !plan.ExecutionGraphJSON.IsUnknown() {
-		graphChanged := !jsonAttrEqual(plan.ExecutionGraphJSON, state.ExecutionGraphJSON)
-		canvasChanged := !jsonAttrEqual(plan.CanvasDataJSON, state.CanvasDataJSON)
+	// A new version is cut when either payload changed. The canvas alone counts:
+	// republishing the same graph under a new layout is how a pinned layout gets
+	// updated at all.
+	graphChanged, d := shouldPublishGraph(ctx, plan.ExecutionGraphJSON, state.ExecutionGraphJSON)
+	resp.Diagnostics.Append(d...)
+	canvasChanged, d := shouldPublishGraph(ctx, plan.CanvasDataJSON, state.CanvasDataJSON)
+	resp.Diagnostics.Append(d...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
-		if graphChanged || canvasChanged {
-			if err := r.publishGraph(ctx, id, plan.ExecutionGraphJSON, plan.CanvasDataJSON); err != nil {
-				resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
-				return
-			}
+	if graphChanged || canvasChanged {
+		if err := r.publishGraph(ctx, id, plan.ExecutionGraphJSON, plan.CanvasDataJSON); err != nil {
+			resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
+			return
 		}
 	}
 
@@ -346,7 +370,7 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 	}
 
 	mapWorkflowToState(workflow, &plan)
-	if err := r.fillUnknownGraph(ctx, workflow, &plan); err != nil {
+	if err := r.resolveUnknownGraph(ctx, workflow, &plan); err != nil {
 		resp.Diagnostics.AddError("Error reading published workflow version", err.Error())
 		return
 	}
@@ -380,24 +404,63 @@ func (r *workflowResource) ImportState(ctx context.Context, req resource.ImportS
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
 }
 
-// updateInput builds the metadata patch body from a plan.
-func (r *workflowResource) updateInput(plan workflowModel) client.UpdateWorkflowInput {
-	name := plan.Name.ValueString()
-	input := client.UpdateWorkflowInput{Name: &name}
-	if !plan.Description.IsNull() && !plan.Description.IsUnknown() {
-		v := plan.Description.ValueString()
-		input.Description = &v
+// workflowUpdateInput builds the metadata patch. Every field goes through the
+// same stringPtr/int64Ptr call site; whether a nil clears or preserves is a
+// property of the json tag on UpdateWorkflowInput, not of this call.
+func workflowUpdateInput(plan workflowModel) client.UpdateWorkflowInput {
+	return client.UpdateWorkflowInput{
+		Name:            stringPtr(plan.Name),
+		Description:     stringPtr(plan.Description),
+		IntervalSeconds: int64Ptr(plan.IntervalSeconds),
 	}
-	if !plan.IntervalSeconds.IsNull() && !plan.IntervalSeconds.IsUnknown() {
-		v := plan.IntervalSeconds.ValueInt64()
-		input.IntervalSeconds = &v
-	}
-	return input
 }
 
-// publishGraph creates a new workflow version from JSON and publishes it. A null
-// canvas is left to the API, which generates a layout for the graph.
-func (r *workflowResource) publishGraph(ctx context.Context, workflowID int64, graphJSON, canvasJSON types.String) error {
+// canvasNeedsGraphDiagnostic rejects a layout pinned with no graph to publish it
+// against. A canvas only ever reaches the API as part of a workflow version, so
+// on its own it is silently dropped — the same shape of bug as `active = true`
+// on a workflow with no published version.
+func canvasNeedsGraphDiagnostic(graph, canvas jsontypes.Normalized) diag.Diagnostic {
+	graphMissing := graph.IsNull() || graph.IsUnknown()
+	canvasSet := !canvas.IsNull() && !canvas.IsUnknown()
+	if !graphMissing || !canvasSet {
+		return nil
+	}
+	return diag.NewAttributeErrorDiagnostic(
+		path.Root("canvas_data_json"),
+		"Canvas layout with no graph to publish it with",
+		"canvas_data_json is published as part of a workflow version, so it needs an "+
+			"execution graph to travel with. Set execution_graph_json as well, or drop "+
+			"canvas_data_json and let the API lay out the graph the workflow already has.",
+	)
+}
+
+// shouldPublishGraph decides whether an update has to cut a new workflow
+// version on account of one of the two JSON payloads a version carries. The
+// comparison is semantic, so reformatting — a different key order, different
+// indentation — publishes nothing. A plan with no value publishes nothing
+// either; a value that was never in state always publishes.
+func shouldPublishGraph(ctx context.Context, planned, stored jsontypes.Normalized) (bool, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	if planned.IsNull() || planned.IsUnknown() {
+		return false, diags
+	}
+	if stored.IsNull() || stored.IsUnknown() {
+		return true, diags
+	}
+
+	unchanged, d := planned.StringSemanticEquals(ctx, stored)
+	diags.Append(d...)
+	if diags.HasError() {
+		return false, diags
+	}
+	return !unchanged, diags
+}
+
+// publishGraph creates a new workflow version from JSON and publishes it. A
+// null canvas is left out of the request, which is how the API is asked to
+// generate the layout itself.
+func (r *workflowResource) publishGraph(ctx context.Context, workflowID int64, graphJSON, canvasJSON jsontypes.Normalized) error {
 	var graph map[string]interface{}
 	if err := json.Unmarshal([]byte(graphJSON.ValueString()), &graph); err != nil {
 		return fmt.Errorf("invalid execution_graph_json: %w", err)
@@ -425,33 +488,40 @@ func (r *workflowResource) publishGraph(ctx context.Context, workflowID int64, g
 }
 
 // readPublishedGraph returns the execution graph and canvas layout of the
-// workflow's published version, both empty when nothing is published yet.
-func (r *workflowResource) readPublishedGraph(ctx context.Context, w *client.Workflow) (string, string, error) {
+// workflow's published version, both null when nothing is published yet.
+func (r *workflowResource) readPublishedGraph(ctx context.Context, w *client.Workflow) (jsontypes.Normalized, jsontypes.Normalized, error) {
+	null := jsontypes.NewNormalizedNull()
 	if w.PublishedVersionID == nil {
-		return "", "", nil
+		return null, null, nil
 	}
 
 	version, err := r.client.GetWorkflowVersion(ctx, w.ID, *w.PublishedVersionID)
 	if err != nil {
-		return "", "", fmt.Errorf("reading version %d: %w", *w.PublishedVersionID, err)
+		return null, null, fmt.Errorf("reading version %d: %w", *w.PublishedVersionID, err)
 	}
 
 	graph, err := marshalGraph(version.ExecutionGraph)
 	if err != nil {
-		return "", "", fmt.Errorf("encoding execution_graph: %w", err)
+		return null, null, fmt.Errorf("encoding execution_graph: %w", err)
 	}
 	canvas, err := marshalGraph(version.CanvasData)
 	if err != nil {
-		return "", "", fmt.Errorf("encoding canvas_data: %w", err)
+		return null, null, fmt.Errorf("encoding canvas_data: %w", err)
 	}
 	return graph, canvas, nil
 }
 
-// fillUnknownGraph resolves execution_graph_json when the configuration left it
-// unset — after a template instantiation or an import, the published version is
-// the only source for it. A configured graph keeps its planned value: writing
-// back the API's rendering of the same graph would break the plan contract.
-func (r *workflowResource) fillUnknownGraph(ctx context.Context, w *client.Workflow, m *workflowModel) error {
+// resolveUnknownGraph settles execution_graph_json when the configuration left
+// it unset. Optional+Computed with no schema default means the plan holds
+// unknown on create, and an unknown left in state fails the apply outright with
+// "Provider produced inconsistent result after apply". After a template
+// instantiation the published version is the only place the value can come
+// from; where nothing is published the answer is null.
+//
+// A configured graph keeps its planned value untouched: writing the API's
+// re-serialisation of it back would break the plan contract the moment the
+// server normalises a graph at all.
+func (r *workflowResource) resolveUnknownGraph(ctx context.Context, w *client.Workflow, m *workflowModel) error {
 	if !m.ExecutionGraphJSON.IsUnknown() {
 		return nil
 	}
@@ -460,12 +530,13 @@ func (r *workflowResource) fillUnknownGraph(ctx context.Context, w *client.Workf
 	if err != nil {
 		return err
 	}
-	m.ExecutionGraphJSON = stringOrNull(graph)
+	m.ExecutionGraphJSON = graph
 	return nil
 }
 
-// activationErrorDetail explains the 422 the API returns for a workflow that
-// has no published version to activate.
+// activationErrorDetail explains the 422 the API returns for a workflow with no
+// published version to activate. Activating unconditionally is what turned that
+// case from a silent no-op into an error, so the error has to say what to do.
 func activationErrorDetail(err error) string {
 	if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 422 {
 		return fmt.Sprintf("%s\n\nA workflow needs a published version before it can be activated. "+
@@ -474,50 +545,35 @@ func activationErrorDetail(err error) string {
 	return err.Error()
 }
 
-// marshalGraph encodes an API graph payload, returning "" for an absent one.
-// Go sorts object keys, which gives the state a stable rendering to compare.
-func marshalGraph(graph map[string]interface{}) (string, error) {
+// marshalGraph encodes an API graph payload, returning null for an absent one.
+func marshalGraph(graph map[string]interface{}) (jsontypes.Normalized, error) {
 	if graph == nil {
-		return "", nil
+		return jsontypes.NewNormalizedNull(), nil
 	}
 	encoded, err := json.Marshal(graph)
 	if err != nil {
-		return "", err
+		return jsontypes.NewNormalizedNull(), err
 	}
-	return string(encoded), nil
-}
-
-// jsonAttrEqual compares two optional JSON attributes, treating null as absent.
-func jsonAttrEqual(a, b types.String) bool {
-	if a.IsNull() || a.IsUnknown() || b.IsNull() || b.IsUnknown() {
-		return a.IsNull() == b.IsNull() && a.IsUnknown() == b.IsUnknown()
-	}
-	return jsonEqual(a.ValueString(), b.ValueString())
+	return jsontypes.NewNormalizedValue(string(encoded)), nil
 }
 
 func mapWorkflowToState(w *client.Workflow, state *workflowModel) {
 	state.ID = types.Int64Value(w.ID)
 	state.Name = types.StringValue(w.Name)
-	state.Description = types.StringValue(w.Description)
-	if w.IntervalSeconds != nil {
-		state.IntervalSeconds = types.Int64Value(*w.IntervalSeconds)
-	} else {
-		state.IntervalSeconds = types.Int64Null()
-	}
+	state.Description = optionalString(w.Description)
+	state.IntervalSeconds = optionalInt64(w.IntervalSeconds)
 	state.Status = types.StringValue(w.Status)
 	state.Active = types.BoolValue(w.Status == "active")
-	state.TriggerType = types.StringValue(w.TriggerType)
-	state.TriggerTypeLabel = types.StringValue(w.TriggerTypeLabel)
-	if w.PublishedVersionID != nil {
-		state.PublishedVersionID = types.Int64Value(*w.PublishedVersionID)
-	} else {
-		state.PublishedVersionID = types.Int64Null()
-	}
+	// Both are derived from the published graph, so a draft has neither.
+	state.TriggerType = optionalString(w.TriggerType)
+	state.TriggerTypeLabel = optionalString(w.TriggerTypeLabel)
+	state.PublishedVersionID = optionalInt64(w.PublishedVersionID)
 	state.NextEvaluationAt = optionalString(w.NextEvaluationAt)
 	state.LastEvaluationAt = optionalString(w.LastEvaluationAt)
 	state.CreatedAt = types.StringValue(w.CreatedAt)
 	state.UpdatedAt = types.StringValue(w.UpdatedAt)
 
 	// execution_graph_json and canvas_data_json live on the published version,
-	// not on the workflow object — callers resolve them separately.
+	// not on the workflow object — callers resolve them separately. template_slug
+	// is a creation-time input the API never echoes back, so it is left alone.
 }

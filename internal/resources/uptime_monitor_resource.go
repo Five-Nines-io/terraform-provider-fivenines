@@ -2,9 +2,13 @@ package resources
 
 import (
 	"context"
+	"fmt"
+
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -20,9 +24,37 @@ import (
 )
 
 var (
-	_ resource.Resource                = &uptimeMonitorResource{}
-	_ resource.ResourceWithImportState = &uptimeMonitorResource{}
+	_ resource.Resource                   = &uptimeMonitorResource{}
+	_ resource.ResourceWithImportState    = &uptimeMonitorResource{}
+	_ resource.ResourceWithValidateConfig = &uptimeMonitorResource{}
 )
+
+// protocolRequirements lists the attributes each protocol needs. It mirrors the
+// server-side validation so a bad combination fails at plan time instead of
+// costing a round trip, and it is enforced on update too now that the protocol
+// itself can change in place.
+var protocolRequirements = map[string][]string{
+	"https": {"url"},
+	"tcp":   {"hostname", "port"},
+	"icmp":  {"hostname"},
+	"dns":   {"dns_record_type"},
+}
+
+// protocolForbidden is the inverse: the protocol-scoped attributes each protocol
+// does not use. Update sends these as explicit nulls to clear them, so leaving
+// one in the configuration would plan a KNOWN value that the apply then nulls —
+// "Provider produced inconsistent result after apply", with no in-band way for
+// the user to see it coming. Catching it here turns that into a plan-time message
+// that names the attribute to delete.
+//
+// Only the seven attributes Update actually clears are listed. url and hostname
+// are Computed and are never cleared, so they cannot produce that error.
+var protocolForbidden = map[string][]string{
+	"https": {"port", "dns_record_type", "dns_expected_records"},
+	"tcp":   {"keyword", "dns_record_type", "dns_expected_records", "custom_headers", "custom_body", "content_type"},
+	"icmp":  {"port", "keyword", "dns_record_type", "dns_expected_records", "custom_headers", "custom_body", "content_type"},
+	"dns":   {"port", "keyword", "custom_headers", "custom_body", "content_type"},
+}
 
 type uptimeMonitorResource struct {
 	client *client.Client
@@ -74,7 +106,12 @@ func (r *uptimeMonitorResource) Metadata(_ context.Context, req resource.Metadat
 
 func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Manages a FiveNines uptime monitor.",
+		Description: "Manages a FiveNines uptime monitor.\n\n" +
+			"Running a check on demand is deliberately outside Terraform's scope: it is a one-off " +
+			"action with no desired state to converge on. Use `POST /api/v1/uptime_monitors/{id}/check_now` " +
+			"(the same endpoint as the dashboard's \"Check now\" button) for that. It returns 202, runs " +
+			"asynchronously, and is rate limited to one call per monitor per 60 seconds and ten per " +
+			"organization per minute.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Description: "Unique identifier (UUID).",
@@ -88,13 +125,14 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Required:    true,
 			},
 			"protocol": schema.StringAttribute{
-				Description: `Protocol: "https", "tcp", "icmp", or "dns". Changing this forces recreation.`,
-				Required:    true,
+				Description: `Protocol: "https", "tcp", "icmp", or "dns". Can be changed in place; ` +
+					`the attributes the new protocol requires must be set in the same plan. Switching ` +
+					`clears the attributes the new protocol does not use (port, keyword, ` +
+					`dns_record_type, dns_expected_records, custom_headers, custom_body, content_type). ` +
+					`url and hostname are computed and are retained across the switch.`,
+				Required: true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("https", "tcp", "icmp", "dns"),
-				},
-				PlanModifiers: []planmodifier.String{
-					stringplanmodifier.RequiresReplace(),
 				},
 			},
 			"paused": schema.BoolAttribute{
@@ -113,8 +151,11 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Computed:    true,
 			},
 			"port": schema.Int64Attribute{
-				Description: "Port to monitor (required for tcp protocol).",
+				Description: "Port to monitor (required for tcp protocol). 1-65535.",
 				Optional:    true,
+				Validators: []validator.Int64{
+					int64validator.Between(1, 65535),
+				},
 			},
 			"http_method": schema.StringAttribute{
 				Description: `HTTP method: "GET", "HEAD", or "POST".`,
@@ -156,7 +197,7 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Default:     int64default.StaticInt64(1),
 			},
 			"keyword": schema.StringAttribute{
-				Description: "Keyword that must be present in the response body.",
+				Description: "Keyword that must be present in the response body. https only: the other protocols reject it at plan time.",
 				Optional:    true,
 			},
 			"keyword_absent": schema.BoolAttribute{
@@ -172,10 +213,17 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Default:     booldefault.StaticBool(true),
 			},
 			"expected_status_codes": schema.ListAttribute{
-				Description: "Expected HTTP status codes.",
+				Description: "Expected HTTP status codes. 1-50 codes, each between 100 and 599. " +
+					"An empty list is rejected because it would match nothing. Defaults to [200] on " +
+					"create; because the value is computed, removing it later keeps the last applied " +
+					"codes rather than resetting to the default.",
 				Optional:    true,
 				Computed:    true,
 				ElementType: types.Int64Type,
+				Validators: []validator.List{
+					listvalidator.SizeBetween(1, 50),
+					listvalidator.ValueInt64sAre(int64validator.Between(100, 599)),
+				},
 			},
 			"probe_region_ids": schema.ListAttribute{
 				Description: "Probe region IDs to check from. Defaults to all active regions.",
@@ -191,22 +239,32 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				},
 			},
 			"dns_expected_records": schema.ListAttribute{
-				Description: "Expected DNS record values.",
+				Description: "Expected DNS record values. Up to 50 records of at most 2048 characters each. " +
+					"Set to an empty list to pin no expectation.",
 				Optional:    true,
 				ElementType: types.StringType,
+				Validators: []validator.List{
+					listvalidator.SizeAtMost(50),
+					listvalidator.ValueStringsAre(stringvalidator.LengthAtMost(2048)),
+				},
 			},
 			"custom_headers": schema.MapAttribute{
-				Description: "Custom HTTP headers as key-value pairs.",
+				Description: "Custom HTTP headers as key-value pairs. https only: the other protocols " +
+					"reject it at plan time. Marked sensitive: this is where an Authorization " +
+					"header for the monitored endpoint goes.",
 				Optional:    true,
+				Sensitive:   true,
 				ElementType: types.StringType,
 			},
 			"custom_body": schema.StringAttribute{
-				Description: "Request body for POST requests (https/custom_http protocols).",
+				Description: "Request body for POST requests. https only: the other protocols reject it at plan time.",
 				Optional:    true,
+				Sensitive:   true,
 			},
 			"content_type": schema.StringAttribute{
-				Description: `Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain".`,
-				Optional:    true,
+				Description: `Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain". ` +
+					`https only: the other protocols reject it at plan time.`,
+				Optional: true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("application/json", "application/x-www-form-urlencoded", "text/plain"),
 				},
@@ -218,7 +276,7 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Default:     int64default.StaticInt64(1),
 			},
 			"status": schema.StringAttribute{
-				Description: "Current status.",
+				Description: `Current status: "unknown", "up", "down", "paused" or "recovering".`,
 				Computed:    true,
 			},
 			"ssl_expires_at": schema.StringAttribute{
@@ -247,6 +305,86 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 			},
 		},
 	}
+}
+
+// ValidateConfig enforces the protocol-specific required attributes listed in
+// protocolRequirements.
+func (r *uptimeMonitorResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var config uptimeMonitorModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if config.Protocol.IsNull() || config.Protocol.IsUnknown() {
+		return
+	}
+
+	protocol := config.Protocol.ValueString()
+	for _, name := range missingProtocolAttributes(config) {
+		resp.Diagnostics.AddAttributeError(
+			path.Root(name),
+			"Missing required attribute",
+			fmt.Sprintf("%q monitors require %q to be set.", protocol, name),
+		)
+	}
+	for _, name := range forbiddenProtocolAttributes(config) {
+		resp.Diagnostics.AddAttributeError(
+			path.Root(name),
+			"Attribute not used by this protocol",
+			fmt.Sprintf("%q monitors do not use %q, and updating clears it server-side. "+
+				"Remove it from the configuration.", protocol, name),
+		)
+	}
+}
+
+// missingProtocolAttributes returns the attributes that config's protocol
+// requires but leaves unset, in schema order.
+func protocolScopedValues(config uptimeMonitorModel) map[string]attr.Value {
+	return map[string]attr.Value{
+		"url":                  config.URL,
+		"hostname":             config.Hostname,
+		"port":                 config.Port,
+		"keyword":              config.Keyword,
+		"dns_record_type":      config.DNSRecordType,
+		"dns_expected_records": config.DNSExpectedRecords,
+		"custom_headers":       config.CustomHeaders,
+		"custom_body":          config.CustomBody,
+		"content_type":         config.ContentType,
+	}
+}
+
+func missingProtocolAttributes(config uptimeMonitorModel) []string {
+	values := protocolScopedValues(config)
+
+	var missing []string
+	for _, name := range protocolRequirements[config.Protocol.ValueString()] {
+		// Comma-ok: protocolRequirements and values are two tables that have to
+		// stay in step, and indexing a missing name would hand .IsNull() a nil
+		// interface and panic the provider mid-plan. Report it as missing instead.
+		v, ok := values[name]
+		// An unknown value comes from a reference that has not been resolved yet
+		// and may well turn out to be set, so only a null is a genuine omission.
+		if !ok || v.IsNull() {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+// forbiddenProtocolAttributes returns the attributes set in config that its
+// protocol does not use, in schema order.
+func forbiddenProtocolAttributes(config uptimeMonitorModel) []string {
+	values := protocolScopedValues(config)
+
+	var forbidden []string
+	for _, name := range protocolForbidden[config.Protocol.ValueString()] {
+		// Only a value the user actually set can be a known plan value, so
+		// unknowns and nulls are both fine here.
+		if v, ok := values[name]; ok && !v.IsNull() && !v.IsUnknown() {
+			forbidden = append(forbidden, name)
+		}
+	}
+	return forbidden
 }
 
 func (r *uptimeMonitorResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -370,13 +508,22 @@ func (r *uptimeMonitorResource) Create(ctx context.Context, req resource.CreateR
 		return
 	}
 
-	// Handle pause state after creation
-	if !plan.Paused.IsNull() && plan.Paused.ValueBool() {
-		if err := r.client.PauseUptimeMonitor(ctx, monitor.ID); err != nil {
-			resp.Diagnostics.AddError("Error pausing uptime monitor after creation", err.Error())
+	// Monitors are created running, so an explicit paused = true is a follow-up call.
+	if !plan.Paused.IsNull() && !plan.Paused.IsUnknown() && plan.Paused.ValueBool() {
+		paused, err := r.client.PauseUptimeMonitor(ctx, monitor.ID)
+		if err != nil {
+			// The monitor already exists server-side. Terraform taints a resource whose
+			// Create errors with state set, so the next apply replaces it — that still
+			// beats writing no state, which would leak this monitor and create a second
+			// one on the next apply.
+			r.mapToState(ctx, monitor, &plan, &resp.Diagnostics)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+			resp.Diagnostics.AddError("Error pausing uptime monitor after creation",
+				"The monitor was created but could not be paused. It is recorded as tainted, so the next apply "+
+					"will destroy and recreate it (losing its check history).\n\n"+err.Error())
 			return
 		}
-		monitor.Status = "paused"
+		monitor = paused
 	}
 
 	r.mapToState(ctx, monitor, &plan, &resp.Diagnostics)
@@ -420,9 +567,13 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 	id := state.ID.ValueString()
 
 	input := client.UpdateUptimeMonitorInput{}
-	if !plan.Name.IsNull() {
+	if !plan.Name.IsNull() && !plan.Name.IsUnknown() {
 		v := plan.Name.ValueString()
 		input.Name = &v
+	}
+	if !plan.Protocol.IsNull() && !plan.Protocol.IsUnknown() {
+		v := plan.Protocol.ValueString()
+		input.Protocol = &v
 	}
 	if !plan.URL.IsNull() && !plan.URL.IsUnknown() {
 		v := plan.URL.ValueString()
@@ -431,10 +582,6 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 	if !plan.Hostname.IsNull() && !plan.Hostname.IsUnknown() {
 		v := plan.Hostname.ValueString()
 		input.Hostname = &v
-	}
-	if !plan.Port.IsNull() && !plan.Port.IsUnknown() {
-		v := int(plan.Port.ValueInt64())
-		input.Port = &v
 	}
 	if !plan.HTTPMethod.IsNull() && !plan.HTTPMethod.IsUnknown() {
 		v := plan.HTTPMethod.ValueString()
@@ -456,10 +603,6 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		v := int(plan.ConfirmationCount.ValueInt64())
 		input.ConfirmationCount = &v
 	}
-	if !plan.Keyword.IsNull() && !plan.Keyword.IsUnknown() {
-		v := plan.Keyword.ValueString()
-		input.Keyword = &v
-	}
 	if !plan.KeywordAbsent.IsNull() && !plan.KeywordAbsent.IsUnknown() {
 		v := plan.KeywordAbsent.ValueBool()
 		input.KeywordAbsent = &v
@@ -478,26 +621,48 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		input.ExpectedStatusCodes = codes
 	}
 	if !plan.ProbeRegionIDs.IsNull() && !plan.ProbeRegionIDs.IsUnknown() {
-		var ids []int64
+		// Non-nil even when empty, so `probe_region_ids = []` reaches the API
+		// instead of leaving the stored region set in place.
+		ids := make([]int64, 0, len(plan.ProbeRegionIDs.Elements()))
 		for _, elem := range plan.ProbeRegionIDs.Elements() {
 			if v, ok := elem.(types.Int64); ok {
 				ids = append(ids, v.ValueInt64())
 			}
 		}
-		input.ProbeRegionIDs = ids
+		input.ProbeRegionIDs = &ids
+	}
+	if !plan.RecoveryCount.IsNull() && !plan.RecoveryCount.IsUnknown() {
+		v := int(plan.RecoveryCount.ValueInt64())
+		input.RecoveryCount = &v
+	}
+
+	// Protocol-scoped attributes are assigned unconditionally: a null plan value
+	// becomes a nil pointer, which serialises as JSON null and clears the stored
+	// value. Omitting them instead would leave the previous protocol's settings
+	// behind, and the API would keep echoing values the plan says are null —
+	// "Provider produced inconsistent result after apply" on the next apply.
+	if !plan.Port.IsNull() && !plan.Port.IsUnknown() {
+		v := int(plan.Port.ValueInt64())
+		input.Port = &v
+	}
+	if !plan.Keyword.IsNull() && !plan.Keyword.IsUnknown() {
+		v := plan.Keyword.ValueString()
+		input.Keyword = &v
 	}
 	if !plan.DNSRecordType.IsNull() && !plan.DNSRecordType.IsUnknown() {
 		v := plan.DNSRecordType.ValueString()
 		input.DNSRecordType = &v
 	}
 	if !plan.DNSExpectedRecords.IsNull() && !plan.DNSExpectedRecords.IsUnknown() {
-		var records []string
+		// Non-nil even when empty: the API normalises [] to "no expectation
+		// pinned", which is the same end state as null but keeps the plan's [].
+		records := make([]string, 0, len(plan.DNSExpectedRecords.Elements()))
 		for _, elem := range plan.DNSExpectedRecords.Elements() {
 			if sv, ok := elem.(types.String); ok {
 				records = append(records, sv.ValueString())
 			}
 		}
-		input.DNSExpectedRecords = records
+		input.DNSExpectedRecords = &records
 	}
 	if !plan.CustomHeaders.IsNull() && !plan.CustomHeaders.IsUnknown() {
 		headers := make(map[string]string)
@@ -515,10 +680,6 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 	if !plan.ContentType.IsNull() && !plan.ContentType.IsUnknown() {
 		v := plan.ContentType.ValueString()
 		input.ContentType = &v
-	}
-	if !plan.RecoveryCount.IsNull() && !plan.RecoveryCount.IsUnknown() {
-		v := int(plan.RecoveryCount.ValueInt64())
-		input.RecoveryCount = &v
 	}
 
 	var monitor *client.UptimeMonitor
@@ -540,22 +701,45 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		break
 	}
 
-	// Handle pause/resume state change
-	if !plan.Paused.IsNull() {
+	// pause/resume are separate endpoints, and both echo back the monitor.
+	//
+	// Deciding whether to call them from the echoed `status` alone is unsafe:
+	// status is probe-derived, so a monitor that is paused server-side can report
+	// "unknown" and make the check conclude it is already running — the resume is
+	// skipped, state says the monitor is live, and alerting stays off. Prior state
+	// records the intent instead. Act unless BOTH signals agree we are already in
+	// the target state; the endpoints are idempotent, so a redundant call is free.
+	if !plan.Paused.IsNull() && !plan.Paused.IsUnknown() {
 		wantPaused := plan.Paused.ValueBool()
-		isPaused := monitor.Status == "paused"
-		if wantPaused && !isPaused {
-			if err := r.client.PauseUptimeMonitor(ctx, id); err != nil {
-				resp.Diagnostics.AddError("Error pausing uptime monitor", err.Error())
+		// Prior state records what the last apply or refresh established, so it is
+		// the authoritative signal. The echoed status is only the fallback (import,
+		// first apply): it is probe-derived, so a monitor that is paused
+		// server-side can report "unknown", and believing that would skip the
+		// resume and leave alerting off while state claims the monitor is live.
+		isPaused := monitor.Status == client.StatusPaused
+		if !state.Paused.IsNull() && !state.Paused.IsUnknown() {
+			isPaused = state.Paused.ValueBool()
+		}
+
+		if isPaused != wantPaused {
+			action, verb := r.client.ResumeUptimeMonitor, "resuming"
+			if wantPaused {
+				action, verb = r.client.PauseUptimeMonitor, "pausing"
+			}
+			updated, err := action(ctx, id)
+			if err != nil {
+				// The PATCH above already landed, so the monitor's configuration has
+				// changed server-side. An Update that errors does NOT taint the
+				// resource, so returning without writing state would leave Terraform
+				// holding the pre-update values with no marker that they are stale.
+				r.mapToState(ctx, monitor, &plan, &resp.Diagnostics)
+				resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+				resp.Diagnostics.AddError("Error "+verb+" uptime monitor",
+					"The monitor's configuration was updated but its paused state was not changed. "+
+						"State reflects the update; re-apply to retry.\n\n"+err.Error())
 				return
 			}
-			monitor.Status = "paused"
-		} else if !wantPaused && isPaused {
-			if err := r.client.ResumeUptimeMonitor(ctx, id); err != nil {
-				resp.Diagnostics.AddError("Error resuming uptime monitor", err.Error())
-				return
-			}
-			monitor.Status = "active"
+			monitor = updated
 		}
 	}
 
@@ -589,7 +773,7 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	state.ID = types.StringValue(m.ID)
 	state.Name = types.StringValue(m.Name)
 	state.Protocol = types.StringValue(m.Protocol)
-	state.Paused = types.BoolValue(m.Status == "paused")
+	state.Paused = types.BoolValue(m.Status == client.StatusPaused)
 	state.URL = types.StringValue(m.URL)
 	state.Hostname = types.StringValue(m.Hostname)
 	if m.Port != nil {
@@ -602,7 +786,15 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	state.IntervalSeconds = types.Int64Value(int64(m.IntervalSeconds))
 	state.TimeoutSeconds = types.Int64Value(int64(m.TimeoutSeconds))
 	state.ConfirmationCount = types.Int64Value(int64(m.ConfirmationCount))
-	state.Keyword = types.StringValue(m.Keyword)
+	switch {
+	case m.Keyword != "":
+		state.Keyword = types.StringValue(m.Keyword)
+	case isKnownEmptyString(state.Keyword):
+		// `keyword = ""` is a legal config; keep the pinned empty string rather
+		// than flipping it to null, exactly as for empty lists and maps.
+	default:
+		state.Keyword = types.StringNull()
+	}
 	state.KeywordAbsent = types.BoolValue(m.KeywordAbsent)
 	state.FollowRedirects = types.BoolValue(m.FollowRedirects)
 
@@ -616,9 +808,18 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	state.ExpectedStatusCodes = codesList
 
 	// Convert probe_region_ids
-	regionsList, d := types.ListValueFrom(ctx, types.Int64Type, m.ProbeRegionIDs)
-	diags.Append(d...)
-	state.ProbeRegionIDs = regionsList
+	switch {
+	case len(m.ProbeRegionIDs) > 0:
+		regionsList, d := types.ListValueFrom(ctx, types.Int64Type, m.ProbeRegionIDs)
+		diags.Append(d...)
+		state.ProbeRegionIDs = regionsList
+	case isEmptyList(state.ProbeRegionIDs):
+		// probe_region_ids became explicitly clearable alongside the other
+		// protocol-scoped attributes, so it needs the same pinned-empty rule they
+		// got: a config of [] must not read back as null.
+	default:
+		state.ProbeRegionIDs = types.ListNull(types.Int64Type)
+	}
 
 	// DNS fields
 	if m.DNSRecordType != "" {
@@ -626,20 +827,29 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	} else {
 		state.DNSRecordType = types.StringNull()
 	}
-	if len(m.DNSExpectedRecords) > 0 {
+	switch {
+	case len(m.DNSExpectedRecords) > 0:
 		recordsList, d := types.ListValueFrom(ctx, types.StringType, m.DNSExpectedRecords)
 		diags.Append(d...)
 		state.DNSExpectedRecords = recordsList
-	} else {
+	case isEmptyList(state.DNSExpectedRecords):
+		// The API normalises a pinned [] to "no expectation" and reads it back as
+		// [], so keep the empty list the config asked for rather than flipping it
+		// to null and diffing forever.
+	default:
 		state.DNSExpectedRecords = types.ListNull(types.StringType)
 	}
 
 	// Custom HTTP fields
-	if len(m.CustomHeaders) > 0 {
+	switch {
+	case len(m.CustomHeaders) > 0:
 		headersMap, d := types.MapValueFrom(ctx, types.StringType, m.CustomHeaders)
 		diags.Append(d...)
 		state.CustomHeaders = headersMap
-	} else {
+	case isEmptyMap(state.CustomHeaders):
+		// Same pinned-empty rule as dns_expected_records: a config of {} must not
+		// come back null, or the plan re-proposes {} and every apply fails.
+	default:
 		state.CustomHeaders = types.MapNull(types.StringType)
 	}
 	if m.CustomBody != "" {
@@ -662,4 +872,19 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	state.LastCheckAt = optionalString(m.LastCheckAt)
 	state.CreatedAt = types.StringValue(m.CreatedAt)
 	state.UpdatedAt = types.StringValue(m.UpdatedAt)
+}
+
+// isEmptyList reports whether v is a known, non-null list with no elements.
+func isEmptyList(v types.List) bool {
+	return !v.IsNull() && !v.IsUnknown() && len(v.Elements()) == 0
+}
+
+// isEmptyMap reports whether v is a known, non-null map with no elements.
+func isEmptyMap(v types.Map) bool {
+	return !v.IsNull() && !v.IsUnknown() && len(v.Elements()) == 0
+}
+
+// isKnownEmptyString reports whether v is a known, non-null empty string.
+func isKnownEmptyString(v types.String) bool {
+	return !v.IsNull() && !v.IsUnknown() && v.ValueString() == ""
 }

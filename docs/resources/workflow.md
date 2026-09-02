@@ -61,11 +61,11 @@ resource "fivenines_workflow" "from_template" {
 ### Optional
 
 - `active` (Boolean) Whether the workflow is active. Set to true to activate, false to pause. Requires a published version.
-- `canvas_data_json` (String) JSON-encoded React Flow canvas layout published alongside the execution graph. Leave unset to let the API generate a layout for the graph. Formatting differences (key order, whitespace) are ignored.
+- `canvas_data_json` (String) JSON-encoded React Flow canvas layout, published alongside the execution graph. Leave unset to let the API generate a layout for the graph. Compared semantically, so reformatting it does not publish a new workflow version.
 - `description` (String) Description of the workflow.
-- `execution_graph_json` (String) JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value. When left unset, it is read back from the published version. Formatting differences (key order, whitespace) are ignored.
+- `execution_graph_json` (String) JSON-encoded execution graph (nodes and edges). When changed, a new version is created and published automatically. Use jsonencode() or file() to provide the value. Left unset, it is read back from the workflow's published version. Compared semantically, so reformatting the graph (whitespace, key ordering) does not publish a new workflow version.
 - `interval_seconds` (Number) Evaluation interval in seconds.
-- `template_slug` (String) Slug of a workflow template to instantiate. Only used at creation time — changing it replaces the workflow. Conflicts with execution_graph_json and canvas_data_json.
+- `template_slug` (String) Slug of a workflow template to instantiate, as listed by the fivenines_workflow_templates data source. The template arrives with its graph already published. Only read at creation time, so changing it replaces the workflow. Conflicts with execution_graph_json and canvas_data_json.
 
 ### Read-Only
 

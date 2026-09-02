@@ -4,11 +4,14 @@ page_title: "fivenines_instance Resource - terraform-provider-fivenines"
 subcategory: ""
 description: |-
   Manages a FiveNines instance (monitored server).
+  Destroying an instance waits for the deletion to finish. The API answers 202 and tears the host down asynchronously, so the provider polls until it is gone (up to five minutes) before releasing state, which is what makes replacing a host in a single apply safe.
 ---
 
 # fivenines_instance (Resource)
 
 Manages a FiveNines instance (monitored server).
+
+Destroying an instance waits for the deletion to finish. The API answers 202 and tears the host down asynchronously, so the provider polls until it is gone (up to five minutes) before releasing state, which is what makes replacing a host in a single apply safe.
 
 ## Example Usage
 

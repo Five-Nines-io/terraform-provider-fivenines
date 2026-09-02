@@ -1,0 +1,56 @@
+name: Acceptance Tests
+
+# Acceptance tests create and destroy real resources in a dedicated staging
+# organisation, so they never run on pull requests: a fork PR must not reach
+# the API key. They run nightly, on pushes to main, and on demand.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run at a time: the tests share a single staging organisation.
+  group: acceptance
+  cancel-in-progress: false
+
+jobs:
+  testacc:
+    runs-on: ubuntu-latest
+    if: github.repository == 'Five-Nines-io/terraform-provider-fivenines'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.*"
+          terraform_wrapper: false
+
+      # The suite needs a staging organisation's key. Until FIVENINES_API_KEY
+      # is configured, say so plainly instead of failing on every schedule.
+      - name: Check for the staging API key
+        id: key
+        env:
+          FIVENINES_API_KEY: ${{ secrets.FIVENINES_API_KEY }}
+        run: |
+          if [ -z "$FIVENINES_API_KEY" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "FIVENINES_API_KEY is not configured — acceptance tests skipped." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run acceptance tests
+        if: steps.key.outputs.configured == 'true'
+        env:
+          TF_ACC: "1"
+          FIVENINES_API_KEY: ${{ secrets.FIVENINES_API_KEY }}
+          FIVENINES_BASE_URL: ${{ vars.FIVENINES_BASE_URL }}
+        run: go test ./internal/provider/ ./internal/client/ -v -timeout 120m

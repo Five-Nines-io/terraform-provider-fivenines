@@ -101,6 +101,12 @@
   timestamps client-side risks rejecting a format the server accepts, which turns a
   working config into a plan-time failure. `status` is present on every returned
   incident and run, so the server-honoured-it assertion is available there too
+- The twenty collector inventories (#22) join it too, at twenty times the surface.
+  Their enumerated arguments carry `OneOf` validators generated from the table, but
+  `q`/`updated_since` do not, and neither does `instance_id` — a malformed UUID is a
+  404 at apply rather than a plan-time error. The cheap assertion is available and
+  unusually strong here: every row carries `host_id`, so the provider could check
+  the rows it got back actually belong to the instance it asked about
 
 ### monitors is an ordered List with a server-defined default order
 - `order`/`direction` are optional, so default ordering is whatever the API
@@ -110,11 +116,16 @@
   order is `position` — the one column the API renumbers when any sibling moves,
   without touching `updated_at`. Indexing it positionally is the least stable of
   the two
+- The twenty collector inventories (#22) share the shape and deliberately do NOT
+  expose `order`/`direction`, so their order is entirely the server's default. The
+  rows are agent-reported state rather than configuration, so `for_each` over them
+  is already the wrong tool — but nothing in the schema says so
 - Fix: a Set, or make `order` mandatory
 
 ### Offset pagination skips a row when an earlier one is deleted mid-walk
-- Every index walk (12 of them, including the two that back a resource Read:
-  `walkAPITokens` and `walkEnrollmentTokens`) pages by `page`/`per_page`. Deleting
+- Every index walk (13 of them since #22 added `ListInventory`, the shared walk
+  behind all twenty collector inventories, including the two that back a resource
+  Read: `walkAPITokens` and `walkEnrollmentTokens`) pages by `page`/`per_page`. Deleting
   a row sorted BEFORE the one being sought, between two page requests, re-slices
   the remaining rows and shifts the boundary row onto a page already read — so it
   is never served

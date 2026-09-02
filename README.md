@@ -39,6 +39,59 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_dashboard_templates` | The dashboard gallery, with an availability verdict per template |
 | `fivenines_host_groups` | Host groups, filterable by name, for looking up a group ID |
 
+### Per-instance collector inventories
+
+The state rows behind each host's dashboard tabs — what a metrics query can
+count but never name. Every one of these takes an `instance_id` and returns a
+`collector` block alongside the rows, because an empty list on its own cannot
+distinguish "this host genuinely runs none" from "the collector is switched
+off" (which deletes the rows) from "this agent is too old to report them".
+
+| Data Source | Description |
+|-------------|-------------|
+| `fivenines_systemd_units` | Failed units, systemd's verdict, and the journal tail |
+| `fivenines_docker_containers` | Container state, exit codes, restart loops |
+| `fivenines_docker_images` | Deployed images and their scan verdict |
+| `fivenines_listening_ports` | What is listening, loopback sockets included |
+| `fivenines_smart_devices` | smartctl PASSED / FAILED verdicts per drive |
+| `fivenines_zfs_pools` | Pool health, resilver progress, scrub results |
+| `fivenines_raid_arrays` | mdadm arrays, failed members, rebuild progress |
+| `fivenines_temperature_sensors` | Sensor inventory and declared thresholds |
+| `fivenines_nvidia_gpus` | Cards, utilization, and compute processes |
+| `fivenines_fail2ban_jails` | Jails, ban counts, and banned addresses |
+| `fivenines_php_fpm_pools` | Pool process state and worker exhaustion |
+| `fivenines_rabbitmq_queues` | Queue depth, consumers, starvation |
+| `fivenines_rabbitmq_nodes` | Broker node resource alarms |
+| `fivenines_haproxy_backends` | Per-backend status and member tallies |
+| `fivenines_haproxy_servers` | Per-member status and health-check verdicts |
+| `fivenines_wireguard_peers` | Per-peer tunnel state and handshake age |
+| `fivenines_qemu_vms` | libvirt domains, including vanished tombstones |
+| `fivenines_proxmox_guests` | Cluster guests and their current node |
+| `fivenines_proxmox_nodes` | Cluster nodes the cluster can no longer see |
+| `fivenines_proxmox_storages` | Cluster storages, per node |
+
+```hcl
+data "fivenines_systemd_units" "failed" {
+  instance_id  = fivenines_instance.web.id
+  active_state = "failed"
+}
+
+# "No failed units" is only an all-clear if we were actually looking.
+output "units_are_healthy" {
+  value = (
+    data.fivenines_systemd_units.failed.collector.enabled &&
+    data.fivenines_systemd_units.failed.collector.supported &&
+    length(data.fivenines_systemd_units.failed.systemd_units) == 0
+  )
+}
+```
+
+Null is never zero on these rows: a null `scrub_errors` means nobody has ever
+checked, a null `vulnerability_count` means never scanned, a null
+`oom_kill_count` means cgroup v1 cannot see it. Rows the dashboard hides —
+QEMU tombstones, stale Proxmox rows, loopback sockets — are returned and
+flagged rather than filtered out.
+
 ## Quick Start
 
 ### 1. Get an API key

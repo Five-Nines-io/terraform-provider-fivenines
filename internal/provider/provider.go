@@ -106,7 +106,7 @@ func (p *fiveninesProvider) Resources(_ context.Context) []func() resource.Resou
 }
 
 func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{
+	ds := []func() datasource.DataSource{
 		datasources.NewProbeRegionsDataSource,
 		datasources.NewIntegrationsDataSource,
 		datasources.NewWorkflowRunsDataSource,
@@ -119,4 +119,7 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 		datasources.NewDashboardTemplatesDataSource,
 		datasources.NewHostGroupsDataSource,
 	}
+	// The twenty per-instance collector inventories are declared as a table
+	// rather than twenty near-identical files -- see internal/datasources/inventory.go.
+	return append(ds, datasources.InventoryDataSources()...)
 }

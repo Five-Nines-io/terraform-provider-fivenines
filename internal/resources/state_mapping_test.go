@@ -288,3 +288,153 @@ func TestMapNetworkDeviceToState_ImportStartsFromEmptyState(t *testing.T) {
 			"if this changed, revisit the import path")
 	}
 }
+
+// --- status page items: the full state space ---
+//
+// This attribute took three fix cycles, and each cycle's fix introduced the next
+// cycle's defect, so the grid is enumerated exhaustively rather than sampled.
+// The two paths have opposite obligations and the same API response:
+//
+//	plan-backed (Create/Update) — Terraform requires the applied value to equal
+//	  a KNOWN planned value. The plan wins; only an unknown takes the API's.
+//	state-backed (Read) — the server is the truth, or a page edited in the
+//	  dashboard never shows as drift.
+
+func statusPageItemA() client.StatusPageItem {
+	return client.StatusPageItem{ItemType: "Host", ItemID: "a"}
+}
+
+func statusPageItemB() client.StatusPageItem {
+	return client.StatusPageItem{ItemType: "Host", ItemID: "b"}
+}
+
+// A known plan must survive whatever the API echoes back, or the apply fails
+// with "Provider produced inconsistent result after apply".
+func TestMapStatusPageToPlan_KnownPlanAlwaysSurvives(t *testing.T) {
+	itemType := types.ObjectType{AttrTypes: statusPageItemAttrTypes}
+	a, b := statusPageItemA(), statusPageItemB()
+
+	planned := []struct {
+		name string
+		list types.List
+	}{
+		{"null (no items block, nothing in state)", types.ListNull(itemType)},
+		{"empty (items = [])", statusPageItems(t)},
+		{"populated (items = [A])", statusPageItems(t, a)},
+	}
+	responses := []struct {
+		name  string
+		items []client.StatusPageItem
+	}{
+		{"none", nil},
+		{"[A]", []client.StatusPageItem{a}},
+		{"[A,B] (B added in the dashboard)", []client.StatusPageItem{a, b}},
+	}
+
+	for _, p := range planned {
+		for _, r := range responses {
+			t.Run(p.name+" / api "+r.name, func(t *testing.T) {
+				plan := &statusPageModel{Items: p.list}
+				mapStatusPageToPlan(&client.StatusPage{ID: 1, Name: "x", Items: r.items}, plan)
+				if !plan.Items.Equal(p.list) {
+					t.Errorf("planned %v became %v — Terraform rejects the apply", p.list, plan.Items)
+				}
+			})
+		}
+	}
+}
+
+// An unknown plan is the one case the API may fill in: Terraform allows an
+// unknown to resolve to anything, and on create that is the only way the
+// server's items reach state at all.
+func TestMapStatusPageToPlan_UnknownTakesTheAPIValue(t *testing.T) {
+	itemType := types.ObjectType{AttrTypes: statusPageItemAttrTypes}
+	a := statusPageItemA()
+
+	plan := &statusPageModel{Items: types.ListUnknown(itemType)}
+	mapStatusPageToPlan(&client.StatusPage{ID: 1, Name: "x", Items: []client.StatusPageItem{a}}, plan)
+	if plan.Items.IsUnknown() || len(plan.Items.Elements()) != 1 {
+		t.Errorf("expected the API value to fill an unknown plan, got %v", plan.Items)
+	}
+
+	plan = &statusPageModel{Items: types.ListUnknown(itemType)}
+	mapStatusPageToPlan(&client.StatusPage{ID: 1, Name: "x"}, plan)
+	if !plan.Items.IsNull() {
+		t.Errorf("expected an unknown plan with no API items to resolve to null, got %v", plan.Items)
+	}
+}
+
+// Read is the other master: it must report what the server says, or items
+// deleted or added in the dashboard never surface as drift.
+func TestMapStatusPageToState_ReadReportsTheServer(t *testing.T) {
+	itemType := types.ObjectType{AttrTypes: statusPageItemAttrTypes}
+	a, b := statusPageItemA(), statusPageItemB()
+
+	tests := []struct {
+		name  string
+		prior types.List
+		api   []client.StatusPageItem
+		want  string
+	}{
+		{"item added out of band", types.ListNull(itemType), []client.StatusPageItem{a}, "[A]"},
+		{"item added to a managed list", statusPageItems(t, a), []client.StatusPageItem{a, b}, "[A,B]"},
+		{"all items deleted out of band", statusPageItems(t, a), nil, "null"},
+		{"pinned empty survives", statusPageItems(t), nil, "empty"},
+		{"nothing anywhere", types.ListNull(itemType), nil, "null"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := &statusPageModel{Items: tt.prior}
+			mapStatusPageToState(&client.StatusPage{ID: 1, Name: "x", Items: tt.api}, state)
+
+			var got string
+			switch {
+			case state.Items.IsNull():
+				got = "null"
+			case len(state.Items.Elements()) == 0:
+				got = "empty"
+			case len(state.Items.Elements()) == 1:
+				got = "[A]"
+			default:
+				got = "[A,B]"
+			}
+			if got != tt.want {
+				t.Errorf("got %s, want %s — Read must report the server", got, tt.want)
+			}
+		})
+	}
+}
+
+// itemsUpdate decides whether the update writes items at all.
+func TestItemsUpdate_WriteDecision(t *testing.T) {
+	itemType := types.ObjectType{AttrTypes: statusPageItemAttrTypes}
+	a, b := statusPageItemA(), statusPageItemB()
+
+	tests := []struct {
+		name          string
+		planned       types.List
+		stored        types.List
+		wantSent      bool
+		wantSentCount int
+	}{
+		{"unchanged populated list is not written", statusPageItems(t, a), statusPageItems(t, a), false, 0},
+		{"unchanged empty list is not written", statusPageItems(t), statusPageItems(t), false, 0},
+		{"null plan is never written", types.ListNull(itemType), types.ListNull(itemType), false, 0},
+		{"emptying a page is written as []", statusPageItems(t), statusPageItems(t, a), true, 0},
+		{"adding an item is written", statusPageItems(t, a, b), statusPageItems(t, a), true, 2},
+		{"first items on a page with none", statusPageItems(t, a), types.ListNull(itemType), true, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := itemsUpdate(tt.planned, tt.stored)
+			if tt.wantSent != (got != nil) {
+				t.Fatalf("sent=%v, want sent=%v", got != nil, tt.wantSent)
+			}
+			if got != nil && len(*got) != tt.wantSentCount {
+				t.Errorf("sent %d items, want %d", len(*got), tt.wantSentCount)
+			}
+		})
+	}
+}

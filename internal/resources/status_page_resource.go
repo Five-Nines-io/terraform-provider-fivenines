@@ -233,7 +233,7 @@ func (r *statusPageResource) Create(ctx context.Context, req resource.CreateRequ
 		return
 	}
 
-	mapStatusPageToState(page, &plan)
+	mapStatusPageToPlan(page, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -311,7 +311,7 @@ func (r *statusPageResource) Update(ctx context.Context, req resource.UpdateRequ
 		break
 	}
 
-	mapStatusPageToState(page, &plan)
+	mapStatusPageToPlan(page, &plan)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -342,6 +342,26 @@ func (r *statusPageResource) ImportState(ctx context.Context, req resource.Impor
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
 }
 
+// mapStatusPageToPlan maps an API response onto a PLAN (Create and Update).
+//
+// Terraform requires the applied value to equal any KNOWN planned value, so the
+// plan wins for `items` and only an unknown one takes what the server reports.
+// items is the one attribute where the two can legitimately diverge: it is the
+// only one the provider conditionally omits, so the server's list can move
+// underneath a plan that never asked to change it — someone adding an item in
+// the dashboard between the refresh and the apply, say. Letting the echo win
+// there fails the apply instead of converging on the next refresh.
+func mapStatusPageToPlan(p *client.StatusPage, plan *statusPageModel) {
+	planned := plan.Items
+	mapStatusPageToState(p, plan)
+	if !planned.IsUnknown() {
+		plan.Items = planned
+	}
+}
+
+// mapStatusPageToState maps an API response onto prior STATE (Read), where the
+// server is the truth: reporting it is how a page edited in the dashboard shows
+// up as drift.
 func mapStatusPageToState(p *client.StatusPage, state *statusPageModel) {
 	state.ID = types.Int64Value(p.ID)
 	state.Name = types.StringValue(p.Name)

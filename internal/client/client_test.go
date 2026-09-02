@@ -1805,3 +1805,140 @@ func TestDeletionDone_UnwrapsAPIError(t *testing.T) {
 		t.Errorf("expected a wrapped 404 to report done, got (%v, %v)", done, err)
 	}
 }
+
+// --- deletion poll: the conditions that had no test before ---
+//
+// The poll took three fix cycles and each fix introduced the next defect, so the
+// terminal and transient conditions are enumerated rather than sampled. These
+// five cells were previously covered only by unit assertions on retryablePoll,
+// or not at all.
+
+// deletionPollServer answers `first` for the first n polls, then 404s.
+func deletionPollServer(t *testing.T, n int32, first http.HandlerFunc) (*Client, *int32) {
+	t.Helper()
+	var polls int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&polls, 1) <= n {
+			first(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not found"})
+	})
+	return c, &polls
+}
+
+func statusHandler(code int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(code)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "transient"})
+	}
+}
+
+// A fleet destroy at parallelism 10 is exactly the workload that trips the
+// limiter. doRequest absorbs a 429 itself, so the poll's own 429 branch is only
+// reachable once doRequest EXHAUSTS its five internal retries and hands the 429
+// up — which is what this drives. Retry-After: 0 keeps doRequest's own backoff
+// from adding a minute of sleeping.
+func TestClient_WaitForInstanceDeletion_RetriesExhaustedRateLimit(t *testing.T) {
+	shrinkDeletionPolling(t)
+
+	// doRequest makes 1 + 5 attempts before giving up, so 6 x 429 exhausts one
+	// poll; the seventh request is the next poll and reports the deletion.
+	c, requests := deletionPollServer(t, 6, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "rate limited"})
+	})
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("expected an exhausted 429 to be retried by the poll, got: %v", err)
+	}
+	if got := atomic.LoadInt32(requests); got != 7 {
+		t.Errorf("expected 6 rate-limited attempts then the 404, got %d requests", got)
+	}
+}
+
+func TestClient_WaitForInstanceDeletion_RetriesRequestTimeoutEndToEnd(t *testing.T) {
+	shrinkDeletionPolling(t)
+	c, polls := deletionPollServer(t, 1, statusHandler(http.StatusRequestTimeout))
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("expected the 408 to be retried, got: %v", err)
+	}
+	if got := atomic.LoadInt32(polls); got != 2 {
+		t.Errorf("expected a retry after the 408, got %d polls", got)
+	}
+}
+
+// The regression cycle 3 introduced and two reviewers demonstrated: a connection
+// dropped mid-body surfaces through the same wrapper as a syntactically bad
+// payload, and must stay retryable. Driven end to end, not through retryablePoll.
+func TestClient_WaitForInstanceDeletion_RetriesTruncatedReadEndToEnd(t *testing.T) {
+	shrinkDeletionPolling(t)
+	c, polls := deletionPollServer(t, 1, func(w http.ResponseWriter, r *http.Request) {
+		// Promise more than we send, then kill the connection mid-body.
+		w.Header().Set("Content-Length", "500")
+		w.Write([]byte(`{"instance":{"id":"abc`))
+		if hijacker, ok := w.(http.Hijacker); ok {
+			conn, _, err := hijacker.Hijack()
+			if err == nil {
+				conn.Close()
+			}
+		}
+	})
+
+	if err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second); err != nil {
+		t.Fatalf("expected a truncated read to be retried, got: %v", err)
+	}
+	if got := atomic.LoadInt32(polls); got != 2 {
+		t.Errorf("expected a retry after the truncated read, got %d polls", got)
+	}
+}
+
+// Ctrl+C between polls, not during one — the poll spends most of its life
+// asleep, so this is the likeliest moment to be interrupted.
+func TestClient_WaitForInstanceDeletion_CancelDuringBackoffSleep(t *testing.T) {
+	interval, maxInterval := deletionPollInterval, deletionPollMaxInterval
+	deletionPollInterval, deletionPollMaxInterval = 50*time.Millisecond, 50*time.Millisecond
+	t.Cleanup(func() { deletionPollInterval, deletionPollMaxInterval = interval, maxInterval })
+
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instance": map[string]interface{}{
+				"id": "abc-123", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond) // lands inside the 50ms sleep
+		cancel()
+	}()
+
+	err := c.WaitForInstanceDeletion(ctx, "abc-123", 30*time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled when interrupted between polls, got: %v", err)
+	}
+}
+
+// Without a cap the interval doubles unboundedly and a slow teardown spends the
+// back half of its window asleep instead of polling.
+func TestWaitForDeletion_BackoffCaps(t *testing.T) {
+	interval, maxInterval := deletionPollInterval, deletionPollMaxInterval
+	deletionPollInterval, deletionPollMaxInterval = time.Millisecond, 4*time.Millisecond
+	t.Cleanup(func() { deletionPollInterval, deletionPollMaxInterval = interval, maxInterval })
+
+	var polls int
+	_ = waitForDeletion(context.Background(), 60*time.Millisecond, func(context.Context) (bool, error) {
+		polls++
+		return false, nil
+	})
+
+	// Uncapped, 1ms doubling reaches 64ms and fits ~7 polls in the window.
+	// Capped at 4ms it manages appreciably more.
+	if polls < 10 {
+		t.Errorf("expected the backoff to cap and keep polling, got %d polls in 60ms", polls)
+	}
+}

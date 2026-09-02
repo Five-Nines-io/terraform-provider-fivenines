@@ -99,17 +99,6 @@
 
 ## P2 — Nice to have
 
-### Unverified: does the status page create response embed items?
-- `mapStatusPageToState` nulls `items` when a response carries none, which is
-  right for Read (it is how deleted-in-the-dashboard shows up as drift) but wrong
-  for Create if the POST response does not embed the item association: a config
-  with `items = [...]` would plan a known list and Create would write null
-- `TestAccStatusPage_emptiesItems` step 1 is the assertion that settles it, and
-  the acceptance suite has never run
-- Fix if confirmed: re-read after create, or keep the planned list on the create
-  path only — not on Read, where nulling is the correct drift signal
-- Found by: /ship adversarial review, 2026-09-02
-
 ### Delete timeout is not operator-tunable
 - `AsyncDeletionTimeout` (client.go) is a compile-time 5 minutes, passed straight
   through from instance and network device Delete. A backend slower than that

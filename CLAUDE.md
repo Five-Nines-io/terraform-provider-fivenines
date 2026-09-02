@@ -8,10 +8,18 @@ work is tracked in GitHub issues #5-#26.
 ## Build and test
 
 - `make build` / `make test` / `make fmt` — standard targets.
-- `make testacc` runs the acceptance suite (`internal/provider/*_test.go`) against
-  a live organisation, creating and destroying real resources. It needs `TF_ACC=1`,
-  a staging `FIVENINES_API_KEY` and the `terraform` CLI on `PATH`; without `TF_ACC`
-  those tests skip, so `make test` stays offline.
+- `make testacc` runs the acceptance suite (`internal/provider/*_resource_test.go`)
+  against a live organisation, creating and destroying real resources. It needs
+  `TF_ACC=1`, a staging `FIVENINES_API_KEY` and the `terraform` CLI on `PATH`;
+  without `TF_ACC` those tests skip, so `make test` stays offline.
+- `internal/provider/*_plan_test.go` is a third tier and is *not* gated on the
+  staging org, despite living in the same package. `planTest` in
+  `plan_test_harness_test.go` points real Terraform at an `httptest` server and
+  sets `TF_ACC` itself, so those cases run under plain `make test` wherever the
+  `terraform` binary is, and skip only when it is missing. They are the only
+  tests that exercise plan validation: the unit tests drive Create and Update
+  directly, which skips the step where Terraform compares the plan to the
+  configuration. Add one when a resource's plan-time behaviour is non-trivial.
 - `make docs` runs `tfplugindocs generate --provider-name fivenines
   --rendered-provider-name terraform-provider-fivenines`. The flags are not
   optional: tfplugindocs derives the provider name from the directory name, so

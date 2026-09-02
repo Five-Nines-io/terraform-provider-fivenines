@@ -219,6 +219,7 @@ What ends up there:
 | `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
 | `fivenines_integration.url`, `secret`, `routing_key`, `user_key`, `app_token` | Write-only — the API never serializes an integration's metadata, so state holds the value you configured. |
 | `fivenines_integration.webhook_signing_secret`, `webhook_verification_token` | Returned once, by the create call, and never readable again. State is the **only** copy: lose it and the signing key has to be rotated by replacing the channel. |
+| `fivenines_api_token.token` | Returned once, by the create call. The server keeps only a SHA-256 digest, so state is the **only** copy — and unlike the rows above, it is a key to the API itself. Anyone who can read the state file can act as that token, up to its scopes. An imported token has no value here at all. |
 
 ### Upgrading: unset attributes are now null, not `""`
 
@@ -290,6 +291,9 @@ terraform import fivenines_mqtt_broker.factory <broker-uuid>
 
 # Topic monitors live under their broker, so both UUIDs are part of the ID
 terraform import fivenines_mqtt_topic_monitor.temperature <broker-uuid>:<monitor-uuid>
+
+# API tokens are the one numeric id here, and import brings the metadata only:
+# `token` stays null, because the value was readable exactly once
 terraform import fivenines_api_token.ci <api-token-id>
 ```
 

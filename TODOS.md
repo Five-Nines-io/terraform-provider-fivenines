@@ -139,7 +139,7 @@
 - #13 added `internal/provider/host_group_plan_test.go`: real Terraform against an
   httptest server, so it needs no organisation and no key and runs in `make test`
   wherever the terraform binary is
-- #18 added the MQTT pair, and #16 added `api_token_plan_test.go` (16 cases) and
+- #18 added the MQTT pair, and #16 added `api_token_plan_test.go` (17 cases) and
   extracted the harness the three had copied byte-for-byte into
   `internal/provider/plan_test_harness_test.go`. The remaining resources have no
   equivalent — their plan-time behaviour is only covered by the TF_ACC suite,

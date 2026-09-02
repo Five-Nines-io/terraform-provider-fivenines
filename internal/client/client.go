@@ -22,6 +22,13 @@ type Client struct {
 	BaseURL    string
 	APIKey     string
 	HTTPClient *http.Client
+
+	// SkipPlanValidation disables the WithDryRun pre-flight that resources send
+	// during `terraform plan`. Unlike the dry run itself — which is per-call,
+	// see WithDryRun — this is provider configuration: it exists for the setup
+	// where the key that plans is not the key that applies, and a read-only key
+	// is refused by the pre-flight even though the apply would succeed.
+	SkipPlanValidation bool
 }
 
 // NewClient creates a new FiveNines API client.
@@ -2731,4 +2738,243 @@ func (c *Client) InstantiateDashboardTemplate(ctx context.Context, input Instant
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 	return &result, nil
+}
+
+// --- Organization ---
+
+func (c *Client) GetOrganization(ctx context.Context) (*Organization, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/organization", nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := sanitizeETag(resp.Header.Get("ETag"))
+	var result struct {
+		Organization Organization `json:"organization"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Organization, etag, nil
+}
+
+func (c *Client) UpdateOrganization(ctx context.Context, etag string, input UpdateOrganizationInput) (*Organization, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	body := map[string]interface{}{"organization": input}
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/organization", body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Organization Organization `json:"organization"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Organization, nil
+}
+
+// ListOrganizationMembers returns the whole roster. The API exposes no
+// per-member GET, so a read resolves one membership out of this list.
+func (c *Client) ListOrganizationMembers(ctx context.Context) ([]OrganizationMember, error) {
+	var all []OrganizationMember
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/organization/members?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+		var result struct {
+			Members []OrganizationMember `json:"members"`
+			Meta    PaginationMeta       `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.Members...)
+		more, err := morePages(len(result.Members), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+// UpdateOrganizationMember sets a member's role. id is the membership id, not
+// the user id. The API refuses changing your own role, an owner's role, and
+// assigning ownership. Honours WithDryRun.
+func (c *Client) UpdateOrganizationMember(ctx context.Context, id int64, input UpdateOrganizationMemberInput) (*OrganizationMember, error) {
+	body := map[string]interface{}{"membership": input}
+	path := "/api/v1/organization/members/" + strconv.FormatInt(id, 10)
+	resp, err := c.doRequest(ctx, "PATCH", path, body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Member OrganizationMember `json:"member"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Member, nil
+}
+
+// DeleteOrganizationMember offboards a member: the API removes the membership
+// AND deletes the user account in one transaction, which destroys every API
+// token that user owned. Honours WithDryRun — worth spending here more than
+// anywhere else, since the refusals (yourself, an owner) are unrecoverable
+// halfway through an apply.
+func (c *Client) DeleteOrganizationMember(ctx context.Context, id int64) error {
+	path := "/api/v1/organization/members/" + strconv.FormatInt(id, 10)
+	resp, err := c.doRequest(ctx, "DELETE", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// ListOrganizationInvitations returns pending and expired invitations. An
+// accepted one leaves this list for the member roster.
+func (c *Client) ListOrganizationInvitations(ctx context.Context) ([]OrganizationInvitation, error) {
+	var all []OrganizationInvitation
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/organization/invitations?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+		var result struct {
+			Invitations []OrganizationInvitation `json:"invitations"`
+			Meta        PaginationMeta           `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.Invitations...)
+		more, err := morePages(len(result.Invitations), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+// CreateOrganizationInvitation invites an address, or refreshes the pending
+// invitation an address already has. Under WithDryRun nothing is persisted and
+// no email is sent — an email cannot be rolled back.
+func (c *Client) CreateOrganizationInvitation(ctx context.Context, input CreateOrganizationInvitationInput) (*OrganizationInvitation, error) {
+	body := map[string]interface{}{"invitation": input}
+
+	// The endpoint answers 409 when a concurrent request is inviting the same
+	// address, and the contract names retry as the remedy — the upsert makes it
+	// safe, since the second attempt refreshes the row the first one created.
+	var resp *http.Response
+	var err error
+	for attempt := 0; ; attempt++ {
+		resp, err = c.doRequest(ctx, "POST", "/api/v1/organization/invitations", body, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusConflict || attempt == 2 {
+			break
+		}
+		resp.Body.Close()
+		// Back off: retrying instantly gives the competing transaction no time
+		// to commit, so all three attempts would collide on the same lock.
+		select {
+		case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Invitation OrganizationInvitation `json:"invitation"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Invitation, nil
+}
+
+// DeleteOrganizationInvitation revokes a pending invitation and invalidates its
+// acceptance link.
+func (c *Client) DeleteOrganizationInvitation(ctx context.Context, id int64) error {
+	path := "/api/v1/organization/invitations/" + strconv.FormatInt(id, 10)
+	resp, err := c.doRequest(ctx, "DELETE", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func (c *Client) GetOrganizationSecurity(ctx context.Context) (*SecurityPolicy, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/organization/security", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		Security SecurityPolicy `json:"security"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Security, nil
+}
+
+func (c *Client) GetOrganizationSAML(ctx context.Context) (*SAMLConfiguration, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/organization/saml", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		SAML SAMLConfiguration `json:"saml"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.SAML, nil
 }

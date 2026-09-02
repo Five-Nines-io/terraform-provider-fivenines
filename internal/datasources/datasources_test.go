@@ -24,6 +24,10 @@ var (
 	_ datasource.DataSourceWithConfigure = &uptimeMonitorsDataSource{}
 	_ datasource.DataSourceWithConfigure = &workflowTemplatesDataSource{}
 	_ datasource.DataSourceWithConfigure = &workflowNodeTypesDataSource{}
+	_ datasource.DataSourceWithConfigure = &organizationDataSource{}
+	_ datasource.DataSourceWithConfigure = &organizationMembersDataSource{}
+	_ datasource.DataSourceWithConfigure = &organizationSecurityDataSource{}
+	_ datasource.DataSourceWithConfigure = &organizationSAMLDataSource{}
 )
 
 // newTestServer creates a test HTTP server with the given handler.
@@ -137,6 +141,10 @@ func TestUptimeMonitorDataSources_MetadataAndConfigure(t *testing.T) {
 			for _, ds := range []datasource.DataSourceWithConfigure{
 				&uptimeMonitorStatusDataSource{},
 				&uptimeMonitorsDataSource{},
+				&organizationDataSource{},
+				&organizationMembersDataSource{},
+				&organizationSecurityDataSource{},
+				&organizationSAMLDataSource{},
 			} {
 				resp := &datasource.ConfigureResponse{}
 				ds.Configure(context.Background(), datasource.ConfigureRequest{ProviderData: tt.providerData}, resp)

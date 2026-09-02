@@ -24,6 +24,11 @@ terraform {
 provider "fivenines" {
   api_key = var.fivenines_api_key
   # base_url = "https://fivenines.io" # optional
+
+  # Organization member changes are pre-validated with a dry-run request during
+  # `terraform plan`, so the API's refusals surface before an apply starts. Skip
+  # it when the key you plan with is not the key you apply with.
+  # skip_plan_validation = true
 }
 
 variable "fivenines_api_key" {
@@ -117,3 +122,4 @@ it when opening a support ticket.
 
 - `api_key` (String, Sensitive) FiveNines API key (starts with `fn_`). Must carry the **write** scope: a read-scoped token answers 403 on every create, update and delete. Can also be set via the FIVENINES_API_KEY environment variable.
 - `base_url` (String) FiveNines API base URL. Defaults to https://fivenines.io. Can also be set via FIVENINES_BASE_URL environment variable.
+- `skip_plan_validation` (Boolean) Skip the dry-run requests that pre-validate destructive organization changes during `terraform plan`. Defaults to false. Set it when the API key used to plan is not the one used to apply — a read-only key is refused by the dry-run even though the apply would succeed. Can also be set via the FIVENINES_SKIP_PLAN_VALIDATION environment variable, which accepts `1`, `t`, `T`, `TRUE`, `true` or `True`.

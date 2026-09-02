@@ -10,6 +10,11 @@ terraform {
 provider "fivenines" {
   api_key = var.fivenines_api_key
   # base_url = "https://fivenines.io" # optional
+
+  # Organization member changes are pre-validated with a dry-run request during
+  # `terraform plan`, so the API's refusals surface before an apply starts. Skip
+  # it when the key you plan with is not the key you apply with.
+  # skip_plan_validation = true
 }
 
 variable "fivenines_api_key" {

@@ -146,6 +146,25 @@ func TestRead_RemovesResourceDeletedOutOfBand(t *testing.T) {
 				return &statusPageResource{client: c}
 			},
 		},
+		{
+			// The singleton addresses no id, but the contract is the same: a
+			// 404 means the key no longer resolves an organization, and that is
+			// drift rather than an error on every subsequent plan.
+			name:   "organization",
+			schema: organizationSchemaForTest,
+			seed: func(t *testing.T, ctx context.Context, s tfsdk.State) tfsdk.State {
+				m := organizationModel{ID: types.Int64Value(42)}
+				if d := s.Set(ctx, &m); d.HasError() {
+					t.Fatalf("seeding state: %v", d.Errors())
+				}
+				return s
+			},
+			read: func(c *client.Client) interface {
+				Read(context.Context, resource.ReadRequest, *resource.ReadResponse)
+			} {
+				return &organizationResource{client: c}
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -301,4 +320,14 @@ func TestDelete_SurfacesRealErrors(t *testing.T) {
 	if detail := resp.Diagnostics.Errors()[0].Detail(); !strings.Contains(detail, "req-500") {
 		t.Errorf("expected the request_id in the diagnostic, got %q", detail)
 	}
+}
+
+func organizationSchemaForTest(t *testing.T) rschema.Schema {
+	t.Helper()
+	resp := &resource.SchemaResponse{}
+	NewOrganizationResource().(*organizationResource).Schema(context.Background(), resource.SchemaRequest{}, resp)
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("schema returned diagnostics: %v", resp.Diagnostics)
+	}
+	return resp.Schema
 }

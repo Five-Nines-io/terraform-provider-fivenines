@@ -1252,3 +1252,112 @@ type UpdateStatusPageMaintenanceWindowInput struct {
 	EndsAt        *string                          `json:"ends_at,omitempty"`
 	AffectedItems *[]MaintenanceWindowAffectedItem `json:"affected_items,omitempty"`
 }
+
+// --- Organization ---
+
+// Organization represents the organization the API key belongs to. There is no
+// collection and no id in the path: a key resolves exactly one organization.
+// `name` is the only writable field.
+type Organization struct {
+	ID                      int64   `json:"id"`
+	Name                    *string `json:"name"`
+	Slug                    string  `json:"slug"`
+	DisplayName             string  `json:"display_name"`
+	Plan                    string  `json:"plan"`
+	Trialing                bool    `json:"trialing"`
+	SeatsUsed               int64   `json:"seats_used"`
+	SeatsTotal              *int64  `json:"seats_total"`
+	SeatsRemaining          int64   `json:"seats_remaining"`
+	MembersCount            int64   `json:"members_count"`
+	PendingInvitationsCount int64   `json:"pending_invitations_count"`
+	CreatedAt               string  `json:"created_at"`
+	UpdatedAt               string  `json:"updated_at"`
+}
+
+// UpdateOrganizationInput renames the organization. Name is Required on the
+// resource, so nil never reaches the tag; omitempty only documents that.
+type UpdateOrganizationInput struct {
+	Name *string `json:"name,omitempty"`
+}
+
+// OrganizationMember represents one membership. ID is the membership id — the
+// id PATCH and DELETE address — while UserID is the durable identity: a
+// membership row disappears and reappears when someone leaves and rejoins.
+type OrganizationMember struct {
+	ID               int64  `json:"id"`
+	UserID           int64  `json:"user_id"`
+	Email            string `json:"email"`
+	Role             string `json:"role"`
+	TwoFactorEnabled bool   `json:"two_factor_enabled"`
+	JoinedAt         string `json:"joined_at"`
+	UpdatedAt        string `json:"updated_at"`
+}
+
+// UpdateOrganizationMemberInput carries a role change. The API accepts admin
+// and member only — owner is readable but never assignable, and assigning it is
+// a 422 rather than an authorization failure.
+type UpdateOrganizationMemberInput struct {
+	Role string `json:"role"`
+}
+
+// OrganizationInvitation represents a seat offered but not yet taken. The
+// acceptance token is never serialized by the API: holding it is enough to join
+// the organization.
+type OrganizationInvitation struct {
+	ID         int64   `json:"id"`
+	Email      string  `json:"email"`
+	Role       string  `json:"role"`
+	Status     string  `json:"status"`
+	InvitedBy  *string `json:"invited_by"`
+	ExpiresAt  string  `json:"expires_at"`
+	AcceptedAt *string `json:"accepted_at"`
+	CreatedAt  string  `json:"created_at"`
+	UpdatedAt  string  `json:"updated_at"`
+}
+
+// CreateOrganizationInvitationInput invites an address. The endpoint is an
+// upsert: inviting an address that already has a pending invitation refreshes
+// it rather than colliding, which is what makes it safe to retry.
+type CreateOrganizationInvitationInput struct {
+	Email string `json:"email"`
+	// Role is Optional+Computed with a schema default, so the plan always holds
+	// a value and the zero string never reaches the tag. There is nothing to
+	// clear on an invitation that does not exist yet.
+	Role string `json:"role,omitempty"`
+}
+
+// SecurityPolicy is the organization's sign-in policy. Read-only over the API:
+// PATCH is always refused with 403, so a stolen token cannot disarm the control
+// that makes a stolen password survivable.
+type SecurityPolicy struct {
+	RequireTwoFactor        bool    `json:"require_two_factor"`
+	TwoFactorEnforcedAt     *string `json:"two_factor_enforced_at"`
+	MembersCount            int64   `json:"members_count"`
+	MembersWithTwoFactor    int64   `json:"members_with_two_factor"`
+	MembersPendingTwoFactor int64   `json:"members_pending_two_factor"`
+	SSOEnforced             bool    `json:"sso_enforced"`
+}
+
+// SAMLConfiguration is the organization's SAML SSO posture. Read-only over the
+// API: PATCH and DELETE are always refused with 403, since rewriting the IdP
+// URL and certificate repoints the organization's identity provider outright.
+// Every key is present even when no configuration exists.
+type SAMLConfiguration struct {
+	Configured              bool     `json:"configured"`
+	Enabled                 bool     `json:"enabled"`
+	EnforceSSO              bool     `json:"enforce_sso"`
+	AutoProvisionUsers      bool     `json:"auto_provision_users"`
+	AllowIdpInitiated       bool     `json:"allow_idp_initiated"`
+	IdpEntityID             *string  `json:"idp_entity_id"`
+	IdpSSOURL               *string  `json:"idp_sso_url"`
+	IdpSLOURL               *string  `json:"idp_slo_url"`
+	IdpMetadataURL          *string  `json:"idp_metadata_url"`
+	MetadataLastFetchedAt   *string  `json:"metadata_last_fetched_at"`
+	IdpCertificatePresent   bool     `json:"idp_certificate_present"`
+	IdpCertificateExpiresAt *string  `json:"idp_certificate_expires_at"`
+	NameIDFormat            *string  `json:"name_id_format"`
+	DefaultUserRole         *string  `json:"default_user_role"`
+	SessionDurationHours    *int64   `json:"session_duration_hours"`
+	Domains                 []string `json:"domains"`
+	UpdatedAt               *string  `json:"updated_at"`
+}

@@ -688,11 +688,25 @@ func (c *Client) ListWorkflows(ctx context.Context, opts WorkflowListOptions) ([
 
 // --- Workflow Runs ---
 
-func (c *Client) ListWorkflowRuns(ctx context.Context, workflowID int64) ([]WorkflowRun, error) {
+func (c *Client) ListWorkflowRuns(ctx context.Context, workflowID int64, opts WorkflowRunListOptions) ([]WorkflowRun, error) {
 	var all []WorkflowRun
 	page := 1
 	for {
-		path := fmt.Sprintf("/api/v1/workflows/%d/runs?page=%d&per_page=100", workflowID, page)
+		query := url.Values{}
+		query.Set("page", strconv.Itoa(page))
+		query.Set("per_page", "100")
+		for key, value := range map[string]string{
+			"status":        opts.Status,
+			"updated_since": opts.UpdatedSince,
+			"order":         opts.Order,
+			"direction":     opts.Direction,
+		} {
+			if value != "" {
+				query.Set(key, value)
+			}
+		}
+
+		path := fmt.Sprintf("/api/v1/workflows/%d/runs?%s", workflowID, query.Encode())
 		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 		if err != nil {
 			return nil, err
@@ -719,6 +733,27 @@ func (c *Client) ListWorkflowRuns(ctx context.Context, workflowID int64) ([]Work
 		page++
 	}
 	return all, nil
+}
+
+// GetWorkflowRun returns one run with its per-step detail. Run ids are not
+// global: a run belonging to another workflow is a 404 here.
+func (c *Client) GetWorkflowRun(ctx context.Context, workflowID, runID int64) (*WorkflowRunDetail, error) {
+	path := fmt.Sprintf("/api/v1/workflows/%d/runs/%d", workflowID, runID)
+	resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		Run WorkflowRunDetail `json:"run"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Run, nil
 }
 
 func (c *Client) GetWorkflow(ctx context.Context, id int64) (*Workflow, string, error) {
@@ -1190,12 +1225,34 @@ func (c *Client) ListProbeRegions(ctx context.Context) ([]ProbeRegion, error) {
 // single un-paginated GET, so an organisation with more than 25 channels got a
 // silently truncated list — the same failure the meta rename caused everywhere
 // else, arriving separately because this loop never had a meta to misread.
-func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
+func (c *Client) ListIntegrations(ctx context.Context, opts IntegrationListOptions) ([]Integration, error) {
 	var all []Integration
 	page := 1
 	for {
-		path := fmt.Sprintf("/api/v1/integrations?page=%d&per_page=100", page)
-		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		// Enabled is a *bool so that false stays distinct from unset; it is
+		// rendered here rather than in the struct so the omit-empty rule below
+		// stays the single gate on what reaches the wire.
+		enabled := ""
+		if opts.Enabled != nil {
+			enabled = strconv.FormatBool(*opts.Enabled)
+		}
+		query := url.Values{}
+		query.Set("page", strconv.Itoa(page))
+		query.Set("per_page", "100")
+		for key, value := range map[string]string{
+			"type":          opts.Type,
+			"enabled":       enabled,
+			"q":             opts.Q,
+			"updated_since": opts.UpdatedSince,
+			"order":         opts.Order,
+			"direction":     opts.Direction,
+		} {
+			if value != "" {
+				query.Set(key, value)
+			}
+		}
+
+		resp, err := c.doRequest(ctx, "GET", "/api/v1/integrations?"+query.Encode(), nil, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -1225,12 +1282,39 @@ func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
 
 // --- Incidents ---
 
-func (c *Client) ListIncidents(ctx context.Context) ([]Incident, error) {
+func (c *Client) ListIncidents(ctx context.Context, opts IncidentListOptions) ([]Incident, error) {
 	var all []Incident
 	page := 1
 	for {
-		path := fmt.Sprintf("/api/v1/incidents?page=%d&per_page=100", page)
-		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		// WorkflowID is a *int64 so that "not filtering" stays distinct from
+		// workflow 0; it is rendered here rather than in the struct so the
+		// omit-empty rule below stays the single gate on what reaches the wire.
+		workflowID := ""
+		if opts.WorkflowID != nil {
+			workflowID = strconv.FormatInt(*opts.WorkflowID, 10)
+		}
+		query := url.Values{}
+		query.Set("page", strconv.Itoa(page))
+		query.Set("per_page", "100")
+		for key, value := range map[string]string{
+			"status":            opts.Status,
+			"q":                 opts.Q,
+			"host_id":           opts.HostID,
+			"task_id":           opts.TaskID,
+			"uptime_monitor_id": opts.UptimeMonitorID,
+			"workflow_id":       workflowID,
+			"from":              opts.From,
+			"to":                opts.To,
+			"updated_since":     opts.UpdatedSince,
+			"order":             opts.Order,
+			"direction":         opts.Direction,
+		} {
+			if value != "" {
+				query.Set(key, value)
+			}
+		}
+
+		resp, err := c.doRequest(ctx, "GET", "/api/v1/incidents?"+query.Encode(), nil, nil)
 		if err != nil {
 			return nil, err
 		}

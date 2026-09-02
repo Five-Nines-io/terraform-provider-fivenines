@@ -28,11 +28,12 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | Data Source | Description |
 |-------------|-------------|
 | `fivenines_probe_regions` | Available probe regions for uptime monitors |
-| `fivenines_integrations` | Configured notification integrations |
-| `fivenines_workflow_runs` | Workflow execution history |
+| `fivenines_integrations` | Notification integrations, filterable by type, enabled flag, name and update time |
+| `fivenines_workflow_runs` | Workflow execution history (run headers), filterable by status and update time |
+| `fivenines_workflow_run` | A single workflow run with its per-step detail |
 | `fivenines_workflow_templates` | Prebuilt workflow templates, instantiable by slug |
 | `fivenines_workflow_node_types` | Node types available to workflow execution graphs |
-| `fivenines_incidents` | Incidents triggered by workflows |
+| `fivenines_incidents` | Incidents, filterable by status, subject, active window and update time |
 | `fivenines_uptime_monitors` | Uptime monitors, filterable by status, protocol, search text and update time |
 | `fivenines_uptime_monitor_status` | Lightweight current status of a single uptime monitor |
 | `fivenines_dashboard_templates` | The dashboard gallery, with an availability verdict per template |

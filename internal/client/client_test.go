@@ -1497,13 +1497,13 @@ func TestClient_ListIntegrations(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"integrations": []map[string]interface{}{
-				{"id": 1, "type": "SlackIntegration", "name": "Slack", "provider": "slack", "enabled": true, "verified": true, "created_at": "2026-01-01T00:00:00Z"},
+				{"id": 1, "type": "SlackIntegration", "name": "Slack", "provider": "slack", "enabled": true, "verified": true, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"},
 			},
 			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
 		})
 	})
 
-	integrations, err := c.ListIntegrations(context.Background())
+	integrations, err := c.ListIntegrations(context.Background(), IntegrationListOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1512,6 +1512,9 @@ func TestClient_ListIntegrations(t *testing.T) {
 	}
 	if integrations[0].Provider != "slack" {
 		t.Errorf("expected provider slack, got %s", integrations[0].Provider)
+	}
+	if integrations[0].UpdatedAt != "2026-01-02T00:00:00Z" {
+		t.Errorf("expected updated_at to be mapped, got %q", integrations[0].UpdatedAt)
 	}
 }
 
@@ -1533,7 +1536,7 @@ func TestClient_ListIntegrations_Pagination(t *testing.T) {
 		})
 	})
 
-	integrations, err := c.ListIntegrations(context.Background())
+	integrations, err := c.ListIntegrations(context.Background(), IntegrationListOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1565,7 +1568,7 @@ func TestClient_ListIntegrations_UnrecognisedMetaWalksToEmptyPage(t *testing.T) 
 		json.NewEncoder(w).Encode(body)
 	})
 
-	integrations, err := c.ListIntegrations(context.Background())
+	integrations, err := c.ListIntegrations(context.Background(), IntegrationListOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1993,9 +1996,12 @@ func TestClient_ListIncidents(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"incidents": []map[string]interface{}{
 				{
-					"id": 1, "title": "High CPU", "status": "triggered",
+					"id": 1, "title": "High CPU", "status": "open",
 					"summary": "CPU above 90%", "created_at": "2026-01-01T00:00:00Z",
-					"updated_at": "2026-01-01T00:00:00Z",
+					"updated_at":        "2026-01-01T00:00:00Z",
+					"public":            true,
+					"uptime_monitor_id": "8b1d0e7a-0000-4000-8000-000000000001",
+					"duration_seconds":  3600,
 				},
 				{
 					"id": 2, "title": "Disk Full", "status": "resolved",
@@ -2007,7 +2013,7 @@ func TestClient_ListIncidents(t *testing.T) {
 		})
 	})
 
-	incidents, err := c.ListIncidents(context.Background())
+	incidents, err := c.ListIncidents(context.Background(), IncidentListOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2019,6 +2025,18 @@ func TestClient_ListIncidents(t *testing.T) {
 	}
 	if incidents[1].Status != "resolved" {
 		t.Errorf("expected status 'resolved', got %s", incidents[1].Status)
+	}
+	if !incidents[0].Public {
+		t.Error("expected incident 1 to be public")
+	}
+	if incidents[0].UptimeMonitorID == nil || *incidents[0].UptimeMonitorID != "8b1d0e7a-0000-4000-8000-000000000001" {
+		t.Errorf("expected uptime_monitor_id to be mapped, got %v", incidents[0].UptimeMonitorID)
+	}
+	if incidents[0].DurationSeconds == nil || *incidents[0].DurationSeconds != 3600 {
+		t.Errorf("expected duration_seconds 3600, got %v", incidents[0].DurationSeconds)
+	}
+	if incidents[1].UptimeMonitorID != nil {
+		t.Errorf("expected null uptime_monitor_id to stay nil, got %v", *incidents[1].UptimeMonitorID)
 	}
 }
 
@@ -2866,5 +2884,363 @@ func TestClient_RevokeAPIToken_RejectionIsAnError(t *testing.T) {
 		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
 			t.Errorf("expected a 403 APIError, got %v", err)
 		}
+	}
+}
+
+// --- Index filters (#21) ---
+//
+// Every index rejects an unknown query parameter with a 400, so these assert
+// both halves of the contract: a configured filter is sent under its
+// allowlisted name, and an unset one is absent rather than sent empty. The
+// exact-count assertion is the half that matters — without it a stray key
+// would ride along unnoticed until the API rejected the whole request.
+
+func TestClient_ListIncidents_Filters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"incidents": []map[string]interface{}{},
+			"meta":      map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	workflowID := int64(7)
+	_, err := c.ListIncidents(context.Background(), IncidentListOptions{
+		Status:          "open",
+		Q:               "CPU",
+		HostID:          "3cac0e44-0000-4000-8000-000000000001",
+		TaskID:          "3cac0e44-0000-4000-8000-000000000002",
+		UptimeMonitorID: "3cac0e44-0000-4000-8000-000000000003",
+		WorkflowID:      &workflowID,
+		From:            "2026-08-29T00:00:00Z",
+		To:              "2026-08-30T00:00:00Z",
+		UpdatedSince:    "2026-08-28T00:00:00Z",
+		Order:           "updated_at",
+		Direction:       "asc",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := map[string]string{
+		"status":            "open",
+		"q":                 "CPU",
+		"host_id":           "3cac0e44-0000-4000-8000-000000000001",
+		"task_id":           "3cac0e44-0000-4000-8000-000000000002",
+		"uptime_monitor_id": "3cac0e44-0000-4000-8000-000000000003",
+		"workflow_id":       "7",
+		"from":              "2026-08-29T00:00:00Z",
+		"to":                "2026-08-30T00:00:00Z",
+		"updated_since":     "2026-08-28T00:00:00Z",
+		"order":             "updated_at",
+		"direction":         "asc",
+		"page":              "1",
+		"per_page":          "100",
+	}
+	for k, v := range want {
+		if got := gotQuery.Get(k); got != v {
+			t.Errorf("query %s = %q, want %q", k, got, v)
+		}
+	}
+	if len(gotQuery) != len(want) {
+		t.Errorf("expected exactly %d query params, got %d: %v", len(want), len(gotQuery), gotQuery)
+	}
+}
+
+func TestClient_ListIncidents_NoFiltersSendsOnlyPagination(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"incidents": []map[string]interface{}{},
+			"meta":      map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	if _, err := c.ListIncidents(context.Background(), IncidentListOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gotQuery) != 2 || gotQuery.Get("page") != "1" || gotQuery.Get("per_page") != "100" {
+		t.Errorf("expected only page/per_page, got %v", gotQuery)
+	}
+}
+
+// WorkflowID is a *int64 precisely so that workflow 0 is a real filter and
+// "unset" is the absence of the key. A plain int64 would make them the same.
+func TestClient_ListIncidents_ZeroWorkflowIDIsSent(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"incidents": []map[string]interface{}{},
+			"meta":      map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	zero := int64(0)
+	if _, err := c.ListIncidents(context.Background(), IncidentListOptions{WorkflowID: &zero}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gotQuery.Get("workflow_id"); got != "0" {
+		t.Errorf("expected workflow_id=0 to be sent, got %q (query: %v)", got, gotQuery)
+	}
+}
+
+func TestClient_ListIntegrations_Filters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integrations": []map[string]interface{}{},
+			"meta":         map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	enabled := false
+	_, err := c.ListIntegrations(context.Background(), IntegrationListOptions{
+		Type:         "SlackIntegration",
+		Enabled:      &enabled,
+		Q:            "ops",
+		UpdatedSince: "2026-08-30T12:00:00Z",
+		Order:        "type",
+		Direction:    "asc",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := map[string]string{
+		"type":          "SlackIntegration",
+		"enabled":       "false",
+		"q":             "ops",
+		"updated_since": "2026-08-30T12:00:00Z",
+		"order":         "type",
+		"direction":     "asc",
+		"page":          "1",
+		"per_page":      "100",
+	}
+	for k, v := range want {
+		if got := gotQuery.Get(k); got != v {
+			t.Errorf("query %s = %q, want %q", k, got, v)
+		}
+	}
+	if len(gotQuery) != len(want) {
+		t.Errorf("expected exactly %d query params, got %d: %v", len(want), len(gotQuery), gotQuery)
+	}
+}
+
+// enabled=false is a real filter value, not "unset" — the *bool is what keeps
+// the two apart, and dropping it would silently widen every disabled-channel
+// query to the whole index.
+func TestClient_ListIntegrations_NoFiltersSendsOnlyPagination(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integrations": []map[string]interface{}{},
+			"meta":         map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	if _, err := c.ListIntegrations(context.Background(), IntegrationListOptions{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gotQuery) != 2 || gotQuery.Get("page") != "1" || gotQuery.Get("per_page") != "100" {
+		t.Errorf("expected only page/per_page, got %v", gotQuery)
+	}
+}
+
+// A filter must survive the pagination walk: dropping it after page 1 would
+// widen the query mid-list and pull in rows the caller filtered out.
+func TestClient_ListIncidents_FiltersPersistAcrossPages(t *testing.T) {
+	var seen []string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.Query().Get("status"))
+		page := len(seen)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"incidents": []map[string]interface{}{{"id": page, "title": "x", "status": "open"}},
+			"meta":      map[string]int{"current_page": page, "total_pages": 3, "total_count": 3, "per_page": 1},
+		})
+	})
+
+	if _, err := c.ListIncidents(context.Background(), IncidentListOptions{Status: "open"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("expected 3 pages walked, got %d", len(seen))
+	}
+	for i, got := range seen {
+		if got != "open" {
+			t.Errorf("page %d sent status=%q, want %q", i+1, got, "open")
+		}
+	}
+}
+
+// --- Workflow runs (#21) ---
+
+func TestClient_ListWorkflowRuns_FiltersAndFields(t *testing.T) {
+	var gotPath string
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"runs": []map[string]interface{}{
+				{
+					"id": 10, "status": "running", "resource_key": "web-1",
+					"workflow_id": 3, "workflow_version_id": 9,
+					"started_at": "2026-01-01T00:00:00Z", "completed_at": nil,
+					"duration_seconds": 42,
+					"created_at":       "2026-01-01T00:00:00Z",
+					"updated_at":       "2026-01-01T00:00:10Z",
+				},
+			},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
+		})
+	})
+
+	runs, err := c.ListWorkflowRuns(context.Background(), 3, WorkflowRunListOptions{
+		Status:       "running",
+		UpdatedSince: "2026-01-01T00:00:00Z",
+		Order:        "started_at",
+		Direction:    "asc",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v1/workflows/3/runs" {
+		t.Errorf("unexpected path: %s", gotPath)
+	}
+
+	want := map[string]string{
+		"status":        "running",
+		"updated_since": "2026-01-01T00:00:00Z",
+		"order":         "started_at",
+		"direction":     "asc",
+		"page":          "1",
+		"per_page":      "100",
+	}
+	for k, v := range want {
+		if got := gotQuery.Get(k); got != v {
+			t.Errorf("query %s = %q, want %q", k, got, v)
+		}
+	}
+	if len(gotQuery) != len(want) {
+		t.Errorf("expected exactly %d query params, got %d: %v", len(want), len(gotQuery), gotQuery)
+	}
+
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 run, got %d", len(runs))
+	}
+	if runs[0].WorkflowID != 3 || runs[0].WorkflowVersionID != 9 {
+		t.Errorf("expected workflow_id 3 / version 9, got %d / %d", runs[0].WorkflowID, runs[0].WorkflowVersionID)
+	}
+	if runs[0].DurationSeconds == nil || *runs[0].DurationSeconds != 42 {
+		t.Errorf("expected duration_seconds 42, got %v", runs[0].DurationSeconds)
+	}
+	if runs[0].UpdatedAt != "2026-01-01T00:00:10Z" {
+		t.Errorf("expected updated_at to be mapped, got %q", runs[0].UpdatedAt)
+	}
+	if runs[0].CompletedAt != nil {
+		t.Errorf("expected null completed_at to stay nil, got %q", *runs[0].CompletedAt)
+	}
+	// A fan-out run carries its subject; the plain-string version of this field
+	// could not tell that from the null a dispatch-once run returns.
+	if runs[0].ResourceKey == nil || *runs[0].ResourceKey != "web-1" {
+		t.Errorf("expected resource_key web-1, got %v", runs[0].ResourceKey)
+	}
+}
+
+func TestClient_GetWorkflowRun(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/workflows/3/runs/10" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"run": map[string]interface{}{
+				"id": 10, "status": "failed", "resource_key": nil,
+				"workflow_id": 3, "workflow_version_id": 9,
+				"started_at": "2026-01-01T00:00:00Z", "completed_at": "2026-01-01T00:01:00Z",
+				"duration_seconds": 60,
+				"created_at":       "2026-01-01T00:00:00Z",
+				"updated_at":       "2026-01-01T00:01:00Z",
+				"error":            "trigger raised",
+				"trigger_output":   map[string]interface{}{"value": 91},
+				"steps": []map[string]interface{}{
+					{
+						"id": 1, "node_id": "email_1", "node_type": "email_alert",
+						"status": "failed", "error_message": "smtp timeout",
+						"output_data":      map[string]interface{}{"delivered": false},
+						"started_at":       "2026-01-01T00:00:30Z",
+						"completed_at":     "2026-01-01T00:00:31Z",
+						"duration_seconds": 1.25,
+						"created_at":       "2026-01-01T00:00:30Z",
+					},
+					{
+						"id": 2, "node_id": "wait_1", "node_type": "delay",
+						"status": "running", "error_message": nil,
+						"output_data":      map[string]interface{}{},
+						"started_at":       "2026-01-01T00:00:31Z",
+						"completed_at":     nil,
+						"duration_seconds": nil,
+						"created_at":       "2026-01-01T00:00:31Z",
+					},
+				},
+			},
+		})
+	})
+
+	run, err := c.GetWorkflowRun(context.Background(), 3, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The header fields are promoted from the embedded WorkflowRun.
+	if run.ID != 10 || run.Status != "failed" || run.WorkflowVersionID != 9 {
+		t.Errorf("unexpected run header: %+v", run.WorkflowRun)
+	}
+	if run.Error == nil || *run.Error != "trigger raised" {
+		t.Errorf("expected run-level error, got %v", run.Error)
+	}
+	if run.TriggerOutput["value"] != float64(91) {
+		t.Errorf("expected trigger_output to decode, got %v", run.TriggerOutput)
+	}
+	if len(run.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(run.Steps))
+	}
+	if run.Steps[0].ErrorMessage == nil || *run.Steps[0].ErrorMessage != "smtp timeout" {
+		t.Errorf("expected step error_message, got %v", run.Steps[0].ErrorMessage)
+	}
+	if run.Steps[0].DurationSeconds == nil || *run.Steps[0].DurationSeconds != 1.25 {
+		t.Errorf("expected fractional step duration 1.25, got %v", run.Steps[0].DurationSeconds)
+	}
+	// Null, never 0, while a step has not both started and finished.
+	if run.Steps[1].DurationSeconds != nil {
+		t.Errorf("expected nil duration on the unfinished step, got %v", *run.Steps[1].DurationSeconds)
+	}
+	if run.Steps[0].OutputData["delivered"] != false {
+		t.Errorf("expected step output_data to decode, got %v", run.Steps[0].OutputData)
+	}
+	// Null on a workflow that dispatches once — never "".
+	if run.ResourceKey != nil {
+		t.Errorf("expected nil resource_key on a non-fan-out run, got %q", *run.ResourceKey)
+	}
+}
+
+// Run ids are not global: a run belonging to another workflow is a 404 here,
+// and that has to surface as an error rather than an empty run.
+func TestClient_GetWorkflowRun_404(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not found"})
+	})
+
+	_, err := c.GetWorkflowRun(context.Background(), 3, 999)
+	if err == nil {
+		t.Fatal("expected an error for a run on another workflow")
+	}
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.StatusCode != 404 {
+		t.Fatalf("expected 404 APIError, got %v", err)
 	}
 }

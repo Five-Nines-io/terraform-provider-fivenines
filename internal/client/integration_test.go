@@ -80,7 +80,7 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 	updateInput := UpdateStatusPageInput{
 		Name:         &name,
 		ThemeVariant: &newTheme,
-		Items:        Set(readPage.Items),
+		Items:        &readPage.Items,
 	}
 	reqJSON, _ := json.MarshalIndent(map[string]interface{}{"status_page": updateInput}, "", "  ")
 	t.Logf("PATCH body:\n%s", string(reqJSON))
@@ -98,7 +98,7 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 	revertInput := UpdateStatusPageInput{
 		Name:         &name,
 		ThemeVariant: &revertTheme,
-		Items:        Set(readPage.Items),
+		Items:        &readPage.Items,
 	}
 	_, err = c.UpdateStatusPage(ctx, targetPage.ID, etag2, revertInput)
 	if err != nil {

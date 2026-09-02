@@ -312,19 +312,19 @@ func (r *networkDeviceResource) Update(ctx context.Context, req resource.UpdateR
 	// The SNMP credentials are write-only and blank-means-keep server-side, so
 	// they are omitted when the plan has no value rather than cleared.
 	input := client.UpdateNetworkDeviceInput{
-		Name:              preserveString(plan.Name),
-		IPAddress:         preserveString(plan.IPAddress),
-		PollingHostID:     clearString(plan.PollingHostID),
-		DeviceType:        preserveString(plan.DeviceType),
-		PollingInterval:   preserveInt(plan.PollingInterval),
-		SNMPVersion:       preserveString(plan.SNMPVersion),
-		SNMPCommunity:     preserveString(plan.SNMPCommunity),
-		SNMPUsername:      clearString(plan.SNMPUsername),
-		SNMPSecurityLevel: preserveString(plan.SNMPSecurityLevel),
-		SNMPAuthProtocol:  preserveString(plan.SNMPAuthProtocol),
-		SNMPAuthPassword:  preserveString(plan.SNMPAuthPassword),
-		SNMPPrivProtocol:  preserveString(plan.SNMPPrivProtocol),
-		SNMPPrivPassword:  preserveString(plan.SNMPPrivPassword),
+		Name:              stringPtr(plan.Name),
+		IPAddress:         stringPtr(plan.IPAddress),
+		PollingHostID:     stringPtr(plan.PollingHostID),
+		DeviceType:        stringPtr(plan.DeviceType),
+		PollingInterval:   intPtr(plan.PollingInterval),
+		SNMPVersion:       stringPtr(plan.SNMPVersion),
+		SNMPCommunity:     stringPtr(plan.SNMPCommunity),
+		SNMPUsername:      stringPtr(plan.SNMPUsername),
+		SNMPSecurityLevel: stringPtr(plan.SNMPSecurityLevel),
+		SNMPAuthProtocol:  stringPtr(plan.SNMPAuthProtocol),
+		SNMPAuthPassword:  stringPtr(plan.SNMPAuthPassword),
+		SNMPPrivProtocol:  stringPtr(plan.SNMPPrivProtocol),
+		SNMPPrivPassword:  stringPtr(plan.SNMPPrivPassword),
 	}
 
 	// ETag retry loop

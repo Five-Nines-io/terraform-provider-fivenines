@@ -306,13 +306,13 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	// are omitted rather than cleared when the plan has no value. host_id is
 	// Optional-only and provider-owned: dropping it has to clear it server-side.
 	input := client.UpdateTaskInput{
-		Name:               preserveString(plan.Name),
-		ScheduleType:       preserveString(plan.ScheduleType),
-		Schedule:           preserveString(plan.Schedule),
-		IntervalSeconds:    preserveInt64(plan.IntervalSeconds),
-		GracePeriodMinutes: preserveInt(plan.GracePeriodMinutes),
-		TimeZone:           preserveString(plan.TimeZone),
-		HostID:             clearString(plan.HostID),
+		Name:               stringPtr(plan.Name),
+		ScheduleType:       stringPtr(plan.ScheduleType),
+		Schedule:           stringPtr(plan.Schedule),
+		IntervalSeconds:    int64Ptr(plan.IntervalSeconds),
+		GracePeriodMinutes: intPtr(plan.GracePeriodMinutes),
+		TimeZone:           stringPtr(plan.TimeZone),
+		HostID:             stringPtr(plan.HostID),
 	}
 
 	var task *client.Task
@@ -335,9 +335,9 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	}
 
 	// Handle pause/resume state change
-	if !plan.Paused.IsNull() {
+	if !plan.Paused.IsNull() && !plan.Paused.IsUnknown() {
 		wantPaused := plan.Paused.ValueBool()
-		isPaused := task.Status == "paused"
+		isPaused := task.Status == client.StatusPaused
 		if wantPaused && !isPaused {
 			paused, err := r.client.PauseTask(ctx, id)
 			if err != nil {
@@ -385,7 +385,7 @@ func mapTaskToState(t *client.Task, state *taskModel) {
 	state.ID = types.StringValue(t.ID)
 	state.Name = types.StringValue(t.Name)
 	state.ScheduleType = types.StringValue(t.ScheduleType)
-	state.Paused = types.BoolValue(t.Status == "paused")
+	state.Paused = types.BoolValue(t.Status == client.StatusPaused)
 	// The API answers null for the schedule of an interval task, and has been
 	// seen to answer "" — both mean "no cron expression".
 	state.Schedule = optionalNonEmptyString(t.Schedule)

@@ -229,9 +229,9 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 
 	// Update metadata with ETag retry on 412
 	input := client.UpdateWorkflowInput{
-		Name:            preserveString(plan.Name),
-		Description:     preserveString(plan.Description),
-		IntervalSeconds: preserveInt64(plan.IntervalSeconds),
+		Name:            stringPtr(plan.Name),
+		Description:     stringPtr(plan.Description),
+		IntervalSeconds: int64Ptr(plan.IntervalSeconds),
 	}
 
 	var workflow *client.Workflow

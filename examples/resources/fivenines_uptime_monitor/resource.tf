@@ -30,3 +30,26 @@ resource "fivenines_uptime_monitor" "database" {
   hostname = "db.example.com"
   port     = 5432
 }
+
+resource "fivenines_uptime_monitor" "dns" {
+  name            = "DNS A Record"
+  protocol        = "dns"
+  hostname        = "example.com"
+  dns_record_type = "A"
+
+  # Up to 50 records, 2048 characters each. Set to [] to stop pinning an
+  # expectation without deleting the monitor.
+  dns_expected_records = ["93.184.216.34"]
+}
+
+# The protocol can be changed in place; set whatever the new protocol requires
+# in the same plan (https needs url, tcp needs hostname + port, icmp needs
+# hostname, dns needs dns_record_type).
+resource "fivenines_uptime_monitor" "staging" {
+  name     = "Staging Website"
+  protocol = "https"
+  url      = "https://staging.example.com"
+
+  # Suspends checks without deleting the monitor or its history.
+  paused = true
+}

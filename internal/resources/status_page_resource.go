@@ -279,16 +279,16 @@ func (r *statusPageResource) Update(ctx context.Context, req resource.UpdateRequ
 	// exception: Terraform owns the list, and the API needs an explicit [] to
 	// empty a page, so null and empty both send [].
 	input := client.UpdateStatusPageInput{
-		Name:                    preserveString(plan.Name),
-		Description:             preserveString(plan.Description),
-		Public:                  preserveBool(plan.Public),
-		Uptime:                  preserveBool(plan.Uptime),
-		CustomDomain:            preserveString(plan.CustomDomain),
-		CustomDomainEnabled:     preserveBool(plan.CustomDomainEnabled),
-		CustomFooter:            preserveString(plan.CustomFooter),
-		CustomFooterEnabled:     preserveBool(plan.CustomFooterEnabled),
-		IncidentsHistoryEnabled: preserveBool(plan.IncidentsHistoryEnabled),
-		ThemeVariant:            preserveString(plan.ThemeVariant),
+		Name:                    stringPtr(plan.Name),
+		Description:             stringPtr(plan.Description),
+		Public:                  boolPtr(plan.Public),
+		Uptime:                  boolPtr(plan.Uptime),
+		CustomDomain:            stringPtr(plan.CustomDomain),
+		CustomDomainEnabled:     boolPtr(plan.CustomDomainEnabled),
+		CustomFooter:            stringPtr(plan.CustomFooter),
+		CustomFooterEnabled:     boolPtr(plan.CustomFooterEnabled),
+		IncidentsHistoryEnabled: boolPtr(plan.IncidentsHistoryEnabled),
+		ThemeVariant:            stringPtr(plan.ThemeVariant),
 		Items:                   planItemsToUpdateInput(plan.Items),
 	}
 
@@ -380,14 +380,15 @@ func mapStatusPageToState(p *client.StatusPage, state *statusPageModel) {
 // planItemsToUpdateInput turns the planned item list into an update value.
 // Unknown omits the key; null and empty both send an explicit [], which is the
 // only thing the API accepts as "remove every item".
-func planItemsToUpdateInput(itemsList types.List) *client.Nullable[[]client.StatusPageItem] {
+func planItemsToUpdateInput(itemsList types.List) *[]client.StatusPageItem {
 	if itemsList.IsUnknown() {
 		return nil
 	}
 	if itemsList.IsNull() {
-		return client.Set([]client.StatusPageItem{})
+		return &[]client.StatusPageItem{}
 	}
-	return client.Set(planItemsToClient(itemsList))
+	items := planItemsToClient(itemsList)
+	return &items
 }
 
 func planItemsToClient(itemsList types.List) []client.StatusPageItem {

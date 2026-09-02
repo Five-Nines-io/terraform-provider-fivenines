@@ -229,9 +229,9 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 	}
 
 	input := client.UpdateInstanceInput{
-		DisplayName:     preserveString(plan.DisplayName),
-		Enabled:         preserveBool(plan.Enabled),
-		MaintenanceMode: preserveBool(plan.MaintenanceMode),
+		DisplayName:     stringPtr(plan.DisplayName),
+		Enabled:         boolPtr(plan.Enabled),
+		MaintenanceMode: boolPtr(plan.MaintenanceMode),
 	}
 
 	var instance *client.Instance

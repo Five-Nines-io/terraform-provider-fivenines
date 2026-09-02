@@ -3,10 +3,17 @@ package client
 import "fmt"
 
 // PaginationMeta represents pagination metadata in list responses.
+//
+// These are the current field names. The envelope used to be count/total/offset;
+// when it changed, the old struct decoded to all zeros and the `count+offset >=
+// total` exit condition read `0 >= 0`, so every list in the provider silently
+// stopped after one page. See morePages for the guard that keeps a future rename
+// from truncating instead of erroring.
 type PaginationMeta struct {
-	Count  int `json:"count"`
-	Total  int `json:"total"`
-	Offset int `json:"offset"`
+	CurrentPage int `json:"current_page"`
+	TotalPages  int `json:"total_pages"`
+	TotalCount  int `json:"total_count"`
+	PerPage     int `json:"per_page"`
 }
 
 // Instance represents a monitored server (Host).
@@ -47,10 +54,10 @@ type CreateInstanceInput struct {
 
 // UpdateInstanceInput is the request body for updating an instance.
 type UpdateInstanceInput struct {
-	DisplayName     *string           `json:"display_name,omitempty"`
-	Description     *Nullable[string] `json:"description,omitempty"`
-	Enabled         *bool             `json:"enabled,omitempty"`
-	MaintenanceMode *bool             `json:"maintenance_mode,omitempty"`
+	DisplayName     *string `json:"display_name,omitempty"`
+	Description     *string `json:"description,omitempty"`
+	Enabled         *bool   `json:"enabled,omitempty"`
+	MaintenanceMode *bool   `json:"maintenance_mode,omitempty"`
 }
 
 // Task represents a cron/heartbeat monitor.
@@ -86,19 +93,20 @@ type CreateTaskInput struct {
 
 // UpdateTaskInput is the request body for updating a task.
 //
-// host_id is Optional-only in the schema, so the provider owns it: a null in the
-// plan is sent as an explicit null to clear the association rather than being
-// silently dropped. schedule/interval_seconds are Optional+Computed — the API
+// host_id carries NO omitempty, following the same convention as the
+// protocol-scoped uptime monitor fields: it is Optional-only, so the provider
+// owns it end to end and a nil pointer marshals as an explicit null that clears
+// the association. schedule/interval_seconds are Optional+Computed — the API
 // keeps the counterpart it already stored across a schedule_type switch (#8) —
-// so they are omitted instead.
+// so they keep omitempty and are omitted when unset.
 type UpdateTaskInput struct {
-	Name               *string           `json:"name,omitempty"`
-	ScheduleType       *string           `json:"schedule_type,omitempty"`
-	Schedule           *string           `json:"schedule,omitempty"`
-	IntervalSeconds    *int64            `json:"interval_seconds,omitempty"`
-	GracePeriodMinutes *int              `json:"grace_period_minutes,omitempty"`
-	TimeZone           *string           `json:"time_zone,omitempty"`
-	HostID             *Nullable[string] `json:"host_id,omitempty"`
+	Name               *string `json:"name,omitempty"`
+	ScheduleType       *string `json:"schedule_type,omitempty"`
+	Schedule           *string `json:"schedule,omitempty"`
+	IntervalSeconds    *int64  `json:"interval_seconds,omitempty"`
+	GracePeriodMinutes *int    `json:"grace_period_minutes,omitempty"`
+	TimeZone           *string `json:"time_zone,omitempty"`
+	HostID             *string `json:"host_id"`
 }
 
 // Workflow represents an automation definition.
@@ -155,32 +163,37 @@ type CreateWorkflowVersionInput struct {
 	ExecutionGraph map[string]interface{} `json:"execution_graph"`
 }
 
+// StatusPaused is the status both tasks and uptime monitors report while their
+// checks are suspended. Uptime monitors report one of: unknown, up, down,
+// paused, recovering.
+const StatusPaused = "paused"
+
 // UptimeMonitor represents an uptime monitoring check.
 type UptimeMonitor struct {
 	ID                  string  `json:"id"` // UUID
 	Name                string  `json:"name"`
 	Protocol            string  `json:"protocol"`
 	Status              string  `json:"status"`
-	URL                 *string `json:"url"`
-	Hostname            *string `json:"hostname"`
+	URL                 string  `json:"url"`
+	Hostname            string  `json:"hostname"`
 	Port                *int    `json:"port"`
-	HTTPMethod          *string `json:"http_method"`
-	IPVersion           *string `json:"ip_version"`
+	HTTPMethod          string  `json:"http_method"`
+	IPVersion           string  `json:"ip_version"`
 	IntervalSeconds     int     `json:"interval_seconds"`
 	TimeoutSeconds      int     `json:"timeout_seconds"`
 	ConfirmationCount   int     `json:"confirmation_count"`
-	Keyword             *string `json:"keyword"`
+	Keyword             string  `json:"keyword"`
 	KeywordAbsent       bool    `json:"keyword_absent"`
 	FollowRedirects     bool    `json:"follow_redirects"`
 	ExpectedStatusCodes []int   `json:"expected_status_codes"`
 	ProbeRegionIDs      []int64 `json:"probe_region_ids"`
 	// DNS protocol fields
-	DNSRecordType      *string  `json:"dns_record_type"`
+	DNSRecordType      string   `json:"dns_record_type"`
 	DNSExpectedRecords []string `json:"dns_expected_records"`
 	// Custom HTTP fields
 	CustomHeaders map[string]string `json:"custom_headers"`
-	CustomBody    *string           `json:"custom_body"`
-	ContentType   *string           `json:"content_type"`
+	CustomBody    string            `json:"custom_body"`
+	ContentType   string            `json:"content_type"`
 	// Recovery
 	RecoveryCount int `json:"recovery_count"`
 	// Read-only
@@ -219,33 +232,77 @@ type CreateUptimeMonitorInput struct {
 
 // UpdateUptimeMonitorInput is the request body for updating an uptime monitor.
 //
-// url/hostname are Optional+Computed (the server fills them per protocol), so
-// they are omitted when unset. The Optional-only fields below are owned by the
-// provider and cleared with an explicit null. dns_expected_records accepts an
-// explicit [] — the server normalises it to null — which is the only way to
-// drop a pinned expectation; expected_status_codes keeps `omitempty` because
-// the API rejects [] with 422.
+// The protocol-scoped fields below deliberately carry NO omitempty: they are
+// always serialised, and a nil pointer marshals as an explicit JSON null, which
+// the API reads as "clear this". That is what makes `protocol` updatable in
+// place — switching an https monitor to tcp has to actively clear `keyword` and
+// `content_type`, or the server keeps echoing values the Terraform plan says are
+// null and every apply fails with "Provider produced inconsistent result after
+// apply". Terraform resolves Optional-only attributes before calling Update, so
+// the plan value is always known by the time it reaches this struct.
+//
+// The remaining fields keep omitempty: they are Computed or defaulted, so the
+// plan always carries a concrete value and there is nothing to clear.
 type UpdateUptimeMonitorInput struct {
-	Name                *string                      `json:"name,omitempty"`
-	URL                 *string                      `json:"url,omitempty"`
-	Hostname            *string                      `json:"hostname,omitempty"`
-	Port                *Nullable[int]               `json:"port,omitempty"`
-	HTTPMethod          *string                      `json:"http_method,omitempty"`
-	IPVersion           *string                      `json:"ip_version,omitempty"`
-	IntervalSeconds     *int                         `json:"interval_seconds,omitempty"`
-	TimeoutSeconds      *int                         `json:"timeout_seconds,omitempty"`
-	ConfirmationCount   *int                         `json:"confirmation_count,omitempty"`
-	Keyword             *Nullable[string]            `json:"keyword,omitempty"`
-	KeywordAbsent       *bool                        `json:"keyword_absent,omitempty"`
-	FollowRedirects     *bool                        `json:"follow_redirects,omitempty"`
-	ExpectedStatusCodes []int                        `json:"expected_status_codes,omitempty"`
-	ProbeRegionIDs      []int64                      `json:"probe_region_ids,omitempty"`
-	DNSRecordType       *Nullable[string]            `json:"dns_record_type,omitempty"`
-	DNSExpectedRecords  *Nullable[[]string]          `json:"dns_expected_records,omitempty"`
-	CustomHeaders       *Nullable[map[string]string] `json:"custom_headers,omitempty"`
-	CustomBody          *Nullable[string]            `json:"custom_body,omitempty"`
-	ContentType         *Nullable[string]            `json:"content_type,omitempty"`
-	RecoveryCount       *int                         `json:"recovery_count,omitempty"`
+	Name                *string `json:"name,omitempty"`
+	Protocol            *string `json:"protocol,omitempty"`
+	URL                 *string `json:"url,omitempty"`
+	Hostname            *string `json:"hostname,omitempty"`
+	HTTPMethod          *string `json:"http_method,omitempty"`
+	IPVersion           *string `json:"ip_version,omitempty"`
+	IntervalSeconds     *int    `json:"interval_seconds,omitempty"`
+	TimeoutSeconds      *int    `json:"timeout_seconds,omitempty"`
+	ConfirmationCount   *int    `json:"confirmation_count,omitempty"`
+	KeywordAbsent       *bool   `json:"keyword_absent,omitempty"`
+	FollowRedirects     *bool   `json:"follow_redirects,omitempty"`
+	ExpectedStatusCodes []int   `json:"expected_status_codes,omitempty"`
+	RecoveryCount       *int    `json:"recovery_count,omitempty"`
+
+	// Explicitly clearable for the same reason as the protocol-scoped fields
+	// below: `probe_region_ids = []` is a legal config with no validator to
+	// shield it, and omitting the key would leave the server's old region set in
+	// place while the plan holds a known [].
+	ProbeRegionIDs *[]int64 `json:"probe_region_ids,omitempty"`
+
+	// Protocol-scoped: nil marshals as null and clears the stored value.
+	Port               *int               `json:"port"`
+	Keyword            *string            `json:"keyword"`
+	DNSRecordType      *string            `json:"dns_record_type"`
+	DNSExpectedRecords *[]string          `json:"dns_expected_records"`
+	CustomHeaders      *map[string]string `json:"custom_headers"`
+	CustomBody         *string            `json:"custom_body"`
+	ContentType        *string            `json:"content_type"`
+}
+
+// UptimeMonitorStatus is the lightweight payload returned by
+// GET /api/v1/uptime_monitors/{id}/status. It is intended as a cheap polling
+// target: it carries the liveness fields only, not the monitor configuration.
+//
+// Every optional field is a pointer so that a key the API omits decodes to nil
+// and surfaces as null rather than as a misleading zero value.
+type UptimeMonitorStatus struct {
+	ID           string  `json:"id"`
+	Status       string  `json:"status"`
+	LastCheckAt  *string `json:"last_check_at"`
+	NextCheckAt  *string `json:"next_check_at"`
+	LastError    *string `json:"last_error"`
+	SSLExpiresAt *string `json:"ssl_expires_at"`
+}
+
+// ListUptimeMonitorsOptions holds the index filters accepted by
+// GET /api/v1/uptime_monitors. Zero-valued fields are not sent.
+type ListUptimeMonitorsOptions struct {
+	// Status filters by current status: unknown, up, down, paused or recovering.
+	Status string
+	// Protocol filters by protocol: https, tcp, icmp or dns.
+	Protocol string
+	// Query is a free-text search over name, url and hostname (the "q" param).
+	Query string
+	// UpdatedSince returns only monitors updated at or after this ISO8601 timestamp.
+	UpdatedSince string
+	// Order is the column to sort by, Direction is "asc" or "desc".
+	Order     string
+	Direction string
 }
 
 // ProbeRegion represents a monitoring probe region.
@@ -325,23 +382,27 @@ type CreateNetworkDeviceInput struct {
 
 // UpdateNetworkDeviceInput is the request body for updating a network device.
 //
-// The SNMP credentials are write-only: the API never returns them and treats a
-// blank value as "keep what is stored", so they are omitted when the plan has
-// no value rather than being cleared.
+// polling_host_id and snmp_username carry NO omitempty: they are Optional-only,
+// so a nil pointer marshals as an explicit null and clears the stored value.
+//
+// The SNMP credentials keep omitempty on purpose. They are write-only — the API
+// never returns them and treats a blank value as "keep what is stored" — so an
+// unset plan value must omit the key. Sending null there would wipe a working
+// credential on every unrelated update.
 type UpdateNetworkDeviceInput struct {
-	Name              *string           `json:"name,omitempty"`
-	IPAddress         *string           `json:"ip_address,omitempty"`
-	PollingHostID     *Nullable[string] `json:"polling_host_id,omitempty"`
-	DeviceType        *string           `json:"device_type,omitempty"`
-	PollingInterval   *int              `json:"polling_interval,omitempty"`
-	SNMPVersion       *string           `json:"snmp_version,omitempty"`
-	SNMPCommunity     *string           `json:"snmp_community,omitempty"`
-	SNMPUsername      *Nullable[string] `json:"snmp_username,omitempty"`
-	SNMPSecurityLevel *string           `json:"snmp_security_level,omitempty"`
-	SNMPAuthProtocol  *string           `json:"snmp_auth_protocol,omitempty"`
-	SNMPAuthPassword  *string           `json:"snmp_auth_password,omitempty"`
-	SNMPPrivProtocol  *string           `json:"snmp_priv_protocol,omitempty"`
-	SNMPPrivPassword  *string           `json:"snmp_priv_password,omitempty"`
+	Name              *string `json:"name,omitempty"`
+	IPAddress         *string `json:"ip_address,omitempty"`
+	PollingHostID     *string `json:"polling_host_id"`
+	DeviceType        *string `json:"device_type,omitempty"`
+	PollingInterval   *int    `json:"polling_interval,omitempty"`
+	SNMPVersion       *string `json:"snmp_version,omitempty"`
+	SNMPCommunity     *string `json:"snmp_community,omitempty"`
+	SNMPUsername      *string `json:"snmp_username"`
+	SNMPSecurityLevel *string `json:"snmp_security_level,omitempty"`
+	SNMPAuthProtocol  *string `json:"snmp_auth_protocol,omitempty"`
+	SNMPAuthPassword  *string `json:"snmp_auth_password,omitempty"`
+	SNMPPrivProtocol  *string `json:"snmp_priv_protocol,omitempty"`
+	SNMPPrivPassword  *string `json:"snmp_priv_password,omitempty"`
 }
 
 // StatusPage represents a public status page.
@@ -387,21 +448,22 @@ type CreateStatusPageInput struct {
 
 // UpdateStatusPageInput is the request body for updating a status page.
 //
-// Items is a Nullable slice because emptying a page needs an explicit []: with
-// `omitempty` an empty plan list marshals to nothing, which the API reads as
-// "preserve the current items".
+// Items is a pointer to a slice, not a plain slice: a nil pointer omits the key
+// while a pointer to an empty slice marshals as an explicit []. Emptying a page
+// needs that [] — a plain `[]StatusPageItem` with omitempty marshals an empty
+// list to nothing, which the API reads as "preserve the current items".
 type UpdateStatusPageInput struct {
-	Name                    *string                     `json:"name,omitempty"`
-	Description             *string                     `json:"description,omitempty"`
-	Public                  *bool                       `json:"public,omitempty"`
-	Uptime                  *bool                       `json:"uptime,omitempty"`
-	CustomDomain            *string                     `json:"custom_domain,omitempty"`
-	CustomDomainEnabled     *bool                       `json:"custom_domain_enabled,omitempty"`
-	CustomFooter            *string                     `json:"custom_footer,omitempty"`
-	CustomFooterEnabled     *bool                       `json:"custom_footer_enabled,omitempty"`
-	IncidentsHistoryEnabled *bool                       `json:"incidents_history_enabled,omitempty"`
-	ThemeVariant            *string                     `json:"theme_variant,omitempty"`
-	Items                   *Nullable[[]StatusPageItem] `json:"items,omitempty"`
+	Name                    *string           `json:"name,omitempty"`
+	Description             *string           `json:"description,omitempty"`
+	Public                  *bool             `json:"public,omitempty"`
+	Uptime                  *bool             `json:"uptime,omitempty"`
+	CustomDomain            *string           `json:"custom_domain,omitempty"`
+	CustomDomainEnabled     *bool             `json:"custom_domain_enabled,omitempty"`
+	CustomFooter            *string           `json:"custom_footer,omitempty"`
+	CustomFooterEnabled     *bool             `json:"custom_footer_enabled,omitempty"`
+	IncidentsHistoryEnabled *bool             `json:"incidents_history_enabled,omitempty"`
+	ThemeVariant            *string           `json:"theme_variant,omitempty"`
+	Items                   *[]StatusPageItem `json:"items,omitempty"`
 }
 
 // APIError represents an error response from the API.

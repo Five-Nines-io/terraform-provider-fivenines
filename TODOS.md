@@ -18,6 +18,11 @@
   - Instance secrets: blank-means-keep + `_set` booleans (#7)
 - Fix: pointer types + explicit-empty handling per field, map API null →
   `types.StringNull()`
+- Reference implementation landed with the MQTT resources (#18):
+  `credentialWrite` in `mqtt_broker_resource.go` is the blank-means-keep half
+  (unchanged → omit the key, removed → explicit null), and `MQTTBrokerInput`
+  shows the pointer-without-`omitempty` shape a clearable field needs. #7 is the
+  same three states on the instance resource
 
 ### JSON execution_graph canonicalization
 - `execution_graph_json` is a raw string attribute. Harmless *today* only because

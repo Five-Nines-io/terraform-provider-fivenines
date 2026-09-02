@@ -1032,6 +1032,380 @@ func TestClient_DeleteStatusPage(t *testing.T) {
 	}
 }
 
+// --- MQTT Brokers ---
+
+// brokerResponse is the read shape the API renders back: no username or
+// password, only whether one is stored.
+func brokerResponse(overrides map[string]interface{}) map[string]interface{} {
+	broker := map[string]interface{}{
+		"id": "broker-uuid", "name": "Factory-floor Mosquitto", "host": "mqtt.internal",
+		"port": 1883, "tls": false, "username_set": true, "password_set": true,
+		"watcher_host_id": "host-uuid", "status": "connected", "stale": false,
+		"topic_monitor_count": 300,
+		"created_at":          "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+	}
+	for k, v := range overrides {
+		broker[k] = v
+	}
+	return map[string]interface{}{"mqtt_broker": broker}
+}
+
+func TestClient_CreateMQTTBroker(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/mqtt_brokers" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(brokerResponse(nil))
+	})
+
+	watcher := "host-uuid"
+	broker, err := c.CreateMQTTBroker(context.Background(), MQTTBrokerInput{
+		Name: "Factory-floor Mosquitto", Host: "mqtt.internal", Port: 1883, TLS: false,
+		WatcherHostID: &watcher,
+		Username:      SetCredential("factory"),
+		Password:      SetCredential("s3cret"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if broker.ID != "broker-uuid" {
+		t.Errorf("expected ID broker-uuid, got %s", broker.ID)
+	}
+	if !broker.UsernameSet || !broker.PasswordSet {
+		t.Error("expected username_set and password_set to be true")
+	}
+	if broker.TopicMonitorCount != 300 {
+		t.Errorf("expected topic_monitor_count 300, got %d", broker.TopicMonitorCount)
+	}
+	if got := gotBody["mqtt_broker"]["username"]; got != "factory" {
+		t.Errorf("expected username factory, got %v", got)
+	}
+	if got := gotBody["mqtt_broker"]["password"]; got != "s3cret" {
+		t.Errorf("expected password s3cret, got %v", got)
+	}
+}
+
+// A credential the caller did not touch must not reach the wire at all: the
+// value is unreadable, so re-sending a blank would either wipe it or (per the
+// API's blank-means-keep rule) mean nothing. Omission is what says "keep".
+func TestClient_MQTTBroker_KeptCredentialsAreOmitted(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(brokerResponse(nil))
+	})
+
+	_, err := c.UpdateMQTTBroker(context.Background(), "broker-uuid", "", MQTTBrokerInput{
+		Name: "Factory-floor Mosquitto", Host: "mqtt.internal", Port: 8883, TLS: true,
+		Username: KeepCredential(),
+		Password: KeepCredential(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, present := gotBody["mqtt_broker"]["username"]; present {
+		t.Error("expected username to be omitted when kept")
+	}
+	if _, present := gotBody["mqtt_broker"]["password"]; present {
+		t.Error("expected password to be omitted when kept")
+	}
+}
+
+// Clearing is the other half: only an explicit null removes a stored credential.
+func TestClient_MQTTBroker_ClearedCredentialsSendNull(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	var gotIfMatch string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotIfMatch = r.Header.Get("If-Match")
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(brokerResponse(map[string]interface{}{
+			"username_set": false, "password_set": false,
+		}))
+	})
+
+	broker, err := c.UpdateMQTTBroker(context.Background(), "broker-uuid", `"broker-etag"`, MQTTBrokerInput{
+		Name: "Factory-floor Mosquitto", Host: "mqtt.internal", Port: 1883,
+		Username: ClearCredential(),
+		Password: ClearCredential(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotIfMatch != `"broker-etag"` {
+		t.Errorf("expected If-Match %q, got %q", `"broker-etag"`, gotIfMatch)
+	}
+	body := gotBody["mqtt_broker"]
+	if v, present := body["username"]; !present || v != nil {
+		t.Errorf("expected explicit null username, got %v (present=%v)", v, present)
+	}
+	if v, present := body["password"]; !present || v != nil {
+		t.Errorf("expected explicit null password, got %v (present=%v)", v, present)
+	}
+	if broker.UsernameSet || broker.PasswordSet {
+		t.Error("expected username_set and password_set to be false after clearing")
+	}
+}
+
+// Unassigning the watcher host is a normal nullable field, not a credential:
+// nil has to marshal as null rather than disappear, or the broker keeps
+// collecting after Terraform says it should not.
+func TestClient_MQTTBroker_NilWatcherHostSendsNull(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(brokerResponse(map[string]interface{}{"watcher_host_id": nil}))
+	})
+
+	broker, err := c.UpdateMQTTBroker(context.Background(), "broker-uuid", "", MQTTBrokerInput{
+		Name: "Factory-floor Mosquitto", Host: "mqtt.internal", Port: 1883,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v, present := gotBody["mqtt_broker"]["watcher_host_id"]; !present || v != nil {
+		t.Errorf("expected explicit null watcher_host_id, got %v (present=%v)", v, present)
+	}
+	if broker.WatcherHostID != nil {
+		t.Errorf("expected nil watcher_host_id, got %v", *broker.WatcherHostID)
+	}
+}
+
+func TestClient_GetMQTTBroker(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("ETag", `"broker-etag"`)
+		json.NewEncoder(w).Encode(brokerResponse(map[string]interface{}{
+			"status": "config_error", "stale": true,
+			"last_error_message": "Connection refused: not authorised",
+			"last_connected_at":  "2026-01-01T00:00:00Z",
+			"last_synced_at":     "2026-01-01T00:05:00Z",
+		}))
+	})
+
+	broker, etag, err := c.GetMQTTBroker(context.Background(), "broker-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if etag != `"broker-etag"` {
+		t.Errorf("expected etag %q, got %q", `"broker-etag"`, etag)
+	}
+	if broker.Status != "config_error" {
+		t.Errorf("expected status config_error, got %s", broker.Status)
+	}
+	if !broker.Stale {
+		t.Error("expected stale true")
+	}
+	if broker.LastErrorMessage == nil || *broker.LastErrorMessage != "Connection refused: not authorised" {
+		t.Errorf("expected last_error_message, got %v", broker.LastErrorMessage)
+	}
+}
+
+func TestClient_ListMQTTBrokers_Pagination(t *testing.T) {
+	var requestCount int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := atomic.AddInt32(&requestCount, 1)
+		offset := 0
+		id := "a"
+		if page != 1 {
+			offset, id = 1, "b"
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"mqtt_brokers": []map[string]interface{}{{"id": id, "name": id, "host": "mqtt.internal"}},
+			"meta":         map[string]int{"count": 1, "total": 2, "offset": offset},
+		})
+	})
+
+	brokers, err := c.ListMQTTBrokers(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(brokers) != 2 {
+		t.Errorf("expected 2 brokers, got %d", len(brokers))
+	}
+}
+
+func TestClient_DeleteMQTTBroker(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" || r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	if err := c.DeleteMQTTBroker(context.Background(), "broker-uuid"); err != nil {
+		t.Fatalf("expected no error for 204, got: %v", err)
+	}
+}
+
+// MQTT is a gated feature, so a 403 is an org entitlement rather than a bad key.
+func TestClient_MQTTBroker_FeatureDisabled_403(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "MQTT monitoring is not available for your organization",
+		})
+	})
+
+	_, err := c.CreateMQTTBroker(context.Background(), MQTTBrokerInput{Name: "b", Host: "h", Port: 1883})
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", apiErr.StatusCode)
+	}
+	if apiErr.Message != "MQTT monitoring is not available for your organization" {
+		t.Errorf("unexpected message: %s", apiErr.Message)
+	}
+}
+
+// --- MQTT Topic Monitors ---
+
+func topicMonitorResponse(overrides map[string]interface{}) map[string]interface{} {
+	monitor := map[string]interface{}{
+		"id": "monitor-uuid", "mqtt_broker_id": "broker-uuid",
+		"topic_filter": "sensors/+/temperature", "stale_after_seconds": 300,
+		"match_kind": nil, "expected_value": nil, "json_key": nil,
+		"capture_payload": true, "effective_capture_payload": true,
+		"freshness_check": true, "payload_check": false, "exact_topic": false,
+		"subscribed_since": nil, "capped": false,
+		"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+	}
+	for k, v := range overrides {
+		monitor[k] = v
+	}
+	return map[string]interface{}{"topic_monitor": monitor}
+}
+
+func TestClient_CreateMQTTTopicMonitor(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid/topic_monitors" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(topicMonitorResponse(nil))
+	})
+
+	stale := int64(300)
+	monitor, err := c.CreateMQTTTopicMonitor(context.Background(), "broker-uuid", MQTTTopicMonitorInput{
+		TopicFilter: "sensors/+/temperature", StaleAfterSeconds: &stale, CapturePayload: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if monitor.ID != "monitor-uuid" {
+		t.Errorf("expected ID monitor-uuid, got %s", monitor.ID)
+	}
+	if !monitor.FreshnessCheck || monitor.PayloadCheck {
+		t.Error("expected a freshness check and no payload check")
+	}
+	if got := gotBody["topic_monitor"]["stale_after_seconds"]; got != float64(300) {
+		t.Errorf("expected stale_after_seconds 300, got %v", got)
+	}
+}
+
+func TestClient_GetMQTTTopicMonitor(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid/topic_monitors/monitor-uuid" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("ETag", `"monitor-etag"`)
+		json.NewEncoder(w).Encode(topicMonitorResponse(map[string]interface{}{
+			"topic_filter": "devices/pump-1/status", "stale_after_seconds": nil,
+			"match_kind": "exact", "expected_value": "online",
+			"capture_payload": false, "effective_capture_payload": true,
+			"freshness_check": false, "payload_check": true, "exact_topic": true,
+			"subscribed_since": "2026-01-01T00:00:00Z",
+		}))
+	})
+
+	monitor, etag, err := c.GetMQTTTopicMonitor(context.Background(), "broker-uuid", "monitor-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if etag != `"monitor-etag"` {
+		t.Errorf("expected etag %q, got %q", `"monitor-etag"`, etag)
+	}
+	if monitor.StaleAfterSeconds != nil {
+		t.Errorf("expected nil stale_after_seconds, got %d", *monitor.StaleAfterSeconds)
+	}
+	if monitor.MatchKind == nil || *monitor.MatchKind != "exact" {
+		t.Errorf("expected match_kind exact, got %v", monitor.MatchKind)
+	}
+	// A payload expectation forces capture on, whatever the stored flag says.
+	if monitor.CapturePayload || !monitor.EffectiveCapturePayload {
+		t.Error("expected capture_payload false and effective_capture_payload true")
+	}
+	if !monitor.ExactTopic {
+		t.Error("expected exact_topic true for a wildcard-free filter")
+	}
+}
+
+// Dropping a check has to reach the API as an explicit null; an omitted key
+// would leave the old expectation in place.
+func TestClient_UpdateMQTTTopicMonitor_NullClearsPayloadCheck(t *testing.T) {
+	var gotBody map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PATCH" || r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid/topic_monitors/monitor-uuid" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(topicMonitorResponse(nil))
+	})
+
+	stale := int64(300)
+	_, err := c.UpdateMQTTTopicMonitor(context.Background(), "broker-uuid", "monitor-uuid", "", MQTTTopicMonitorInput{
+		TopicFilter: "sensors/+/temperature", StaleAfterSeconds: &stale, CapturePayload: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, key := range []string{"match_kind", "expected_value", "json_key"} {
+		v, present := gotBody["topic_monitor"][key]
+		if !present || v != nil {
+			t.Errorf("expected explicit null %s, got %v (present=%v)", key, v, present)
+		}
+	}
+}
+
+func TestClient_DeleteMQTTTopicMonitor(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" || r.URL.Path != "/api/v1/mqtt_brokers/broker-uuid/topic_monitors/monitor-uuid" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	if err := c.DeleteMQTTTopicMonitor(context.Background(), "broker-uuid", "monitor-uuid"); err != nil {
+		t.Fatalf("expected no error for 204, got: %v", err)
+	}
+}
+
+// Topic monitors are the billable unit, so a create at the plan limit is a 422.
+func TestClient_CreateMQTTTopicMonitor_MonitorLimit_422(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Monitor limit reached for your plan"})
+	})
+
+	stale := int64(300)
+	_, err := c.CreateMQTTTopicMonitor(context.Background(), "broker-uuid", MQTTTopicMonitorInput{
+		TopicFilter: "sensors/#", StaleAfterSeconds: &stale, CapturePayload: true,
+	})
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422, got %d", apiErr.StatusCode)
+	}
+}
+
 func TestClient_RateLimit_ContextCancellation(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "60")

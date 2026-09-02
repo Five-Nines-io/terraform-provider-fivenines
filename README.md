@@ -12,6 +12,8 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_workflow` | Automation workflows with version management |
 | `fivenines_network_device` | SNMP-monitored network devices |
 | `fivenines_status_page` | Public status pages with items |
+| `fivenines_mqtt_broker` | MQTT brokers watched by one of your agent hosts |
+| `fivenines_mqtt_topic_monitor` | Per-topic freshness & payload checks on a broker |
 
 ## Data Sources
 
@@ -83,6 +85,24 @@ resource "fivenines_network_device" "switch" {
   snmp_community = var.snmp_community
 }
 
+# Watch an MQTT broker from an agent host inside the network
+resource "fivenines_mqtt_broker" "factory" {
+  name            = "Factory-floor Mosquitto"
+  host            = "mqtt.internal"
+  port            = 8883
+  tls             = true
+  username        = var.mqtt_username
+  password        = var.mqtt_password
+  watcher_host_id = fivenines_instance.edge_gateway.id
+}
+
+# Alert when a sensor topic goes quiet
+resource "fivenines_mqtt_topic_monitor" "temperature" {
+  mqtt_broker_id      = fivenines_mqtt_broker.factory.id
+  topic_filter        = "sensors/+/temperature"
+  stale_after_seconds = 300
+}
+
 # Create a public status page
 resource "fivenines_status_page" "public" {
   name   = "Service Status"
@@ -122,7 +142,16 @@ terraform import fivenines_uptime_monitor.api <monitor-uuid>
 terraform import fivenines_workflow.alert <workflow-id>
 terraform import fivenines_network_device.switch <device-uuid>
 terraform import fivenines_status_page.public <status-page-id>
+terraform import fivenines_mqtt_broker.factory <broker-uuid>
+
+# Topic monitors live under their broker, so both UUIDs are part of the ID
+terraform import fivenines_mqtt_topic_monitor.temperature <broker-uuid>:<monitor-uuid>
 ```
+
+Broker credentials are write-only — the API never returns them, so an imported broker
+keeps the username and password it already has. Add them to the configuration only if
+you want Terraform to manage them; removing them from a configuration that had them
+clears the stored values.
 
 ## Development
 

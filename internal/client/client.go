@@ -1052,6 +1052,218 @@ func (c *Client) DeleteStatusPage(ctx context.Context, id int64) error {
 	return nil
 }
 
+// --- MQTT Brokers ---
+
+func (c *Client) ListMQTTBrokers(ctx context.Context) ([]MQTTBroker, error) {
+	var all []MQTTBroker
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/mqtt_brokers?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+		var result struct {
+			MQTTBrokers []MQTTBroker   `json:"mqtt_brokers"`
+			Meta        PaginationMeta `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.MQTTBrokers...)
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+func (c *Client) GetMQTTBroker(ctx context.Context, id string) (*MQTTBroker, string, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/mqtt_brokers/"+id, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := sanitizeETag(resp.Header.Get("ETag"))
+	var result struct {
+		MQTTBroker MQTTBroker `json:"mqtt_broker"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.MQTTBroker, etag, nil
+}
+
+func (c *Client) CreateMQTTBroker(ctx context.Context, input MQTTBrokerInput) (*MQTTBroker, error) {
+	body := map[string]interface{}{"mqtt_broker": input}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/mqtt_brokers", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		MQTTBroker MQTTBroker `json:"mqtt_broker"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.MQTTBroker, nil
+}
+
+func (c *Client) UpdateMQTTBroker(ctx context.Context, id string, etag string, input MQTTBrokerInput) (*MQTTBroker, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	body := map[string]interface{}{"mqtt_broker": input}
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/mqtt_brokers/"+id, body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		MQTTBroker MQTTBroker `json:"mqtt_broker"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.MQTTBroker, nil
+}
+
+// DeleteMQTTBroker deletes a broker and, server-side, every topic monitor under
+// it - the freed monitor slots return to the plan limit.
+func (c *Client) DeleteMQTTBroker(ctx context.Context, id string) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/mqtt_brokers/"+id, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// --- MQTT Topic Monitors ---
+//
+// Topic monitors are nested under their broker: every path carries the broker
+// id, and a monitor id from another broker (or another organization) is a 404.
+
+func (c *Client) ListMQTTTopicMonitors(ctx context.Context, brokerID string) ([]MQTTTopicMonitor, error) {
+	var all []MQTTTopicMonitor
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/mqtt_brokers/%s/topic_monitors?page=%d&per_page=100", brokerID, page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
+		var result struct {
+			TopicMonitors []MQTTTopicMonitor `json:"topic_monitors"`
+			Meta          PaginationMeta     `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.TopicMonitors...)
+		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+			break
+		}
+		page++
+	}
+	return all, nil
+}
+
+func (c *Client) GetMQTTTopicMonitor(ctx context.Context, brokerID, id string) (*MQTTTopicMonitor, string, error) {
+	path := fmt.Sprintf("/api/v1/mqtt_brokers/%s/topic_monitors/%s", brokerID, id)
+	resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := sanitizeETag(resp.Header.Get("ETag"))
+	var result struct {
+		TopicMonitor MQTTTopicMonitor `json:"topic_monitor"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.TopicMonitor, etag, nil
+}
+
+// CreateMQTTTopicMonitor adds one monitor to a broker. This is the billable
+// unit: each monitor counts 1 toward the organization's monitor limit, and a
+// create at the limit is rejected with 422.
+func (c *Client) CreateMQTTTopicMonitor(ctx context.Context, brokerID string, input MQTTTopicMonitorInput) (*MQTTTopicMonitor, error) {
+	path := fmt.Sprintf("/api/v1/mqtt_brokers/%s/topic_monitors", brokerID)
+	body := map[string]interface{}{"topic_monitor": input}
+	resp, err := c.doRequest(ctx, "POST", path, body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		TopicMonitor MQTTTopicMonitor `json:"topic_monitor"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.TopicMonitor, nil
+}
+
+func (c *Client) UpdateMQTTTopicMonitor(ctx context.Context, brokerID, id string, etag string, input MQTTTopicMonitorInput) (*MQTTTopicMonitor, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	path := fmt.Sprintf("/api/v1/mqtt_brokers/%s/topic_monitors/%s", brokerID, id)
+	body := map[string]interface{}{"topic_monitor": input}
+	resp, err := c.doRequest(ctx, "PATCH", path, body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		TopicMonitor MQTTTopicMonitor `json:"topic_monitor"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.TopicMonitor, nil
+}
+
+func (c *Client) DeleteMQTTTopicMonitor(ctx context.Context, brokerID, id string) error {
+	path := fmt.Sprintf("/api/v1/mqtt_brokers/%s/topic_monitors/%s", brokerID, id)
+	resp, err := c.doRequest(ctx, "DELETE", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
 func (c *Client) GetIntegration(ctx context.Context, id int64) (*Integration, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v1/integrations/"+strconv.FormatInt(id, 10), nil, nil)
 	if err != nil {

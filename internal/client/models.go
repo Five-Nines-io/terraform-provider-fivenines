@@ -1,6 +1,9 @@
 package client
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // PaginationMeta represents pagination metadata in list responses.
 type PaginationMeta struct {
@@ -378,6 +381,102 @@ type UpdateStatusPageInput struct {
 	IncidentsHistoryEnabled *bool            `json:"incidents_history_enabled,omitempty"`
 	ThemeVariant            *string          `json:"theme_variant,omitempty"`
 	Items                   []StatusPageItem `json:"items,omitempty"`
+}
+
+// MQTTBroker represents an MQTT broker watched by one of your agent hosts.
+// Credentials are encrypted at rest and never returned: UsernameSet and
+// PasswordSet report only whether one is stored.
+type MQTTBroker struct {
+	ID                string  `json:"id"` // UUID
+	Name              string  `json:"name"`
+	Host              string  `json:"host"`
+	Port              int     `json:"port"`
+	TLS               bool    `json:"tls"`
+	UsernameSet       bool    `json:"username_set"`
+	PasswordSet       bool    `json:"password_set"`
+	WatcherHostID     *string `json:"watcher_host_id"`
+	Status            string  `json:"status"`
+	LastErrorMessage  *string `json:"last_error_message"`
+	LastConnectedAt   *string `json:"last_connected_at"`
+	LastSyncedAt      *string `json:"last_synced_at"`
+	Stale             bool    `json:"stale"`
+	TopicMonitorCount int     `json:"topic_monitor_count"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
+}
+
+// MQTTBrokerInput is the request body for creating and updating an MQTT broker.
+// One shape covers both because the API publishes one write schema for POST and
+// PATCH, and the provider always sends the full desired state: WatcherHostID is
+// a pointer so that dropping it from the configuration marshals to the explicit
+// null that unassigns the watcher.
+type MQTTBrokerInput struct {
+	Name          string  `json:"name"`
+	Host          string  `json:"host"`
+	Port          int     `json:"port"`
+	TLS           bool    `json:"tls"`
+	WatcherHostID *string `json:"watcher_host_id"`
+
+	// Username and Password are tri-state, because neither is ever readable back:
+	// an omitted key keeps the stored credential, an explicit null clears it, and
+	// a string sets it. Build them with KeepCredential, ClearCredential or
+	// SetCredential rather than by hand.
+	Username json.RawMessage `json:"username,omitempty"`
+	Password json.RawMessage `json:"password,omitempty"`
+}
+
+// KeepCredential omits a write-only broker credential, leaving whatever is
+// stored server-side alone. The API reads a blank string the same way, so this
+// is what an unrelated update sends rather than wiping a working credential it
+// cannot see.
+func KeepCredential() json.RawMessage { return nil }
+
+// ClearCredential sends an explicit JSON null, the only way to remove a stored
+// broker credential.
+func ClearCredential() json.RawMessage { return json.RawMessage("null") }
+
+// SetCredential writes a new value for a broker credential.
+func SetCredential(v string) json.RawMessage {
+	// Marshaling a Go string cannot fail - invalid UTF-8 is replaced, not rejected.
+	b, _ := json.Marshal(v)
+	return b
+}
+
+// MQTTTopicMonitor represents one topic filter watched on a broker, with a
+// freshness timeout, a payload expectation, or both. Each one counts toward the
+// organization's monitor limit.
+type MQTTTopicMonitor struct {
+	ID                string  `json:"id"` // UUID
+	MQTTBrokerID      string  `json:"mqtt_broker_id"`
+	TopicFilter       string  `json:"topic_filter"`
+	StaleAfterSeconds *int64  `json:"stale_after_seconds"`
+	MatchKind         *string `json:"match_kind"`
+	ExpectedValue     *string `json:"expected_value"`
+	JSONKey           *string `json:"json_key"`
+	CapturePayload    bool    `json:"capture_payload"`
+	// Derived server-side
+	EffectiveCapturePayload bool    `json:"effective_capture_payload"`
+	FreshnessCheck          bool    `json:"freshness_check"`
+	PayloadCheck            bool    `json:"payload_check"`
+	ExactTopic              bool    `json:"exact_topic"`
+	SubscribedSince         *string `json:"subscribed_since"`
+	Capped                  bool    `json:"capped"`
+	CreatedAt               string  `json:"created_at"`
+	UpdatedAt               string  `json:"updated_at"`
+}
+
+// MQTTTopicMonitorInput is the request body for creating and updating a topic
+// monitor - one write schema for POST and PATCH, as with brokers. The nullable
+// checks are pointers without omitempty so that dropping one from the
+// configuration sends the explicit null that removes it; CapturePayload is a
+// plain bool because that column is NOT NULL and an explicit null is a 400.
+type MQTTTopicMonitorInput struct {
+	TopicFilter       string  `json:"topic_filter"`
+	StaleAfterSeconds *int64  `json:"stale_after_seconds"`
+	MatchKind         *string `json:"match_kind"`
+	ExpectedValue     *string `json:"expected_value"`
+	JSONKey           *string `json:"json_key"`
+	CapturePayload    bool    `json:"capture_payload"`
 }
 
 // APIError represents an error response from the API.

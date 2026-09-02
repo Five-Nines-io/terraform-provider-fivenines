@@ -90,6 +90,8 @@ func (p *fiveninesProvider) Resources(_ context.Context) []func() resource.Resou
 		resources.NewUptimeMonitorResource,
 		resources.NewNetworkDeviceResource,
 		resources.NewStatusPageResource,
+		resources.NewMQTTBrokerResource,
+		resources.NewMQTTTopicMonitorResource,
 	}
 }
 

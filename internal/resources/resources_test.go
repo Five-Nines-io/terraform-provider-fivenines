@@ -299,6 +299,278 @@ func TestMapWorkflowToState_NilOptionals(t *testing.T) {
 	}
 }
 
+// --- mapMQTTBrokerToState ---
+
+func TestMapMQTTBrokerToState(t *testing.T) {
+	watcher := "host-uuid"
+	lastError := "Connection refused: not authorised"
+	broker := &client.MQTTBroker{
+		ID:                "broker-uuid",
+		Name:              "Factory-floor Mosquitto",
+		Host:              "mqtt.internal",
+		Port:              8883,
+		TLS:               true,
+		UsernameSet:       true,
+		PasswordSet:       true,
+		WatcherHostID:     &watcher,
+		Status:            "config_error",
+		LastErrorMessage:  &lastError,
+		Stale:             true,
+		TopicMonitorCount: 300,
+		CreatedAt:         "2026-01-01T00:00:00Z",
+		UpdatedAt:         "2026-01-01T00:00:00Z",
+	}
+
+	// The configured credentials are already in state; the mapping must leave
+	// them alone, because the API never returns either one.
+	state := &mqttBrokerModel{
+		Username: types.StringValue("factory"),
+		Password: types.StringValue("s3cret"),
+	}
+	mapMQTTBrokerToState(broker, state)
+
+	if state.ID.ValueString() != "broker-uuid" {
+		t.Errorf("expected ID broker-uuid, got %s", state.ID.ValueString())
+	}
+	if state.Port.ValueInt64() != 8883 {
+		t.Errorf("expected port 8883, got %d", state.Port.ValueInt64())
+	}
+	if !state.TLS.ValueBool() {
+		t.Error("expected tls true")
+	}
+	if state.Username.ValueString() != "factory" || state.Password.ValueString() != "s3cret" {
+		t.Error("expected write-only credentials to be preserved from config")
+	}
+	if !state.UsernameSet.ValueBool() || !state.PasswordSet.ValueBool() {
+		t.Error("expected username_set and password_set true")
+	}
+	if state.WatcherHostID.ValueString() != "host-uuid" {
+		t.Errorf("expected watcher_host_id host-uuid, got %s", state.WatcherHostID.ValueString())
+	}
+	if !state.Stale.ValueBool() {
+		t.Error("expected stale true")
+	}
+	if state.TopicMonitorCount.ValueInt64() != 300 {
+		t.Errorf("expected topic_monitor_count 300, got %d", state.TopicMonitorCount.ValueInt64())
+	}
+	if state.LastErrorMessage.ValueString() != lastError {
+		t.Errorf("expected last_error_message %q, got %q", lastError, state.LastErrorMessage.ValueString())
+	}
+}
+
+func TestMapMQTTBrokerToState_Unassigned(t *testing.T) {
+	broker := &client.MQTTBroker{
+		ID: "broker-uuid", Name: "Unassigned", Host: "mqtt.internal", Port: 1883,
+		Status: "unknown", Stale: true,
+		CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z",
+	}
+
+	state := &mqttBrokerModel{}
+	mapMQTTBrokerToState(broker, state)
+
+	if !state.WatcherHostID.IsNull() {
+		t.Error("expected watcher_host_id to be null")
+	}
+	if !state.LastErrorMessage.IsNull() || !state.LastConnectedAt.IsNull() || !state.LastSyncedAt.IsNull() {
+		t.Error("expected the never-reported fields to be null")
+	}
+	if state.UsernameSet.ValueBool() || state.PasswordSet.ValueBool() {
+		t.Error("expected username_set and password_set false for an anonymous broker")
+	}
+}
+
+// --- credentialWrite ---
+
+func TestCredentialWrite_UnchangedIsOmitted(t *testing.T) {
+	// The import case: Terraform has never seen the credential, so an unrelated
+	// edit must not wipe the one the broker is working with.
+	if got := credentialWrite(types.StringNull(), types.StringNull()); got != nil {
+		t.Errorf("expected an omitted credential, got %s", got)
+	}
+	// And a value that did not change is not worth re-sending.
+	same := types.StringValue("factory")
+	if got := credentialWrite(same, same); got != nil {
+		t.Errorf("expected an omitted credential, got %s", got)
+	}
+}
+
+func TestCredentialWrite_RemovedIsCleared(t *testing.T) {
+	got := credentialWrite(types.StringNull(), types.StringValue("factory"))
+	if string(got) != "null" {
+		t.Errorf("expected explicit null, got %s", got)
+	}
+}
+
+func TestCredentialWrite_ChangedIsSent(t *testing.T) {
+	got := credentialWrite(types.StringValue("rotated"), types.StringValue("factory"))
+	if string(got) != `"rotated"` {
+		t.Errorf(`expected "rotated", got %s`, got)
+	}
+}
+
+// --- mapMQTTTopicMonitorToState ---
+
+func TestMapMQTTTopicMonitorToState_Freshness(t *testing.T) {
+	stale := int64(300)
+	subscribed := "2026-01-01T00:00:00Z"
+	monitor := &client.MQTTTopicMonitor{
+		ID:                      "monitor-uuid",
+		MQTTBrokerID:            "broker-uuid",
+		TopicFilter:             "sensors/+/temperature",
+		StaleAfterSeconds:       &stale,
+		CapturePayload:          true,
+		EffectiveCapturePayload: true,
+		FreshnessCheck:          true,
+		SubscribedSince:         &subscribed,
+		CreatedAt:               "2026-01-01T00:00:00Z",
+		UpdatedAt:               "2026-01-01T00:00:00Z",
+	}
+
+	state := &mqttTopicMonitorModel{}
+	mapMQTTTopicMonitorToState(monitor, state)
+
+	if state.MQTTBrokerID.ValueString() != "broker-uuid" {
+		t.Errorf("expected mqtt_broker_id broker-uuid, got %s", state.MQTTBrokerID.ValueString())
+	}
+	if state.StaleAfterSeconds.ValueInt64() != 300 {
+		t.Errorf("expected stale_after_seconds 300, got %d", state.StaleAfterSeconds.ValueInt64())
+	}
+	if !state.MatchKind.IsNull() || !state.ExpectedValue.IsNull() || !state.JSONKey.IsNull() {
+		t.Error("expected the payload check attributes to be null")
+	}
+	if !state.FreshnessCheck.ValueBool() || state.PayloadCheck.ValueBool() {
+		t.Error("expected freshness_check true and payload_check false")
+	}
+	if state.SubscribedSince.ValueString() != subscribed {
+		t.Errorf("expected subscribed_since %s, got %s", subscribed, state.SubscribedSince.ValueString())
+	}
+}
+
+func TestMapMQTTTopicMonitorToState_PayloadForcesCapture(t *testing.T) {
+	matchKind := "exact"
+	expected := "online"
+	monitor := &client.MQTTTopicMonitor{
+		ID: "monitor-uuid", MQTTBrokerID: "broker-uuid", TopicFilter: "devices/pump-1/status",
+		MatchKind: &matchKind, ExpectedValue: &expected,
+		// Stored false, but a payload expectation forces capture on server-side.
+		CapturePayload: false, EffectiveCapturePayload: true,
+		PayloadCheck: true, ExactTopic: true,
+		CreatedAt: "2026-01-01T00:00:00Z", UpdatedAt: "2026-01-01T00:00:00Z",
+	}
+
+	state := &mqttTopicMonitorModel{}
+	mapMQTTTopicMonitorToState(monitor, state)
+
+	if !state.StaleAfterSeconds.IsNull() {
+		t.Error("expected stale_after_seconds to be null")
+	}
+	if state.MatchKind.ValueString() != "exact" || state.ExpectedValue.ValueString() != "online" {
+		t.Error("expected the payload expectation to be mapped")
+	}
+	if state.CapturePayload.ValueBool() || !state.EffectiveCapturePayload.ValueBool() {
+		t.Error("expected capture_payload false and effective_capture_payload true")
+	}
+	if !state.SubscribedSince.IsNull() {
+		t.Error("expected subscribed_since to be null when the watcher holds no subscription")
+	}
+}
+
+// --- mqttTopicMonitorInput ---
+
+func TestMQTTTopicMonitorInput_DroppedChecksSendNull(t *testing.T) {
+	plan := mqttTopicMonitorModel{
+		TopicFilter:       types.StringValue("sensors/+/temperature"),
+		StaleAfterSeconds: types.Int64Value(300),
+		MatchKind:         types.StringNull(),
+		ExpectedValue:     types.StringNull(),
+		JSONKey:           types.StringNull(),
+		CapturePayload:    types.BoolValue(true),
+	}
+
+	input := mqttTopicMonitorInput(plan)
+
+	if input.StaleAfterSeconds == nil || *input.StaleAfterSeconds != 300 {
+		t.Errorf("expected stale_after_seconds 300, got %v", input.StaleAfterSeconds)
+	}
+	if input.MatchKind != nil || input.ExpectedValue != nil || input.JSONKey != nil {
+		t.Error("expected the unset payload check to marshal as null")
+	}
+	if !input.CapturePayload {
+		t.Error("expected capture_payload true")
+	}
+}
+
+// --- validateMQTTTopicMonitorChecks ---
+
+func TestValidateMQTTTopicMonitorChecks_NoCheck(t *testing.T) {
+	config := mqttTopicMonitorModel{
+		TopicFilter:       types.StringValue("sensors/#"),
+		StaleAfterSeconds: types.Int64Null(),
+		MatchKind:         types.StringNull(),
+	}
+
+	if diags := validateMQTTTopicMonitorChecks(config); !diags.HasError() {
+		t.Error("expected an error for a monitor carrying no check")
+	}
+}
+
+func TestValidateMQTTTopicMonitorChecks_FreshnessOnly(t *testing.T) {
+	config := mqttTopicMonitorModel{
+		TopicFilter:       types.StringValue("sensors/#"),
+		StaleAfterSeconds: types.Int64Value(300),
+		MatchKind:         types.StringNull(),
+	}
+
+	if diags := validateMQTTTopicMonitorChecks(config); diags.HasError() {
+		t.Errorf("expected a freshness-only monitor to validate, got %v", diags)
+	}
+}
+
+func TestValidateMQTTTopicMonitorChecks_MatchKindNeedsExpectedValue(t *testing.T) {
+	config := mqttTopicMonitorModel{
+		TopicFilter:       types.StringValue("devices/pump-1/status"),
+		StaleAfterSeconds: types.Int64Null(),
+		MatchKind:         types.StringValue("exact"),
+		ExpectedValue:     types.StringNull(),
+	}
+
+	if diags := validateMQTTTopicMonitorChecks(config); !diags.HasError() {
+		t.Error("expected an error when match_kind has no expected_value")
+	}
+}
+
+func TestValidateMQTTTopicMonitorChecks_JSONKeyRequired(t *testing.T) {
+	config := mqttTopicMonitorModel{
+		TopicFilter:   types.StringValue("devices/pump-1/telemetry"),
+		MatchKind:     types.StringValue("json_key"),
+		ExpectedValue: types.StringValue("ok"),
+		JSONKey:       types.StringNull(),
+	}
+
+	if diags := validateMQTTTopicMonitorChecks(config); !diags.HasError() {
+		t.Error("expected an error when match_kind is json_key without json_key")
+	}
+
+	config.JSONKey = types.StringValue("battery.level")
+	if diags := validateMQTTTopicMonitorChecks(config); diags.HasError() {
+		t.Errorf("expected a complete json_key monitor to validate, got %v", diags)
+	}
+}
+
+// An unknown value only resolves at apply time, so the API owns the verdict
+// rather than the plan failing on something it cannot see yet.
+func TestValidateMQTTTopicMonitorChecks_UnknownDefersToAPI(t *testing.T) {
+	config := mqttTopicMonitorModel{
+		TopicFilter:       types.StringValue("sensors/#"),
+		StaleAfterSeconds: types.Int64Unknown(),
+		MatchKind:         types.StringNull(),
+	}
+
+	if diags := validateMQTTTopicMonitorChecks(config); diags.HasError() {
+		t.Errorf("expected no plan-time error for an unknown check, got %v", diags)
+	}
+}
+
 // Verify types.String null behavior (framework contract test)
 func TestTypesStringNull(t *testing.T) {
 	s := types.StringNull()

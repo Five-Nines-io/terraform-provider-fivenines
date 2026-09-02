@@ -273,7 +273,7 @@ func (r *taskResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
 	task, _, err := r.client.GetTask(ctx, state.ID.ValueString())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -382,7 +382,7 @@ func (r *taskResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 
 	err := r.client.DeleteTask(ctx, state.ID.ValueString())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting task", err.Error())

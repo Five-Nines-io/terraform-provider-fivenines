@@ -203,7 +203,7 @@ func (r *instanceResource) Read(ctx context.Context, req resource.ReadRequest, r
 
 	instance, _, err := r.client.GetInstance(ctx, state.ID.ValueString())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -271,7 +271,7 @@ func (r *instanceResource) Delete(ctx context.Context, req resource.DeleteReques
 
 	err := r.client.DeleteInstance(ctx, state.ID.ValueString())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting instance", err.Error())

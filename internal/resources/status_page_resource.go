@@ -247,7 +247,7 @@ func (r *statusPageResource) Read(ctx context.Context, req resource.ReadRequest,
 
 	page, _, err := r.client.GetStatusPage(ctx, state.ID.ValueInt64())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -353,7 +353,7 @@ func (r *statusPageResource) Delete(ctx context.Context, req resource.DeleteRequ
 
 	err := r.client.DeleteStatusPage(ctx, state.ID.ValueInt64())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting status page", err.Error())

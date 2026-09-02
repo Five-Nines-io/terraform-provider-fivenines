@@ -198,7 +198,7 @@ func (r *workflowResource) Read(ctx context.Context, req resource.ReadRequest, r
 
 	workflow, _, err := r.client.GetWorkflow(ctx, state.ID.ValueInt64())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -309,7 +309,7 @@ func (r *workflowResource) Delete(ctx context.Context, req resource.DeleteReques
 
 	err := r.client.DeleteWorkflow(ctx, state.ID.ValueInt64())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting workflow", err.Error())

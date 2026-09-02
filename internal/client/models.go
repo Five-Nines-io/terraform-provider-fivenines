@@ -1,6 +1,11 @@
 package client
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+)
 
 // PaginationMeta represents pagination metadata in list responses.
 type PaginationMeta struct {
@@ -380,16 +385,97 @@ type UpdateStatusPageInput struct {
 	Items                   []StatusPageItem `json:"items,omitempty"`
 }
 
+// Machine-readable error codes from the public API contract's error table.
+//
+// These are the values the server passes to its `render_error`. Note that the
+// PUBLIC envelope currently DISCARDS the code (only the partner envelope
+// carries one), so APIError.Code is empty against today's server on every
+// path. They are parsed and matched anyway so the client is correct the day
+// the public envelope gains codes; nothing here may REQUIRE a code to work.
+const (
+	ErrCodeUnknownParameter    = "unknown_parameter"
+	ErrCodeInvalidFilter       = "invalid_filter"
+	ErrCodeInvalidBody         = "invalid_body"
+	ErrCodeMissingParameter    = "missing_parameter"
+	ErrCodeInvalidDryRunHeader = "invalid_dry_run_header"
+	ErrCodeForbidden           = "forbidden"
+	ErrCodeNotFound            = "not_found"
+)
+
 // APIError represents an error response from the API.
+//
+// The public API (/api/v1) error envelope is `{"error", "request_id"}`, except
+// on a 422 validation failure, which renders `{"errors": [...]}` alone — no
+// message and no request_id. RequestID therefore falls back to the X-Request-Id
+// response header (set on every response); see parseError.
 type APIError struct {
 	StatusCode int
 	Message    string   `json:"error"`
 	Errors     []string `json:"errors"`
+	// Code is the machine-readable code from the contract's error table. Empty
+	// against a server whose public envelope drops it — always keep a
+	// status-code fallback when branching on it.
+	Code string `json:"code"`
+	// RequestID is what a support ticket should quote.
+	RequestID string `json:"request_id"`
 }
 
 func (e *APIError) Error() string {
-	if len(e.Errors) > 0 {
-		return fmt.Sprintf("API error %d: %v", e.StatusCode, e.Errors)
+	var b strings.Builder
+	fmt.Fprintf(&b, "API error %d", e.StatusCode)
+	if e.Code != "" {
+		fmt.Fprintf(&b, " [%s]", e.Code)
 	}
-	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
+	if len(e.Errors) > 0 {
+		fmt.Fprintf(&b, ": %v", e.Errors)
+	} else if e.Message != "" {
+		fmt.Fprintf(&b, ": %s", e.Message)
+	}
+	// Appended here rather than at each call site so every diagnostic that
+	// renders err.Error() carries it without the resource layer opting in.
+	if e.RequestID != "" {
+		fmt.Fprintf(&b, " (request_id: %s)", e.RequestID)
+	}
+	return b.String()
+}
+
+// AsAPIError returns err as an *APIError, or nil if it is not one.
+func AsAPIError(err error) *APIError {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr
+	}
+	return nil
+}
+
+// IsNotFound reports whether err is a 404 — the resource is gone and Terraform
+// should drop it from state rather than fail.
+func IsNotFound(err error) bool {
+	apiErr := AsAPIError(err)
+	return apiErr != nil && (apiErr.StatusCode == http.StatusNotFound || apiErr.Code == ErrCodeNotFound)
+}
+
+// IsForbidden reports whether err is a 403: the credential is valid but the
+// action is refused — a read-scoped token on a write, a Pundit refusal, or a
+// demo-restricted org. Distinct from IsUnauthorized, which means the token
+// itself is dead.
+func IsForbidden(err error) bool {
+	apiErr := AsAPIError(err)
+	return apiErr != nil && (apiErr.StatusCode == http.StatusForbidden || apiErr.Code == ErrCodeForbidden)
+}
+
+// IsUnauthorized reports whether err is a 401. The API fails a token CLOSED:
+// a token whose holder left the organization it was minted for answers 401,
+// not 403, because the credential is dead rather than the action forbidden.
+func IsUnauthorized(err error) bool {
+	apiErr := AsAPIError(err)
+	return apiErr != nil && apiErr.StatusCode == http.StatusUnauthorized
+}
+
+// IsRateLimited reports whether err is a 429 that survived the client's own
+// retry budget. The limit is per-organization, per-minute and is SHARED with
+// the MCP server, so a busy MCP client can exhaust a Terraform run's budget.
+func IsRateLimited(err error) bool {
+	apiErr := AsAPIError(err)
+	return apiErr != nil && apiErr.StatusCode == http.StatusTooManyRequests
 }

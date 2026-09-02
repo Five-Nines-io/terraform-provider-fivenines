@@ -8,11 +8,6 @@
 - Fix: add `stringplanmodifier.RequiresReplace()` to these fields
 - Found by: Codex outside voice review, 2026-03-25
 
-### JSON execution_graph canonicalization
-- Raw JSON string attribute will produce false diffs on every plan due to key ordering/whitespace
-- Fix: use `jsondiff` normalization or implement `PlanModifier` that canonicalizes JSON before comparison
-- Blocked by: workflow version management implementation
-
 ### Context propagation in HTTP client
 - HTTP requests use `http.NewRequest` without context — ignores Terraform cancellation
 - `time.Sleep` in backoff blocks ctrl+C

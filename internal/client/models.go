@@ -1,6 +1,9 @@
 package client
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // PaginationMeta represents pagination metadata in list responses.
 type PaginationMeta struct {
@@ -108,11 +111,14 @@ type Workflow struct {
 	Versions           []WorkflowVersion `json:"versions,omitempty"`
 }
 
-// WorkflowVersion represents a versioned snapshot of a workflow.
+// WorkflowVersion represents a versioned snapshot of a workflow. The list
+// embedded in a workflow response carries only the metadata; ExecutionGraph and
+// CanvasData are populated by GetWorkflowVersion.
 type WorkflowVersion struct {
 	ID             int64                  `json:"id"`
 	VersionNumber  int                    `json:"version_number"`
 	ExecutionGraph map[string]interface{} `json:"execution_graph"`
+	CanvasData     map[string]interface{} `json:"canvas_data"`
 	CreatedAt      string                 `json:"created_at"`
 }
 
@@ -130,6 +136,46 @@ type UpdateWorkflowInput struct {
 	IntervalSeconds *int64  `json:"interval_seconds,omitempty"`
 }
 
+// WorkflowListOptions holds the server-side filters accepted by the workflows
+// index. Zero values are omitted from the query string.
+type WorkflowListOptions struct {
+	// Status filters by lifecycle state: draft, active, paused or archived.
+	// Archived workflows are hidden unless explicitly requested.
+	Status string
+	// UpdatedSince keeps only workflows updated at or after this timestamp.
+	UpdatedSince string
+	// Order is the column to sort on, Direction is "asc" or "desc".
+	Order     string
+	Direction string
+	// Q is a free-text search over name and description.
+	Q string
+}
+
+// WorkflowTemplate is a prebuilt workflow that can be instantiated by slug.
+type WorkflowTemplate struct {
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Category    string `json:"category"`
+	TriggerType string `json:"trigger_type"`
+
+	// Raw is the untouched API object, exposed so callers can reach fields the
+	// provider does not model yet.
+	Raw json.RawMessage `json:"-"`
+}
+
+// NodeType describes a node kind available to execution graphs.
+type NodeType struct {
+	Type        string `json:"type"`
+	Name        string `json:"name"`
+	Category    string `json:"category"`
+	Description string `json:"description"`
+
+	// Raw is the untouched API object, which carries the node's configuration
+	// schema and any other fields the provider does not model yet.
+	Raw json.RawMessage `json:"-"`
+}
+
 // WorkflowRun represents a single execution of a workflow.
 type WorkflowRun struct {
 	ID          int64   `json:"id"`
@@ -141,8 +187,10 @@ type WorkflowRun struct {
 }
 
 // CreateWorkflowVersionInput is the request body for creating a workflow version.
+// CanvasData holds the React Flow layout; the API generates one when it is omitted.
 type CreateWorkflowVersionInput struct {
 	ExecutionGraph map[string]interface{} `json:"execution_graph"`
+	CanvasData     map[string]interface{} `json:"canvas_data,omitempty"`
 }
 
 // UptimeMonitor represents an uptime monitoring check.

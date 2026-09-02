@@ -20,6 +20,8 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_probe_regions` | Available probe regions for uptime monitors |
 | `fivenines_integrations` | Configured notification integrations |
 | `fivenines_workflow_runs` | Workflow execution history |
+| `fivenines_workflow_templates` | Prebuilt workflow templates, instantiable by slug |
+| `fivenines_workflow_node_types` | Node types available to workflow execution graphs |
 | `fivenines_incidents` | Incidents triggered by workflows |
 
 ## Quick Start

@@ -88,10 +88,11 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 		newTheme = "light"
 	}
 	name := readPage.Name
+	items := itemInputs(readPage.Items)
 	updateInput := UpdateStatusPageInput{
 		Name:         &name,
 		ThemeVariant: &newTheme,
-		Items:        &readPage.Items,
+		Items:        &items,
 	}
 	reqJSON, _ := json.MarshalIndent(map[string]interface{}{"status_page": updateInput}, "", "  ")
 	t.Logf("PATCH body:\n%s", string(reqJSON))
@@ -109,7 +110,7 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 	revertInput := UpdateStatusPageInput{
 		Name:         &name,
 		ThemeVariant: &revertTheme,
-		Items:        &readPage.Items,
+		Items:        &items,
 	}
 	_, err = c.UpdateStatusPage(ctx, targetPage.ID, etag2, revertInput)
 	if err != nil {
@@ -117,4 +118,14 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 	} else {
 		t.Log("Reverted successfully")
 	}
+}
+
+// itemInputs echoes a page's items back as update inputs. The per-item label,
+// description and section are left out so the server keeps whatever it has.
+func itemInputs(items []StatusPageItem) []StatusPageItemInput {
+	result := make([]StatusPageItemInput, len(items))
+	for i, item := range items {
+		result[i] = StatusPageItemInput{ItemType: item.ItemType, ItemID: item.ItemID}
+	}
+	return result
 }

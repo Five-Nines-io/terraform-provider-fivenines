@@ -79,8 +79,11 @@ func statusPageItems(t *testing.T, items ...client.StatusPageItem) types.List {
 	values := make([]attr.Value, len(items))
 	for i, item := range items {
 		obj, diags := types.ObjectValue(statusPageItemAttrTypes, map[string]attr.Value{
-			"item_type": types.StringValue(item.ItemType),
-			"item_id":   types.StringValue(item.ItemID),
+			"item_type":     types.StringValue(item.ItemType),
+			"item_id":       types.StringValue(item.ItemID),
+			"display_label": optionalString(item.DisplayLabel),
+			"description":   optionalString(item.Description),
+			"section":       optionalString(item.Section),
 		})
 		if diags.HasError() {
 			t.Fatalf("building item: %v", diags)
@@ -199,10 +202,10 @@ func TestPlanItemsToUpdateInput(t *testing.T) {
 	if got == nil || len(*got) != 2 {
 		t.Fatalf("expected 2 items, got %v", got)
 	}
-	// Position is the array order; the API dropped it from the input but the
-	// client still sends what it is given.
-	if (*got)[1].ItemID != "host-1" || (*got)[1].Position != 1 {
-		t.Errorf("expected order to be preserved, got %+v", (*got)[1])
+	// Position is gone from the input: the array order IS the display order, so
+	// the only thing to assert is that the order survived the conversion.
+	if (*got)[0].ItemID != "mon-1" || (*got)[1].ItemID != "host-1" {
+		t.Errorf("expected order to be preserved, got %+v", *got)
 	}
 }
 

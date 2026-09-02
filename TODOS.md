@@ -10,11 +10,12 @@
 - `omitempty` + nil suppression means users can't reliably clear optional fields;
   reads normalize API null to `""` → plan drift
 - The 2026-09 API made this contractual instead of incidental:
-  - ~~Status page items~~: fixed in #29 — `UpdateStatusPageInput.Items` is
-    `*[]StatusPageItem`, so a nil pointer omits the key while a pointer to an empty
-    slice sends the explicit `[]` the API needs to empty a page. Per-item
-    `display_label`/`description`/`section` are not exposed yet, so the
-    null-clears-a-label half arrives with #12
+  - ~~Status page items~~: fixed in #29 and #12 — `UpdateStatusPageInput.Items` is
+    `*[]StatusPageItemInput`, so a nil pointer omits the key while a pointer to an
+    empty slice sends the explicit `[]` the API needs to empty a page; `Sections`
+    follows the same shape. #12 added the per-item
+    `display_label`/`description`/`section` as Optional+Computed attributes whose
+    `,omitempty` tags leave a label curated in the dashboard alone
   - ~~`dns_expected_records`~~: fixed in #9 — the update input field is `*[]string`,
     so an explicit `[]` is sent and `mapToState` keeps the pinned empty list rather
     than flipping it to null. The pattern to copy for the rest
@@ -213,4 +214,5 @@
 - **Cross-field validation** — tasks in #8 (`ValidateConfig` enforces cron ⇒
   `schedule`, interval ⇒ `interval_seconds`), uptime monitors in #9
   (`ValidateConfig` + the `protocolRequirements` table: https ⇒ `url`, tcp ⇒
-  `hostname`+`port`, icmp ⇒ `hostname`, dns ⇒ `dns_record_type`)
+  `hostname`+`port`, icmp ⇒ `hostname`, dns ⇒ `dns_record_type`), status pages in
+  #12 (`ValidateConfig` enforces items[].section ⇒ declared in `sections`)

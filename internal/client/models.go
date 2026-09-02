@@ -410,28 +410,52 @@ type UpdateNetworkDeviceInput struct {
 
 // StatusPage represents a public status page.
 type StatusPage struct {
-	ID                      int64            `json:"id"`
-	Name                    string           `json:"name"`
-	Slug                    string           `json:"slug"`
-	Description             *string          `json:"description"`
-	Public                  bool             `json:"public"`
-	Uptime                  bool             `json:"uptime"`
-	CustomDomain            *string          `json:"custom_domain"`
-	CustomDomainEnabled     bool             `json:"custom_domain_enabled"`
-	CustomFooter            *string          `json:"custom_footer"`
-	CustomFooterEnabled     bool             `json:"custom_footer_enabled"`
-	IncidentsHistoryEnabled bool             `json:"incidents_history_enabled"`
-	ThemeVariant            *string          `json:"theme_variant"`
-	Items                   []StatusPageItem `json:"items"`
-	CreatedAt               string           `json:"created_at"`
-	UpdatedAt               string           `json:"updated_at"`
+	ID                          int64            `json:"id"`
+	Name                        string           `json:"name"`
+	Slug                        string           `json:"slug"`
+	Description                 *string          `json:"description"`
+	Public                      bool             `json:"public"`
+	Uptime                      bool             `json:"uptime"`
+	CustomDomain                *string          `json:"custom_domain"`
+	CustomDomainEnabled         bool             `json:"custom_domain_enabled"`
+	CustomFooter                *string          `json:"custom_footer"`
+	CustomFooterEnabled         bool             `json:"custom_footer_enabled"`
+	IncidentsHistoryEnabled     bool             `json:"incidents_history_enabled"`
+	ThemeVariant                *string          `json:"theme_variant"`
+	ContactURL                  *string          `json:"contact_url"`
+	SubscriptionsEnabled        bool             `json:"subscriptions_enabled"`
+	UptimeGreenToleranceSeconds int64            `json:"uptime_green_tolerance_seconds"`
+	UptimeWindowDays            int64            `json:"uptime_window_days"`
+	SearchIndexingEnabled       bool             `json:"search_indexing_enabled"`
+	LogoURL                     *string          `json:"logo_url"`
+	Sections                    []string         `json:"sections"`
+	Items                       []StatusPageItem `json:"items"`
+	CreatedAt                   string           `json:"created_at"`
+	UpdatedAt                   string           `json:"updated_at"`
 }
 
-// StatusPageItem represents an item on a status page.
+// StatusPageItem represents an item on a status page as the API reports it.
+// Position is response-only: the API derives it from the order of the items
+// array that was last written, and rejects it as an input.
 type StatusPageItem struct {
-	ItemType string `json:"item_type"`
-	ItemID   string `json:"item_id"`
-	Position int    `json:"position"`
+	ItemType     string  `json:"item_type"`
+	ItemID       string  `json:"item_id"`
+	Position     int     `json:"position"`
+	DisplayLabel *string `json:"display_label"`
+	Description  *string `json:"description"`
+	Section      *string `json:"section"`
+}
+
+// StatusPageItemInput is an item as sent to the API. There is no position: the
+// array order is the display order. The nullable fields carry the "preserves on
+// nil" tag because their Terraform attributes are Optional+Computed, so an
+// omitted label keeps whatever was curated in the dashboard.
+type StatusPageItemInput struct {
+	ItemType     string  `json:"item_type"`
+	ItemID       string  `json:"item_id"`
+	DisplayLabel *string `json:"display_label,omitempty"`
+	Description  *string `json:"description,omitempty"`
+	Section      *string `json:"section,omitempty"`
 }
 
 // CreateStatusPageInput is the request body for creating a status page.
@@ -441,37 +465,56 @@ type StatusPageItem struct {
 // dropped from the body, the API stores null, and the read maps that back to a
 // Terraform null the plan never asked for.
 type CreateStatusPageInput struct {
-	Name                    string            `json:"name"`
-	Description             *string           `json:"description,omitempty"`
-	Public                  *bool             `json:"public,omitempty"`
-	Uptime                  *bool             `json:"uptime,omitempty"`
-	CustomDomain            *string           `json:"custom_domain,omitempty"`
-	CustomDomainEnabled     *bool             `json:"custom_domain_enabled,omitempty"`
-	CustomFooter            *string           `json:"custom_footer,omitempty"`
-	CustomFooterEnabled     *bool             `json:"custom_footer_enabled,omitempty"`
-	IncidentsHistoryEnabled *bool             `json:"incidents_history_enabled,omitempty"`
-	ThemeVariant            string            `json:"theme_variant,omitempty"`
-	Items                   *[]StatusPageItem `json:"items,omitempty"`
+	Name                        string                 `json:"name"`
+	Description                 *string                `json:"description,omitempty"`
+	Public                      *bool                  `json:"public,omitempty"`
+	Uptime                      *bool                  `json:"uptime,omitempty"`
+	CustomDomain                *string                `json:"custom_domain,omitempty"`
+	CustomDomainEnabled         *bool                  `json:"custom_domain_enabled,omitempty"`
+	CustomFooter                *string                `json:"custom_footer,omitempty"`
+	CustomFooterEnabled         *bool                  `json:"custom_footer_enabled,omitempty"`
+	IncidentsHistoryEnabled     *bool                  `json:"incidents_history_enabled,omitempty"`
+	ThemeVariant                string                 `json:"theme_variant,omitempty"`
+	ContactURL                  *string                `json:"contact_url,omitempty"`
+	SubscriptionsEnabled        *bool                  `json:"subscriptions_enabled,omitempty"`
+	UptimeGreenToleranceSeconds *int64                 `json:"uptime_green_tolerance_seconds,omitempty"`
+	UptimeWindowDays            *int64                 `json:"uptime_window_days,omitempty"`
+	SearchIndexingEnabled       *bool                  `json:"search_indexing_enabled,omitempty"`
+	Logo                        *string                `json:"logo,omitempty"`
+	Sections                    *[]string              `json:"sections,omitempty"`
+	Items                       *[]StatusPageItemInput `json:"items,omitempty"`
 }
 
 // UpdateStatusPageInput is the request body for updating a status page.
 //
-// Items is a pointer to a slice, not a plain slice: a nil pointer omits the key
-// while a pointer to an empty slice marshals as an explicit []. Emptying a page
-// needs that [] — a plain `[]StatusPageItem` with omitempty marshals an empty
-// list to nothing, which the API reads as "preserve the current items".
+// Items and Sections are pointers to slices, not plain slices: a nil pointer
+// omits the key while a pointer to an empty slice marshals as an explicit [].
+// Emptying a page needs that [] — a plain slice with omitempty marshals an
+// empty list to nothing, which the API reads as "preserve the current items".
+//
+// Logo is the one field here that clears on nil. Its Terraform attribute is
+// Optional-only because the API never echoes the image back, so there is
+// nothing for a Computed value to resolve to and the configuration is the only
+// source of truth: dropping `logo` from a configuration deletes the logo.
 type UpdateStatusPageInput struct {
-	Name                    *string           `json:"name,omitempty"`
-	Description             *string           `json:"description,omitempty"`
-	Public                  *bool             `json:"public,omitempty"`
-	Uptime                  *bool             `json:"uptime,omitempty"`
-	CustomDomain            *string           `json:"custom_domain,omitempty"`
-	CustomDomainEnabled     *bool             `json:"custom_domain_enabled,omitempty"`
-	CustomFooter            *string           `json:"custom_footer,omitempty"`
-	CustomFooterEnabled     *bool             `json:"custom_footer_enabled,omitempty"`
-	IncidentsHistoryEnabled *bool             `json:"incidents_history_enabled,omitempty"`
-	ThemeVariant            *string           `json:"theme_variant,omitempty"`
-	Items                   *[]StatusPageItem `json:"items,omitempty"`
+	Name                        *string                `json:"name,omitempty"`
+	Description                 *string                `json:"description,omitempty"`
+	Public                      *bool                  `json:"public,omitempty"`
+	Uptime                      *bool                  `json:"uptime,omitempty"`
+	CustomDomain                *string                `json:"custom_domain,omitempty"`
+	CustomDomainEnabled         *bool                  `json:"custom_domain_enabled,omitempty"`
+	CustomFooter                *string                `json:"custom_footer,omitempty"`
+	CustomFooterEnabled         *bool                  `json:"custom_footer_enabled,omitempty"`
+	IncidentsHistoryEnabled     *bool                  `json:"incidents_history_enabled,omitempty"`
+	ThemeVariant                *string                `json:"theme_variant,omitempty"`
+	ContactURL                  *string                `json:"contact_url,omitempty"`
+	SubscriptionsEnabled        *bool                  `json:"subscriptions_enabled,omitempty"`
+	UptimeGreenToleranceSeconds *int64                 `json:"uptime_green_tolerance_seconds,omitempty"`
+	UptimeWindowDays            *int64                 `json:"uptime_window_days,omitempty"`
+	SearchIndexingEnabled       *bool                  `json:"search_indexing_enabled,omitempty"`
+	Logo                        *string                `json:"logo"`
+	Sections                    *[]string              `json:"sections,omitempty"`
+	Items                       *[]StatusPageItemInput `json:"items,omitempty"`
 }
 
 // APIError represents an error response from the API.

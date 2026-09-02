@@ -223,25 +223,13 @@ func (r *hostGroupResource) Update(ctx context.Context, req resource.UpdateReque
 	id := state.ID.ValueInt64()
 
 	name := plan.Name.ValueString()
-	input := client.UpdateHostGroupInput{
-		Name: &name,
-	}
-	// Only send a position when the configuration actually MOVES the group.
-	// Omitted means "leave it where it is", and so does a configured position the
-	// group already occupies — re-sending that still counts as a move server-side,
-	// which renumbers every other group in the organisation. A rename must not
-	// reshuffle the whole list.
-	if !config.Position.IsNull() && !config.Position.IsUnknown() && !config.Position.Equal(state.Position) {
-		v := config.Position.ValueInt64()
-		input.Position = &v
-	}
 
 	// ETag retry loop. The ETag is harvested from a GET immediately before the
 	// PATCH, so a 412 means something moved in between — which for host groups is
 	// routine, since any group's move invalidates every other group's ETag.
 	var group *client.HostGroup
 	for attempt := 0; attempt < 3; attempt++ {
-		_, etag, err := r.client.GetHostGroup(ctx, id)
+		current, etag, err := r.client.GetHostGroup(ctx, id)
 		if err != nil {
 			if isNotFound(err) {
 				resp.Diagnostics.AddError("Host group no longer exists", vanishedHostGroupDetail(id))
@@ -250,6 +238,25 @@ func (r *hostGroupResource) Update(ctx context.Context, req resource.UpdateReque
 			resp.Diagnostics.AddError("Error reading host group for update", err.Error())
 			return
 		}
+		// Decide the move against what the server holds RIGHT NOW, not against
+		// Terraform's last refresh. A sibling's move renumbers this group, so
+		// state.Position can already be stale by the time we get here: comparing
+		// to it can skip a move the practitioner asked for (config matches the
+		// stale number, so nothing is sent, and the group silently stays where the
+		// sibling left it) or send one nobody needs (the server already reached
+		// the target, and re-sending it renumbers every other group). This GET is
+		// the same round trip the ETag needs, so the fresher answer is free — and
+		// it is recomputed on every retry, which is exactly when it has changed.
+		//
+		// Only a real move is sent: omitting the key means "leave it where it is",
+		// and so does a configured position the group already occupies.
+		input := client.UpdateHostGroupInput{Name: &name}
+		if !config.Position.IsNull() && !config.Position.IsUnknown() &&
+			config.Position.ValueInt64() != current.Position {
+			v := config.Position.ValueInt64()
+			input.Position = &v
+		}
+
 		group, err = r.client.UpdateHostGroup(ctx, id, etag, input)
 		if err != nil {
 			if client.IsPreconditionFailed(err) && attempt < 2 {

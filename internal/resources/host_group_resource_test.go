@@ -426,11 +426,14 @@ func TestHostGroupUpdate_SendsConfiguredPosition(t *testing.T) {
 
 	var patchBody map[string]interface{}
 	r := newHostGroupResource(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("ETag", `"hg-etag"`)
 		if req.Method == http.MethodPatch {
 			json.NewDecoder(req.Body).Decode(&patchBody)
+			json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{"name": "Prod EU", "position": 3}))
+			return
 		}
-		w.Header().Set("ETag", `"hg-etag"`)
-		json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{"name": "Prod EU", "position": 3}))
+		// The group is still in slot 1 when the ETag GET reads it.
+		json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{"position": 1}))
 	})
 
 	want := int64(3)
@@ -471,6 +474,47 @@ func TestHostGroupUpdate_OmitsUnconfiguredPosition(t *testing.T) {
 	sent := patchBody["host_group"].(map[string]interface{})
 	if _, present := sent["position"]; present {
 		t.Errorf("patch body must omit an unconfigured position, got %v", sent["position"])
+	}
+}
+
+// A sibling's move renumbers this group, so the state Terraform refreshed at plan
+// time can already be stale when the update runs. Deciding the move against that
+// stale number skips a move the practitioner asked for: the configured position
+// matches state, nothing is sent, and the apply reports success while the group
+// sits where the sibling left it. The ETag GET already knows better.
+func TestHostGroupUpdate_MovesAgainstFreshServerPositionNotStaleState(t *testing.T) {
+	ctx := context.Background()
+	s := hostGroupSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	var patchBody map[string]interface{}
+	r := newHostGroupResource(t, func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("ETag", `"hg-etag"`)
+		if req.Method == http.MethodPatch {
+			json.NewDecoder(req.Body).Decode(&patchBody)
+			json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{"name": "Prod EU", "position": 1}))
+			return
+		}
+		// A sibling moved: the group is at 4 now, though state still says 1.
+		json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{"position": 4}))
+	})
+
+	// Config pins 1 and the helper's state also says 1, so a stale comparison
+	// finds no difference and sends nothing.
+	pinned := int64(1)
+	req := hostGroupUpdateRequestWithPlan(t, s, objType, &pinned, tftypes.NewValue(tftypes.Number, 1))
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Update(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	sent, ok := patchBody["host_group"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected a patch body, got %v", patchBody)
+	}
+	if sent["position"] != float64(1) {
+		t.Errorf("the pin must be re-applied against the server's current slot 4, got %v", sent["position"])
 	}
 }
 
@@ -615,10 +659,10 @@ func TestHostGroupUpdate_OmitsUnchangedPosition(t *testing.T) {
 			json.NewDecoder(req.Body).Decode(&patchBody)
 		}
 		w.Header().Set("ETag", `"hg-etag"`)
-		json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{"name": "Prod EU"}))
+		// The server already has the group in slot 1, which is what is configured.
+		json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{"name": "Prod EU", "position": 1}))
 	})
 
-	// The helper's state position is 1, so configuring 1 is a no-op move.
 	same := int64(1)
 	req := hostGroupUpdateRequestWithPlan(t, s, objType, &same, tftypes.NewValue(tftypes.Number, 1))
 	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}

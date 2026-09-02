@@ -21,8 +21,10 @@ resource "fivenines_mqtt_broker" "factory" {
   port = 8883
   tls  = true
 
-  # Write-only: the API never returns either one. `username_set` and
-  # `password_set` report whether one is stored.
+  # Write-only: the API never returns either one, so `username_set` and
+  # `password_set` are what report that a credential is stored. Dropping either
+  # from this configuration leaves the stored value alone — clear one from the
+  # dashboard.
   username = var.mqtt_username
   password = var.mqtt_password
 
@@ -49,10 +51,10 @@ resource "fivenines_mqtt_broker" "lab" {
 
 ### Optional
 
-- `password` (String, Sensitive) Broker password. Write-only — the API never returns it, so `password_set` reports whether one is stored.
+- `password` (String, Sensitive) Broker password. Write-only — the API never returns it, so `password_set` reports whether one is stored. Same preserve-on-omission rule as `username`.
 - `port` (Number) Broker port. Defaults to 1883 (8883 is the usual TLS port).
 - `tls` (Boolean) Whether the watcher connects over TLS.
-- `username` (String, Sensitive) Broker username. Write-only — the API never returns it, so `username_set` reports whether one is stored. Removing the attribute clears the stored username; a broker imported with credentials keeps them until Terraform is given a value to change.
+- `username` (String, Sensitive) Broker username. Write-only — the API never returns it, so `username_set` reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
 - `watcher_host_id` (String) UUID of the instance that subscribes to this broker and reports topic state. Must be an instance in your organization — the watcher is shipped these credentials decrypted. Until one is assigned, nothing is collected.
 
 ### Read-Only
@@ -76,8 +78,9 @@ Import is supported using the following syntax:
 The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/commands/import) can be used, for example:
 
 ```shell
-# Import an MQTT broker by its UUID. Stored credentials stay as they are —
-# Terraform cannot read them back, so add `username` / `password` to the
-# configuration only if you want Terraform to manage (and be able to rotate) them.
+# Import an MQTT broker by its UUID. Its stored credentials do not come with it:
+# the API never returns either one, so `username` and `password` read back as null
+# while `username_set` / `password_set` report that a credential exists. Setting
+# one in the configuration rotates it; leaving it out leaves the stored value alone.
 terraform import fivenines_mqtt_broker.factory 3f6c1d10-9a5e-4d3d-8e0a-7b2f9c1a4e55
 ```

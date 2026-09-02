@@ -6,8 +6,10 @@ resource "fivenines_mqtt_broker" "factory" {
   port = 8883
   tls  = true
 
-  # Write-only: the API never returns either one. `username_set` and
-  # `password_set` report whether one is stored.
+  # Write-only: the API never returns either one, so `username_set` and
+  # `password_set` are what report that a credential is stored. Dropping either
+  # from this configuration leaves the stored value alone — clear one from the
+  # dashboard.
   username = var.mqtt_username
   password = var.mqtt_password
 

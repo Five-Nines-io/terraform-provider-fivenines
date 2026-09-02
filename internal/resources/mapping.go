@@ -32,8 +32,19 @@ func optionalNonEmptyString(s *string) types.String {
 // are Required: a null from the API keeps whatever the plan already holds
 // rather than wiping a known value to null, which Terraform rejects as an
 // inconsistent result.
+//
+// An unknown plan value is the one thing it must not keep. A schema default
+// resolves unknown at plan time, so for a defaulted or Required attribute
+// `current` is always known and the guard below never fires. An Optional+
+// Computed attribute with NO default (snmp_version) is the exception: on create
+// the plan holds unknown, and echoing that back leaves an unknown in state,
+// which fails the apply outright with "Provider produced inconsistent result
+// after apply". There is nothing to keep in that case, so it reports null.
 func stringOrKeep(s *string, current types.String) types.String {
 	if s == nil {
+		if current.IsUnknown() {
+			return types.StringNull()
+		}
 		return current
 	}
 	return types.StringValue(*s)

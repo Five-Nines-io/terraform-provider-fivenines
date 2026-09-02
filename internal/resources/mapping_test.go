@@ -40,6 +40,22 @@ func TestStringOrKeep(t *testing.T) {
 	}
 }
 
+// An unknown plan value is never "kept": echoing it back leaves an unknown in
+// state and Terraform rejects the apply. Only Optional+Computed attributes with
+// no schema default can reach this, since a default resolves unknown at plan time.
+func TestStringOrKeep_NeverKeepsUnknown(t *testing.T) {
+	got := stringOrKeep(nil, types.StringUnknown())
+	if got.IsUnknown() {
+		t.Error("expected unknown to collapse to null, got unknown")
+	}
+	if !got.IsNull() {
+		t.Errorf("expected null, got %q", got.ValueString())
+	}
+	if got := stringOrKeep(ptr("v3"), types.StringUnknown()); got.ValueString() != "v3" {
+		t.Errorf("an API value still wins over unknown, got %q", got.ValueString())
+	}
+}
+
 func TestOptionalInts(t *testing.T) {
 	if got := optionalInt64(nil); !got.IsNull() {
 		t.Errorf("expected null, got %v", got)

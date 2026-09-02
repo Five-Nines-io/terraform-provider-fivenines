@@ -157,8 +157,12 @@
 - `mapNetworkDeviceToState` uses `stringOrKeep` for the defaulted SNMP attributes,
   but import starts from an empty model (`ImportStatePassthroughID` sets only
   `id`), so there is nothing to keep and they fall back to whatever the API sends
-- Harmless while the API returns them — `snmp_version` is Required and stored —
-  and `TestMapNetworkDeviceToState_ImportStartsFromEmptyState` pins that assumption
+- Harmless while the API returns them, and
+  `TestMapNetworkDeviceToState_ImportStartsFromEmptyState` pins that assumption
+- `snmp_version` is now Optional+Computed rather than Required (#11), so it is the
+  one attribute here with no schema default to fall back to. `stringOrKeep`
+  collapses an unknown plan value to null rather than echoing the unknown back,
+  which is what an unconfigured create would otherwise fail on
 - Only an acceptance run against a real v2c device settles it; if it fails, either
   add them to `ImportStateVerifyIgnore` or fall back to the schema default
 - Found by: /ship testing specialist + red team, 2026-09-02

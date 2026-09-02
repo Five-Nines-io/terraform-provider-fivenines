@@ -1831,6 +1831,7 @@ func TestClient_GetNetworkDevice(t *testing.T) {
 				"id": "dev-uuid", "name": "Core Switch", "ip_address": "192.168.1.1",
 				"device_type": "switch", "snmp_version": "v2c", "polling_interval": 60,
 				"status": "up", "maintenance_mode": false, "vendor": "Cisco", "model": "2960",
+				"consecutive_failures": 0, "last_error_type": nil, "last_error_message": nil,
 				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
 			},
 		})
@@ -1845,6 +1846,45 @@ func TestClient_GetNetworkDevice(t *testing.T) {
 	}
 	if dev.Vendor == nil || *dev.Vendor != "Cisco" {
 		t.Errorf("expected vendor Cisco, got %v", dev.Vendor)
+	}
+	if dev.ConsecutiveFailures != 0 {
+		t.Errorf("expected consecutive_failures 0, got %d", dev.ConsecutiveFailures)
+	}
+	if dev.LastErrorType != nil {
+		t.Errorf("expected last_error_type nil, got %v", *dev.LastErrorType)
+	}
+	if dev.LastErrorMessage != nil {
+		t.Errorf("expected last_error_message nil, got %v", *dev.LastErrorMessage)
+	}
+}
+
+func TestClient_GetNetworkDevice_Unreachable(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"network_device": map[string]interface{}{
+				"id": "dev-uuid", "name": "Core Switch", "ip_address": "192.168.1.1",
+				"status": "unreachable", "consecutive_failures": 3,
+				"last_error_type": "timeout", "last_error_message": "no response after 5s",
+				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+			},
+		})
+	})
+
+	dev, _, err := c.GetNetworkDevice(context.Background(), "dev-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dev.Status == nil || *dev.Status != "unreachable" {
+		t.Errorf("expected status unreachable, got %v", dev.Status)
+	}
+	if dev.ConsecutiveFailures != 3 {
+		t.Errorf("expected consecutive_failures 3, got %d", dev.ConsecutiveFailures)
+	}
+	if dev.LastErrorType == nil || *dev.LastErrorType != "timeout" {
+		t.Errorf("expected last_error_type timeout, got %v", dev.LastErrorType)
+	}
+	if dev.LastErrorMessage == nil || *dev.LastErrorMessage != "no response after 5s" {
+		t.Errorf("expected last_error_message set, got %v", dev.LastErrorMessage)
 	}
 }
 
@@ -1867,12 +1907,36 @@ func TestClient_EnterMaintenanceNetworkDevice(t *testing.T) {
 			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"network_device": map[string]interface{}{"id": "dev-uuid", "maintenance_mode": true},
+			"network_device": map[string]interface{}{"id": "dev-uuid", "maintenance_mode": true, "status": "up"},
 		})
 	})
-	err := c.EnterMaintenanceNetworkDevice(context.Background(), "dev-uuid")
+	dev, err := c.EnterMaintenanceNetworkDevice(context.Background(), "dev-uuid")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !dev.MaintenanceMode {
+		t.Error("expected maintenance_mode true in the returned device")
+	}
+	if dev.Status == nil || *dev.Status != "up" {
+		t.Errorf("expected status up in the returned device, got %v", dev.Status)
+	}
+}
+
+func TestClient_ExitMaintenanceNetworkDevice(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/v1/network_devices/dev-uuid/exit_maintenance" {
+			t.Errorf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"network_device": map[string]interface{}{"id": "dev-uuid", "maintenance_mode": false},
+		})
+	})
+	dev, err := c.ExitMaintenanceNetworkDevice(context.Background(), "dev-uuid")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dev.MaintenanceMode {
+		t.Error("expected maintenance_mode false in the returned device")
 	}
 }
 

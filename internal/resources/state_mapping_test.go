@@ -72,6 +72,92 @@ func TestMapNetworkDeviceToState_SNMPUsernameReportsDrift(t *testing.T) {
 	}
 }
 
+// The reachability fields are the whole point of reading a device back: the API
+// runs no pre-save credential test, so status/consecutive_failures/last_error_*
+// after a poll is the only signal that the SNMP credentials actually work.
+func TestMapNetworkDeviceToState_ReachabilityFromTheAPI(t *testing.T) {
+	device := &client.NetworkDevice{
+		ID: "dev-uuid", Name: "core-sw", IPAddress: "192.0.2.1",
+		Status:              ptr("unreachable"),
+		ConsecutiveFailures: 3,
+		LastErrorType:       ptr("timeout"),
+		LastErrorMessage:    ptr("No SNMP response from 192.0.2.1:161"),
+		LastPolledAt:        ptr("2026-01-01T00:05:00Z"),
+		CreatedAt:           "2026-01-01T00:00:00Z",
+		UpdatedAt:           "2026-01-01T00:00:00Z",
+	}
+
+	// Computed attributes arrive unknown, which is what Create really passes in.
+	// Seeding the zero value instead would make every assertion below pass with
+	// the mapper body deleted, since a zero-value types.String is already null.
+	state := &networkDeviceModel{
+		Status:              types.StringUnknown(),
+		ConsecutiveFailures: types.Int64Unknown(),
+		LastErrorType:       types.StringUnknown(),
+		LastErrorMessage:    types.StringUnknown(),
+	}
+	mapNetworkDeviceToState(device, state)
+
+	if got := state.ConsecutiveFailures; got.ValueInt64() != 3 {
+		t.Errorf("expected consecutive_failures 3, got %d (unknown=%v)", got.ValueInt64(), got.IsUnknown())
+	}
+	if got := state.LastErrorType; got.ValueString() != "timeout" {
+		t.Errorf("expected last_error_type timeout, got %q", got.ValueString())
+	}
+	if got := state.LastErrorMessage; got.ValueString() != "No SNMP response from 192.0.2.1:161" {
+		t.Errorf("expected the agent's error detail, got %q", got.ValueString())
+	}
+	if got := state.Status; got.ValueString() != "unreachable" {
+		t.Errorf("expected status unreachable, got %q", got.ValueString())
+	}
+}
+
+// The API clears last_error_type/message on the next successful poll. The prior
+// values are seeded as KNOWN strings so this asserts the mapper overwrites them:
+// against a zero-value model both fields would already be null.
+func TestMapNetworkDeviceToState_ReachabilityClearedOnSuccess(t *testing.T) {
+	state := &networkDeviceModel{
+		ConsecutiveFailures: types.Int64Value(3),
+		LastErrorType:       types.StringValue("timeout"),
+		LastErrorMessage:    types.StringValue("No SNMP response"),
+	}
+	mapNetworkDeviceToState(&client.NetworkDevice{
+		ID: "dev-uuid", Status: ptr("up"), ConsecutiveFailures: 0,
+	}, state)
+
+	if !state.LastErrorType.IsNull() {
+		t.Errorf("expected last_error_type cleared to null, got %q", state.LastErrorType.ValueString())
+	}
+	if !state.LastErrorMessage.IsNull() {
+		t.Errorf("expected last_error_message cleared to null, got %q", state.LastErrorMessage.ValueString())
+	}
+	if state.ConsecutiveFailures.ValueInt64() != 0 {
+		t.Errorf("expected consecutive_failures reset to 0, got %d", state.ConsecutiveFailures.ValueInt64())
+	}
+}
+
+// snmp_version is Optional+Computed with no schema default, so an unconfigured
+// create plans it as unknown. The API documents only name and ip_address as
+// required and need not echo it back; leaving the unknown in state fails the
+// apply with "Provider produced inconsistent result after apply".
+func TestMapNetworkDeviceToState_SNMPVersionUnknownOnCreate(t *testing.T) {
+	state := &networkDeviceModel{SNMPVersion: types.StringUnknown()}
+	mapNetworkDeviceToState(&client.NetworkDevice{ID: "dev-uuid", Name: "core-sw"}, state)
+	if state.SNMPVersion.IsUnknown() {
+		t.Fatal("snmp_version left unknown in state: the apply would fail as an inconsistent result")
+	}
+	if !state.SNMPVersion.IsNull() {
+		t.Errorf("expected null when neither plan nor API has a value, got %q", state.SNMPVersion.ValueString())
+	}
+
+	// A configured value still survives an API that omits the field.
+	state = &networkDeviceModel{SNMPVersion: types.StringValue("v3")}
+	mapNetworkDeviceToState(&client.NetworkDevice{ID: "dev-uuid"}, state)
+	if state.SNMPVersion.ValueString() != "v3" {
+		t.Errorf("expected the configured v3 to survive, got %q", state.SNMPVersion.ValueString())
+	}
+}
+
 // --- mapStatusPageToState ---
 
 func statusPageItems(t *testing.T, items ...client.StatusPageItem) types.List {

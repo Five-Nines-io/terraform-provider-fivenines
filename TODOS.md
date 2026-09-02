@@ -204,10 +204,17 @@
   pre-flight off entirely for anyone who cannot accept the risk
 - Found by: /ship adversarial review (Claude + Codex), 2026-09-02
 
-### ImportState duplicates the same int64 parse eight times
-- `host_group`, `status_page`, `network_device`, `workflow`, `task`,
-  `maintenance_window`, `api_token` and now `enrollment_token` each carry the same
+### ImportState duplicates the same int64 parse seven times
+- `host_group`, `status_page`, `workflow`, `api_token`, `dashboard`,
+  `enrollment_token` and now `organization_invitation` each carry the same
   seven-line `strconv.ParseInt` + `SetAttribute` block
+- Three of the names this entry used to carry are not copies at all:
+  `network_device` and `task` use `resource.ImportStatePassthroughID`, and
+  `maintenance_window` already routes through `parseCompositeInt64ID`. Checked
+  against the code — do not "fix" those three
+- `organization_member` (#20) is a near miss rather than a copy: it runs the same
+  parse first and falls back to resolving the address off the roster, so the
+  helper has to be callable as "parse, or tell me it was not a number"
 - `enrollment_token` appends a warning diagnostic after the parse (an imported
   token has no value and never will), so the helper needs to return control rather
   than own the whole function body

@@ -20,7 +20,11 @@
     so an explicit `[]` is sent and `mapToState` keeps the pinned empty list rather
     than flipping it to null. The pattern to copy for the rest
   - Instance secrets: blank-means-keep + `_set` booleans (#7) — still open, and the
-    only remaining half of this item
+    only remaining half of this item. The wire half is already solved by the #31 tag
+    convention (a write-only secret is `,omitempty`, so omission preserves — see the
+    three SNMP credentials); what #7 adds is the `_set` booleans that make an
+    unreadable secret's presence visible in state. `fivenines_mqtt_broker` (#18) is
+    the worked example of that pairing
 - ~~Reads normalize API null to `""`~~: fixed in #29 — the nullable fields on
   `Instance`, `Task`, `Workflow`, `NetworkDevice` and `StatusPage` are pointers and
   map to `types.StringNull()`/`types.Int64Null()`. Attributes carrying a schema

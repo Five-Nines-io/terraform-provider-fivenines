@@ -15,6 +15,8 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_status_page_maintenance_window` | Scheduled maintenance announcements on a status page |
 | `fivenines_integration` | Notification channels (webhook, PagerDuty, Pushover) |
 | `fivenines_host_group` | Named groups of hosts |
+| `fivenines_mqtt_broker` | MQTT brokers watched by one of your agent hosts |
+| `fivenines_mqtt_topic_monitor` | Per-topic freshness & payload checks on a broker |
 
 ## Data Sources
 
@@ -101,6 +103,24 @@ resource "fivenines_network_device" "switch" {
 resource "fivenines_host_group" "production" {
   name     = "Production"
   position = 1
+}
+
+# Watch an MQTT broker from an agent host inside the network
+resource "fivenines_mqtt_broker" "factory" {
+  name            = "Factory-floor Mosquitto"
+  host            = "mqtt.internal"
+  port            = 8883
+  tls             = true
+  username        = var.mqtt_username
+  password        = var.mqtt_password
+  watcher_host_id = fivenines_instance.edge_gateway.id
+}
+
+# Alert when a sensor topic goes quiet
+resource "fivenines_mqtt_topic_monitor" "temperature" {
+  mqtt_broker_id      = fivenines_mqtt_broker.factory.id
+  topic_filter        = "sensors/+/temperature"
+  stale_after_seconds = 300
 }
 
 # Create a public status page
@@ -236,6 +256,10 @@ terraform import fivenines_network_device.switch <device-uuid>
 terraform import fivenines_status_page.public <status-page-id>
 terraform import fivenines_status_page_maintenance_window.db_upgrade <status-page-id>:<window-id>
 terraform import fivenines_host_group.production <host-group-id>
+terraform import fivenines_mqtt_broker.factory <broker-uuid>
+
+# Topic monitors live under their broker, so both UUIDs are part of the ID
+terraform import fivenines_mqtt_topic_monitor.temperature <broker-uuid>:<monitor-uuid>
 ```
 
 `fivenines_integration` has no import: the API never returns an integration's
@@ -243,6 +267,13 @@ URL, routing key or tokens, so an imported channel would plan an immediate
 destroy-and-recreate. Reference channels created elsewhere — including Slack,
 Discord, Teams, Telegram and email, which cannot be created over the API at all —
 with the `fivenines_integrations` data source.
+
+An MQTT broker imports fine, but its `username` and `password` do not come with it:
+the API never returns either, so they stay stored server-side and out of Terraform's
+view. `username_set` and `password_set` report that a credential exists. Like the
+SNMP secrets on `fivenines_network_device`, they are write-only and preserve on
+omission — setting one rotates it, dropping it from the configuration leaves the
+stored value alone. Clear a credential in the dashboard.
 
 ## Development
 

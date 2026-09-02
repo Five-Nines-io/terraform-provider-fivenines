@@ -121,6 +121,40 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 			},
 		},
 		{
+			input: UpdateMQTTBrokerInput{},
+			policy: map[string]string{
+				// Required attributes: the plan always holds a value, so nil never
+				// reaches the tag and omitempty only documents that.
+				"name": preserves, "host": preserves,
+				// Optional+Computed with schema defaults, same reasoning.
+				"port": preserves, "tls": preserves,
+				// Write-only, blank-means-keep server-side — the same call the three
+				// SNMP credentials make. An explicit null would wipe a working
+				// credential on an unrelated update, and the API never returns
+				// either one, so Terraform cannot even tell that it did.
+				"username": preserves, "password": preserves,
+				// Readable and Optional-only, so the configuration owns it: dropping
+				// watcher_host_id has to unassign the watcher, which only an
+				// explicit null can do.
+				"watcher_host_id": clears,
+			},
+		},
+		{
+			input: UpdateMQTTTopicMonitorInput{},
+			policy: map[string]string{
+				// Required attribute: the plan always holds a filter.
+				"topic_filter": preserves,
+				// Optional-only checks the configuration owns end to end: dropping
+				// one has to remove it, so nil must marshal as an explicit null.
+				"stale_after_seconds": clears, "match_kind": clears,
+				"expected_value": clears, "json_key": clears,
+				// Optional+Computed with a default, so nil never reaches the tag —
+				// and it must not, because the column is NOT NULL and an explicit
+				// null is a documented 400.
+				"capture_payload": preserves,
+			},
+		},
+		{
 			input: UpdateHostGroupInput{},
 			policy: map[string]string{
 				// Required attribute: the plan always holds a name, so nil never
@@ -251,6 +285,33 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 			// Nothing to clear on a group that does not exist yet, so create omits
 			// an absent position and lets the API put the group on top.
 			"position": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateMQTTBrokerInput{},
+		policy: map[string]string{
+			"name": always, "host": always,
+			// Nothing to clear on a broker that does not exist yet, so create omits
+			// an absent port, credential or watcher rather than sending an explicit
+			// null — and `tls: null` is a documented 400 either way.
+			"port": preserves, "tls": preserves,
+			"username": preserves, "password": preserves,
+			"watcher_host_id": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateMQTTTopicMonitorInput{},
+		policy: map[string]string{
+			"topic_filter": always,
+			// Nothing to clear on a monitor that does not exist yet. A monitor with
+			// neither check is a 422, which ValidateConfig rejects at plan time.
+			"stale_after_seconds": preserves, "match_kind": preserves,
+			"expected_value": preserves, "json_key": preserves,
+			"capture_payload": preserves,
 		},
 	}, struct {
 		input  interface{}

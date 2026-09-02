@@ -648,6 +648,115 @@ type UpdateHostGroupInput struct {
 	Position *int64  `json:"position,omitempty"`
 }
 
+// MQTTBroker represents an MQTT broker watched by one of your agent hosts.
+// Credentials are encrypted at rest and never returned: UsernameSet and
+// PasswordSet report only whether one is stored.
+type MQTTBroker struct {
+	ID                string  `json:"id"` // UUID
+	Name              string  `json:"name"`
+	Host              string  `json:"host"`
+	Port              int     `json:"port"`
+	TLS               bool    `json:"tls"`
+	UsernameSet       bool    `json:"username_set"`
+	PasswordSet       bool    `json:"password_set"`
+	WatcherHostID     *string `json:"watcher_host_id"`
+	Status            string  `json:"status"`
+	LastErrorMessage  *string `json:"last_error_message"`
+	LastConnectedAt   *string `json:"last_connected_at"`
+	LastSyncedAt      *string `json:"last_synced_at"`
+	Stale             bool    `json:"stale"`
+	TopicMonitorCount int     `json:"topic_monitor_count"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
+}
+
+// CreateMQTTBrokerInput is the request body for creating an MQTT broker.
+//
+// Nothing is stored yet, so every optional field is `,omitempty`: an absent
+// credential or watcher is simply not mentioned rather than nulled.
+type CreateMQTTBrokerInput struct {
+	Name          string  `json:"name"`
+	Host          string  `json:"host"`
+	Port          *int    `json:"port,omitempty"`
+	TLS           *bool   `json:"tls,omitempty"`
+	Username      *string `json:"username,omitempty"`
+	Password      *string `json:"password,omitempty"`
+	WatcherHostID *string `json:"watcher_host_id,omitempty"`
+}
+
+// UpdateMQTTBrokerInput is the request body for updating an MQTT broker.
+//
+// Username and Password are write-only and preserve on nil, the same call the
+// three SNMP credentials make: neither is readable over this API, so a caller
+// that reads a broker back and PATCHes it has nothing to send for either one,
+// and an explicit null would wipe a working credential on an unrelated edit.
+// The server reads a blank string the same way, which is why the resource
+// rejects one at plan time rather than sending it. Clearing a credential is
+// therefore a dashboard action, not a Terraform one.
+type UpdateMQTTBrokerInput struct {
+	Name     *string `json:"name,omitempty"`
+	Host     *string `json:"host,omitempty"`
+	Port     *int    `json:"port,omitempty"`
+	TLS      *bool   `json:"tls,omitempty"`
+	Username *string `json:"username,omitempty"`
+	Password *string `json:"password,omitempty"`
+	// Readable, Optional-only, and the configuration owns it: dropping
+	// watcher_host_id has to unassign the watcher, which only an explicit null
+	// can do. Until one is assigned the broker collects nothing.
+	WatcherHostID *string `json:"watcher_host_id"`
+}
+
+// MQTTTopicMonitor represents one topic filter watched on a broker, with a
+// freshness timeout, a payload expectation, or both. Each one counts toward the
+// organization's monitor limit.
+type MQTTTopicMonitor struct {
+	ID                string  `json:"id"` // UUID
+	MQTTBrokerID      string  `json:"mqtt_broker_id"`
+	TopicFilter       string  `json:"topic_filter"`
+	StaleAfterSeconds *int64  `json:"stale_after_seconds"`
+	MatchKind         *string `json:"match_kind"`
+	ExpectedValue     *string `json:"expected_value"`
+	JSONKey           *string `json:"json_key"`
+	CapturePayload    bool    `json:"capture_payload"`
+	// Derived server-side
+	EffectiveCapturePayload bool    `json:"effective_capture_payload"`
+	FreshnessCheck          bool    `json:"freshness_check"`
+	PayloadCheck            bool    `json:"payload_check"`
+	ExactTopic              bool    `json:"exact_topic"`
+	SubscribedSince         *string `json:"subscribed_since"`
+	Capped                  bool    `json:"capped"`
+	CreatedAt               string  `json:"created_at"`
+	UpdatedAt               string  `json:"updated_at"`
+}
+
+// CreateMQTTTopicMonitorInput is the request body for creating a topic monitor.
+type CreateMQTTTopicMonitorInput struct {
+	TopicFilter       string  `json:"topic_filter"`
+	StaleAfterSeconds *int64  `json:"stale_after_seconds,omitempty"`
+	MatchKind         *string `json:"match_kind,omitempty"`
+	ExpectedValue     *string `json:"expected_value,omitempty"`
+	JSONKey           *string `json:"json_key,omitempty"`
+	CapturePayload    *bool   `json:"capture_payload,omitempty"`
+}
+
+// UpdateMQTTTopicMonitorInput is the request body for updating a topic monitor.
+//
+// The checks are Optional-only and the configuration owns them: dropping
+// stale_after_seconds or match_kind has to remove that check, which only an
+// explicit null can do. A monitor must keep at least one, so clearing the only
+// one is a 422 — ValidateConfig catches that at plan time.
+type UpdateMQTTTopicMonitorInput struct {
+	TopicFilter       *string `json:"topic_filter,omitempty"`
+	StaleAfterSeconds *int64  `json:"stale_after_seconds"`
+	MatchKind         *string `json:"match_kind"`
+	ExpectedValue     *string `json:"expected_value"`
+	JSONKey           *string `json:"json_key"`
+	// Optional+Computed with a schema default, so the plan always holds a
+	// concrete value and nil never reaches this tag. It stays omitempty because
+	// the column is NOT NULL and an explicit null is a documented 400.
+	CapturePayload *bool `json:"capture_payload,omitempty"`
+}
+
 // APIError represents an error response from the API.
 type APIError struct {
 	StatusCode int

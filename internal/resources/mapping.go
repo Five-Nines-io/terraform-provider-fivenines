@@ -94,3 +94,19 @@ func intPtr(v types.Int64) *int {
 	i := int(v.ValueInt64())
 	return &i
 }
+
+// optionalNonEmptyStringOrKeep is optionalNonEmptyString for attributes whose
+// prior value distinguishes "" from null. The API uses the two interchangeably,
+// so a body configured as "" comes back as null and vice versa; reporting the
+// other form makes the attribute drift on every plan forever. Whichever of the
+// two empties the practitioner wrote is kept; a value replaced by a real string,
+// or a real string emptied out of band, still reports the server.
+func optionalNonEmptyStringOrKeep(s *string, current types.String) types.String {
+	if s != nil && *s != "" {
+		return types.StringValue(*s)
+	}
+	if !current.IsUnknown() && (current.IsNull() || current.ValueString() == "") {
+		return current
+	}
+	return types.StringNull()
+}

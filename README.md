@@ -12,6 +12,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_workflow` | Automation workflows with version management |
 | `fivenines_network_device` | SNMP-monitored network devices |
 | `fivenines_status_page` | Public status pages with items |
+| `fivenines_status_page_maintenance_window` | Scheduled maintenance announcements on a status page |
 
 ## Data Sources
 
@@ -99,6 +100,22 @@ resource "fivenines_status_page" "public" {
       item_id       = fivenines_uptime_monitor.api.id
       display_label = "Public API"
       section       = "Core services"
+    },
+  ]
+}
+
+# Announce planned maintenance on that status page
+resource "fivenines_status_page_maintenance_window" "db_upgrade" {
+  status_page_id = fivenines_status_page.public.id
+  title          = "Database upgrade"
+  body           = "The API stays available in read-only mode."
+  starts_at      = "2026-09-20T22:00:00Z"
+  ends_at        = "2026-09-21T02:00:00Z"
+
+  affected_items = [
+    {
+      item_type = "UptimeMonitor"
+      item_id   = fivenines_uptime_monitor.api.id
     },
   ]
 }
@@ -198,6 +215,7 @@ terraform import fivenines_uptime_monitor.api <monitor-uuid>
 terraform import fivenines_workflow.alert <workflow-id>
 terraform import fivenines_network_device.switch <device-uuid>
 terraform import fivenines_status_page.public <status-page-id>
+terraform import fivenines_status_page_maintenance_window.db_upgrade <status-page-id>:<window-id>
 ```
 
 ## Development

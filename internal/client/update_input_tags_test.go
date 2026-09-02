@@ -88,6 +88,23 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 			},
 		},
 		{
+			input: UpdateStatusPageMaintenanceWindowInput{},
+			policy: map[string]string{
+				// Required attributes: the plan always holds a value, so nil never
+				// reaches the tag and omitempty only documents that.
+				"title": preserves, "starts_at": preserves, "ends_at": preserves,
+				// Optional-only, so the configuration owns it: dropping `body` has
+				// to clear it, which only an explicit null can do.
+				"body": clears,
+				// Pointer-to-slice, same shape as the status page's items. The
+				// resource never sends nil here — an unconfigured list becomes the
+				// explicit [] that clears — but nil still has to mean "omit"
+				// rather than "null", because the API documents [] as the way to
+				// clear and says nothing about accepting null.
+				"affected_items": preserves,
+			},
+		},
+		{
 			input: UpdateUptimeMonitorInput{},
 			policy: map[string]string{
 				"name": preserves, "protocol": preserves, "url": preserves,
@@ -125,6 +142,18 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 			// Nothing to clear on a page that does not exist yet, so the create
 			// side omits an absent logo rather than sending an explicit null.
 			"logo": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateStatusPageMaintenanceWindowInput{},
+		policy: map[string]string{
+			"title": always, "starts_at": always, "ends_at": always,
+			// Nothing to clear on a window that does not exist yet, so create
+			// omits an absent body and an absent item list rather than sending
+			// an explicit null.
+			"body": preserves, "affected_items": preserves,
 		},
 	}, struct {
 		input  interface{}

@@ -530,3 +530,49 @@ func (e *APIError) Error() string {
 	}
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
 }
+
+// StatusPageMaintenanceWindow represents a scheduled maintenance window on a status page.
+type StatusPageMaintenanceWindow struct {
+	ID            int64                           `json:"id"`
+	StatusPageID  int64                           `json:"status_page_id"`
+	Title         string                          `json:"title"`
+	Body          *string                         `json:"body"`
+	StartsAt      string                          `json:"starts_at"`
+	EndsAt        string                          `json:"ends_at"`
+	TimeZone      string                          `json:"time_zone"`
+	Status        string                          `json:"status"`
+	State         string                          `json:"state"`
+	AffectedItems []MaintenanceWindowAffectedItem `json:"affected_items"`
+	CreatedAt     string                          `json:"created_at"`
+	UpdatedAt     string                          `json:"updated_at"`
+}
+
+// MaintenanceWindowAffectedItem references an item impacted by a maintenance
+// window. ItemID is the durable id of the underlying resource (host, uptime
+// monitor or task), not the status page item id.
+type MaintenanceWindowAffectedItem struct {
+	ItemType string `json:"item_type"`
+	ItemID   string `json:"item_id"`
+}
+
+// CreateStatusPageMaintenanceWindowInput is the request body for creating a maintenance window.
+type CreateStatusPageMaintenanceWindowInput struct {
+	Title         string                           `json:"title"`
+	Body          *string                          `json:"body,omitempty"`
+	StartsAt      string                           `json:"starts_at"`
+	EndsAt        string                           `json:"ends_at"`
+	AffectedItems *[]MaintenanceWindowAffectedItem `json:"affected_items,omitempty"`
+}
+
+// UpdateStatusPageMaintenanceWindowInput is the request body for updating a
+// maintenance window. PATCH is partial server-side: an omitted key is left
+// untouched. Body therefore has no omitempty — a nil pointer marshals to JSON
+// null, which clears the body. AffectedItems replaces the list wholesale when
+// sent, and an empty (non-nil) slice clears it.
+type UpdateStatusPageMaintenanceWindowInput struct {
+	Title         *string                          `json:"title,omitempty"`
+	Body          *string                          `json:"body"`
+	StartsAt      *string                          `json:"starts_at,omitempty"`
+	EndsAt        *string                          `json:"ends_at,omitempty"`
+	AffectedItems *[]MaintenanceWindowAffectedItem `json:"affected_items,omitempty"`
+}

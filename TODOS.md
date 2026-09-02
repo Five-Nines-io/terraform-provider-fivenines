@@ -109,6 +109,20 @@
   terraform-plugin-framework-timeouts, defaulting to the current 5 minutes
 - Found by: /ship performance specialist, 2026-09-02
 
+### The struct-tag policy table only guards structs someone remembered to list
+- `TestUpdateInputTagsMatchTheirPolicy` is the guard that makes a `json` tag's
+  clear-vs-preserve choice fail loudly, but its `specs` slice is a hand-written
+  list of input types. A brand new `Create*Input`/`Update*Input` is not unclassified
+  — it is invisible: the test never reflects over it, so it passes while the new
+  struct has no policy at all
+- Both maintenance window inputs escaped it that way in #14 until they were added
+  by hand; the next resource will escape it the same way
+- Go cannot enumerate a package's types at runtime, so the fix is either a
+  registry the inputs register into, or a small `go vet`-style check that greps
+  `internal/client/models.go` for `Input struct` and fails on any name absent from
+  the table
+- Found by: /ship, 2026-09-02
+
 ### SNMP credentials can never be cleared
 - `snmp_community` / `snmp_auth_password` / `snmp_priv_password` keep `omitempty`
   because the API treats blank as "keep", so no config the provider can produce

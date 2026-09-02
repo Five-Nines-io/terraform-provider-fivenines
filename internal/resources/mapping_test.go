@@ -85,3 +85,27 @@ func TestPlanPointers(t *testing.T) {
 		t.Errorf("got %v, want 443", got)
 	}
 }
+
+// --- optionalNonEmptyStringOrKeep ---
+
+func TestOptionalNonEmptyStringOrKeep(t *testing.T) {
+	blank := ""
+	text := "hello"
+
+	if got := optionalNonEmptyStringOrKeep(nil, types.StringNull()); !got.IsNull() {
+		t.Errorf("null API + null config should stay null, got %q", got.ValueString())
+	}
+	if got := optionalNonEmptyStringOrKeep(&blank, types.StringNull()); !got.IsNull() {
+		t.Errorf("empty API + null config should stay null, got %q", got.ValueString())
+	}
+	if got := optionalNonEmptyStringOrKeep(nil, types.StringValue("")); got.IsNull() || got.ValueString() != "" {
+		t.Errorf(`null API + "" config should stay "", got %v`, got)
+	}
+	if got := optionalNonEmptyStringOrKeep(&text, types.StringNull()); got.ValueString() != "hello" {
+		t.Errorf("expected 'hello', got %q", got.ValueString())
+	}
+	// Body cleared outside Terraform must surface as drift, not be masked.
+	if got := optionalNonEmptyStringOrKeep(nil, types.StringValue("hello")); !got.IsNull() {
+		t.Errorf("expected null to surface out-of-band clearing, got %q", got.ValueString())
+	}
+}

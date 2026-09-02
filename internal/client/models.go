@@ -1126,13 +1126,17 @@ type DashboardTemplateSkip struct {
 	Reason string `json:"reason"`
 }
 
-// Machine-readable error codes from the public API contract's error table.
+// Machine-readable error codes from the public API contract's error table —
+// the vocabulary for reading APIError.Code, so callers match a constant instead
+// of a string literal.
 //
-// These are the values the server passes to its `render_error`. Note that the
-// PUBLIC envelope currently DISCARDS the code (only the partner envelope
-// carries one), so APIError.Code is empty against today's server on every
-// path. They are parsed and matched anyway so the client is correct the day
-// the public envelope gains codes; nothing here may REQUIRE a code to work.
+// Two things are true about them and both matter. The PUBLIC envelope currently
+// DISCARDS the code (only the partner envelope renders one), so APIError.Code
+// is empty against today's server on every path. And no decision in this client
+// branches on a code: IsNotFound deliberately reads the STATUS alone, because a
+// predicate that authorises removing a resource from Terraform state must not
+// widen onto a field the transport does not guarantee. Codes are surfaced in
+// Error() and available to callers; nothing may REQUIRE one to work.
 const (
 	ErrCodeUnknownParameter    = "unknown_parameter"
 	ErrCodeInvalidFilter       = "invalid_filter"
@@ -1191,34 +1195,16 @@ func AsAPIError(err error) *APIError {
 
 // IsNotFound reports whether err is a 404 — the resource is gone and Terraform
 // should drop it from state rather than fail.
+//
+// The STATUS decides, never Code. This predicate authorises state removal, so a
+// false positive silently drops a live resource out of Terraform's management;
+// the status is the one signal the transport guarantees. Matching Code too
+// would widen that authority onto a field the public envelope does not even
+// emit, and it would buy nothing: every `not_found` the server renders is
+// already paired with a 404.
 func IsNotFound(err error) bool {
 	apiErr := AsAPIError(err)
-	return apiErr != nil && (apiErr.StatusCode == http.StatusNotFound || apiErr.Code == ErrCodeNotFound)
-}
-
-// IsForbidden reports whether err is a 403: the credential is valid but the
-// action is refused — a read-scoped token on a write, a Pundit refusal, or a
-// demo-restricted org. Distinct from IsUnauthorized, which means the token
-// itself is dead.
-func IsForbidden(err error) bool {
-	apiErr := AsAPIError(err)
-	return apiErr != nil && (apiErr.StatusCode == http.StatusForbidden || apiErr.Code == ErrCodeForbidden)
-}
-
-// IsUnauthorized reports whether err is a 401. The API fails a token CLOSED:
-// a token whose holder left the organization it was minted for answers 401,
-// not 403, because the credential is dead rather than the action forbidden.
-func IsUnauthorized(err error) bool {
-	apiErr := AsAPIError(err)
-	return apiErr != nil && apiErr.StatusCode == http.StatusUnauthorized
-}
-
-// IsRateLimited reports whether err is a 429 that survived the client's own
-// retry budget. The limit is per-organization, per-minute and is SHARED with
-// the MCP server, so a busy MCP client can exhaust a Terraform run's budget.
-func IsRateLimited(err error) bool {
-	apiErr := AsAPIError(err)
-	return apiErr != nil && apiErr.StatusCode == http.StatusTooManyRequests
+	return apiErr != nil && apiErr.StatusCode == http.StatusNotFound
 }
 
 // StatusPageMaintenanceWindow represents a scheduled maintenance window on a status page.

@@ -2313,14 +2313,15 @@ func TestClient_RateLimit_ContextCancellation(t *testing.T) {
 
 // --- Error Envelope (code / request_id) ---
 
-// The public envelope renders request_id into the body on every path that goes
-// through render_error.
+// The exact shape the PUBLIC envelope renders through render_error: error plus
+// request_id, and no code — the public renderer drops it. Nothing in the client
+// may require a code to work, so this is the fixture that matters.
 func TestClient_APIError_ParsesRequestIDFromBody(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Request-Id", "header-id")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "Not found", "request_id": "body-id", "code": "not_found",
+			"error": "Not found", "request_id": "body-id",
 		})
 	})
 
@@ -2333,8 +2334,38 @@ func TestClient_APIError_ParsesRequestIDFromBody(t *testing.T) {
 	if apiErr.RequestID != "body-id" {
 		t.Errorf("expected request_id %q, got %q", "body-id", apiErr.RequestID)
 	}
-	if apiErr.Code != ErrCodeNotFound {
-		t.Errorf("expected code %q, got %q", ErrCodeNotFound, apiErr.Code)
+	if apiErr.Code != "" {
+		t.Errorf("the public envelope emits no code, got %q", apiErr.Code)
+	}
+	if !IsNotFound(err) {
+		t.Error("a 404 with no code must still classify as not-found")
+	}
+}
+
+// Code is parsed when a surface DOES send one (the partner envelope carries a
+// code today, and the public error table is specified to grow one). This is
+// forward-compatibility only: no behaviour may depend on it, which is why the
+// case above is the one that drives IsNotFound.
+func TestClient_APIError_ParsesCodeWhenPresent(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Unknown query key: statuss", "request_id": "req-9",
+			"code": "unknown_parameter",
+		})
+	})
+
+	_, _, err := c.GetInstance(context.Background(), "abc")
+	apiErr := AsAPIError(err)
+	if apiErr == nil {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.Code != ErrCodeUnknownParameter {
+		t.Errorf("expected code %q, got %q", ErrCodeUnknownParameter, apiErr.Code)
+	}
+	// A 400 is not drift, whatever code it carries.
+	if IsNotFound(err) {
+		t.Error("a 400 must never classify as not-found")
 	}
 }
 
@@ -2977,15 +3008,16 @@ func TestErrorPredicates(t *testing.T) {
 		want bool
 	}{
 		{"404 is not found", IsNotFound, &APIError{StatusCode: 404}, true},
-		{"not_found code without 404 status", IsNotFound, &APIError{StatusCode: 400, Code: ErrCodeNotFound}, true},
+		// The status decides, not the code. This case is the guard on that:
+		// IsNotFound authorises state removal, so a non-404 that merely
+		// mentions not_found must NOT be allowed to delete a live resource
+		// from state.
+		{"not_found code without a 404 status is not not-found", IsNotFound,
+			&APIError{StatusCode: 400, Code: ErrCodeNotFound}, false},
 		{"403 is not not-found", IsNotFound, &APIError{StatusCode: 403}, false},
+		{"401 is not not-found", IsNotFound, &APIError{StatusCode: 401}, false},
 		{"non-API error is not not-found", IsNotFound, fmt.Errorf("dial tcp: refused"), false},
 		{"nil error is not not-found", IsNotFound, nil, false},
-		{"403 is forbidden", IsForbidden, &APIError{StatusCode: 403}, true},
-		{"401 is not forbidden", IsForbidden, &APIError{StatusCode: 401}, false},
-		{"401 is unauthorized", IsUnauthorized, &APIError{StatusCode: 401}, true},
-		{"403 is not unauthorized", IsUnauthorized, &APIError{StatusCode: 403}, false},
-		{"429 is rate limited", IsRateLimited, &APIError{StatusCode: 429}, true},
 		{"412 is precondition failed", IsPreconditionFailed, &APIError{StatusCode: 412}, true},
 		{"409 is not precondition failed", IsPreconditionFailed, &APIError{StatusCode: 409}, false},
 	}

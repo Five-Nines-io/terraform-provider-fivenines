@@ -468,6 +468,20 @@
   — no read access, no configuration change. `ping_url` embeds the key verbatim and is
   now `Sensitive` too, and README gained a "Secrets in state" section
 
+- **`description = ""` was impossible to set on a workflow** (the create half of
+  #6) — fixed in #48. `CreateWorkflowInput.Description` was the last create-side
+  `description` still a plain `string` with `,omitempty`, so the empty string was
+  dropped from the POST body, the nullable column stored NULL, and the read
+  answered null against a config that said `""`. Every such apply aborted with
+  "Provider produced inconsistent result after apply". `CreateStatusPageInput`
+  had the identical bug and was pointerised for it; this was the one left behind.
+  The field is now `*string`, the call site is the uniform `stringPtr(plan.X)`,
+  and the guard table reclassifies it `dropsZero` → `preserves`. Covered by plan
+  tests on both the create and the update path — the whole unit suite stayed
+  green with `workflowUpdateInput`'s description mutated to nil, because a
+  direct-call test never runs Terraform's consistency check.
+  Found by: /ship rebase onto v0.21.0, 2026-09-02
+
 - **Pagination truncated every list at 100** (most of #5) — fixed in #9.
   `PaginationMeta` now decodes the real envelope (`current_page` / `total_pages` /
   `total_count` / `per_page`); all 8 list loops route through one `morePages`

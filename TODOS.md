@@ -92,6 +92,15 @@
   the same way. `order`/`direction` are enumerated so they are validated at plan
   time, but `q` and `updated_since` are not, and `name` is present on every
   returned group, so the same cheap server-honoured-it assertion is available
+- `fivenines_incidents`, `fivenines_integrations` and `fivenines_workflow_runs`
+  (#21) join the same pattern. Every enumerated argument (`status`, `type`,
+  `order`, `direction`) is validated at plan time by a `OneOf` whose vocabulary is
+  checked against the server enum, but `q`/`updated_since` are not, and neither is
+  the incidents `from`/`to` active-window pair. The window was left to the API
+  deliberately: `to` is exclusive and an inverted window is a 400, but parsing the
+  timestamps client-side risks rejecting a format the server accepts, which turns a
+  working config into a plan-time failure. `status` is present on every returned
+  incident and run, so the server-honoured-it assertion is available there too
 
 ### monitors is an ordered List with a server-defined default order
 - `order`/`direction` are optional, so default ordering is whatever the API
@@ -355,6 +364,10 @@
   monitors" still pulls every monitor in the org on every plan and refresh
 - `fivenines_host_groups` (#25) is the same, though it costs less: a host group
   list is small and its `q` filter narrows server-side before the walk
+- `fivenines_incidents` and `fivenines_workflow_runs` (#21) are the worst case:
+  both back unbounded, append-only histories, so "the last 10 failed runs" walks
+  every run the workflow has ever had on every plan. Their server-side filters
+  narrow the walk but do not bound it
 - Fix: optional `limit`, threaded into the ListXOptions struct, stopping the walk
   once `len(all) >= limit` and sizing per_page as `min(100, limit)`
 

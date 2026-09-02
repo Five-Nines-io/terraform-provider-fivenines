@@ -15,7 +15,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -101,91 +100,6 @@ func TestMapHostGroupToState_UnpositionedGroup(t *testing.T) {
 	}
 	if state.Position.ValueInt64() != 0 {
 		t.Errorf("expected position 0, got %d", state.Position.ValueInt64())
-	}
-}
-
-// --- unknownOnPositionChange ---
-
-var hostGroupObjectType = tftypes.Object{
-	AttributeTypes: map[string]tftypes.Type{"position": tftypes.Number},
-}
-
-// hostGroupRaw builds the raw plan/state value the plan modifier inspects. A nil
-// position stands for the whole object being absent (create or destroy).
-func hostGroupRaw(present bool) tftypes.Value {
-	if !present {
-		return tftypes.NewValue(hostGroupObjectType, nil)
-	}
-	return tftypes.NewValue(hostGroupObjectType, map[string]tftypes.Value{
-		"position": tftypes.NewValue(tftypes.Number, 1),
-	})
-}
-
-// The two "stays known" cells are negative cases: a no-op body is a correct
-// implementation of them in isolation, so deleting the function body does not
-// fail them. They are not vacuous — they are what catches the modifier being
-// over-applied (see the M5/M6 mutations in the PR body): marking position
-// unknown on a no-op plan puts "known after apply" in front of the practitioner
-// on every plan, and doing it on a destroy plan corrupts the destroy.
-func TestUnknownOnPositionChange(t *testing.T) {
-	tests := []struct {
-		name         string
-		planPresent  bool
-		statePresent bool
-		planValue    types.Int64
-		stateValue   types.Int64
-		wantUnknown  bool
-	}{
-		{
-			name:         "create with an explicit position defers to the API",
-			planPresent:  true,
-			statePresent: false,
-			planValue:    types.Int64Value(2),
-			stateValue:   types.Int64Null(),
-			wantUnknown:  true,
-		},
-		{
-			name:         "update that moves the group defers to the API",
-			planPresent:  true,
-			statePresent: true,
-			planValue:    types.Int64Value(3),
-			stateValue:   types.Int64Value(1),
-			wantUnknown:  true,
-		},
-		{
-			name:         "unchanged position stays known",
-			planPresent:  true,
-			statePresent: true,
-			planValue:    types.Int64Value(1),
-			stateValue:   types.Int64Value(1),
-			wantUnknown:  false,
-		},
-		{
-			name:         "destroy plan is left alone",
-			planPresent:  false,
-			statePresent: true,
-			planValue:    types.Int64Null(),
-			stateValue:   types.Int64Value(1),
-			wantUnknown:  false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := planmodifier.Int64Request{
-				Plan:       tfsdk.Plan{Raw: hostGroupRaw(tt.planPresent)},
-				State:      tfsdk.State{Raw: hostGroupRaw(tt.statePresent)},
-				PlanValue:  tt.planValue,
-				StateValue: tt.stateValue,
-			}
-			resp := &planmodifier.Int64Response{PlanValue: tt.planValue}
-
-			unknownOnPositionChange{}.PlanModifyInt64(context.Background(), req, resp)
-
-			if got := resp.PlanValue.IsUnknown(); got != tt.wantUnknown {
-				t.Errorf("expected unknown=%v, got plan value %v", tt.wantUnknown, resp.PlanValue)
-			}
-		})
 	}
 }
 
@@ -275,12 +189,10 @@ func TestHostGroupSchema_NameLimitCountsCharactersNotBytes(t *testing.T) {
 
 // --- Create ---
 
-// The regression this file exists for. unknownOnPositionChange deliberately
-// plans position as unknown whenever it changes, which on create is always. A
-// Create that read the position off the PLAN would therefore read unknown, send
-// nothing, and silently drop a position the practitioner asked for — with every
-// other test in the package still green. The value has to come off the CONFIG.
-func TestHostGroupCreate_SendsConfiguredPositionDespiteUnknownPlan(t *testing.T) {
+// A configured position must reach the API. Terraform plans an Optional+Computed
+// attribute as the configured value when the configuration sets one, so the plan
+// carries it KNOWN.
+func TestHostGroupCreate_SendsConfiguredPosition(t *testing.T) {
 	ctx := context.Background()
 	s := hostGroupSchema(t)
 	objType := s.Type().TerraformType(ctx)
@@ -292,10 +204,9 @@ func TestHostGroupCreate_SendsConfiguredPositionDespiteUnknownPlan(t *testing.T)
 		json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{"position": 5}))
 	})
 
-	// Exactly what the framework hands Create once the plan modifier has run.
 	plan := nullObjectValue(t, objType, map[string]tftypes.Value{
 		"name":     tftypes.NewValue(tftypes.String, "Production"),
-		"position": tftypes.NewValue(tftypes.Number, tftypes.UnknownValue),
+		"position": tftypes.NewValue(tftypes.Number, 5),
 	})
 	config := nullObjectValue(t, objType, map[string]tftypes.Value{
 		"name":     tftypes.NewValue(tftypes.String, "Production"),
@@ -356,13 +267,22 @@ func TestHostGroupCreate_OmitsUnconfiguredPosition(t *testing.T) {
 	if _, present := sent["position"]; present {
 		t.Errorf("create body must omit an unconfigured position, got %v", sent["position"])
 	}
+
+	// Nothing was planned, so the API's assignment is the only answer there is.
+	var state hostGroupModel
+	resp.State.Get(ctx, &state)
+	if state.Position.ValueInt64() != 1 {
+		t.Errorf("an unplanned position must take the API's value 1, got %d", state.Position.ValueInt64())
+	}
 }
 
-// The whole reason position is planned as unknown: the API clamps a position
-// beyond the number of existing groups, so the value that comes back is not the
-// one that was asked for. State must record what the API actually did — with a
-// known planned value this apply is the "inconsistent result after apply" error.
-func TestHostGroupCreate_StoresTheAPIsClampedPosition(t *testing.T) {
+// The API clamps a position beyond the number of existing groups, so the value
+// that comes back is not the one that was asked for. Terraform requires the
+// applied value to equal the known planned value, so state has to record the
+// planned 99 — recording the API's 1 is the "inconsistent result after apply"
+// error, and the whole apply dies. Read reports the server's truth on the next
+// refresh, which is a visible diff instead of a dead apply.
+func TestHostGroupCreate_KeepsPlannedPositionWhenAPIClamps(t *testing.T) {
 	ctx := context.Background()
 	s := hostGroupSchema(t)
 	objType := s.Type().TerraformType(ctx)
@@ -375,7 +295,7 @@ func TestHostGroupCreate_StoresTheAPIsClampedPosition(t *testing.T) {
 
 	plan := nullObjectValue(t, objType, map[string]tftypes.Value{
 		"name":     tftypes.NewValue(tftypes.String, "Production"),
-		"position": tftypes.NewValue(tftypes.Number, tftypes.UnknownValue),
+		"position": tftypes.NewValue(tftypes.Number, 99),
 	})
 	config := nullObjectValue(t, objType, map[string]tftypes.Value{
 		"name":     tftypes.NewValue(tftypes.String, "Production"),
@@ -396,8 +316,9 @@ func TestHostGroupCreate_StoresTheAPIsClampedPosition(t *testing.T) {
 	if state.Position.IsUnknown() {
 		t.Fatal("position must be resolved in state, not left unknown")
 	}
-	if state.Position.ValueInt64() != 1 {
-		t.Errorf("state must record the API's clamped position 1, got %d", state.Position.ValueInt64())
+	if state.Position.ValueInt64() != 99 {
+		t.Errorf("state must keep the planned position 99 so the apply stays consistent, got %d",
+			state.Position.ValueInt64())
 	}
 }
 
@@ -464,7 +385,11 @@ func TestHostGroupRead_KeepsStateOnServerError(t *testing.T) {
 
 func hostGroupUpdateRequest(t *testing.T, s rschema.Schema, objType tftypes.Type, configPosition *int64) resource.UpdateRequest {
 	t.Helper()
-	return hostGroupUpdateRequestWithPlan(t, s, objType, configPosition, tftypes.NewValue(tftypes.Number, tftypes.UnknownValue))
+	planned := tftypes.NewValue(tftypes.Number, 1) // no config pin: the plan keeps state's value
+	if configPosition != nil {
+		planned = tftypes.NewValue(tftypes.Number, *configPosition)
+	}
+	return hostGroupUpdateRequestWithPlan(t, s, objType, configPosition, planned)
 }
 
 func hostGroupUpdateRequestWithPlan(t *testing.T, s rschema.Schema, objType tftypes.Type, configPosition *int64, planPosition tftypes.Value) resource.UpdateRequest {
@@ -643,8 +568,10 @@ func TestHostGroupUpdate_KeepsPlannedPositionWhenRenumberedConcurrently(t *testi
 	}
 }
 
-// The mirror of the case above: when the plan is unknown the API is the only
-// source of truth, so its value must land in state rather than a stale one.
+// The mirror of the case above. A position derived from another resource's
+// not-yet-known attribute plans as unknown, and then there is nothing to keep:
+// the API's value is the only answer, and leaving the unknown in state would
+// fail the apply outright.
 func TestHostGroupUpdate_TakesAPIPositionWhenPlanIsUnknown(t *testing.T) {
 	ctx := context.Background()
 	s := hostGroupSchema(t)
@@ -658,8 +585,10 @@ func TestHostGroupUpdate_TakesAPIPositionWhenPlanIsUnknown(t *testing.T) {
 	})
 
 	want := int64(9)
+	req := hostGroupUpdateRequestWithPlan(t, s, objType, &want,
+		tftypes.NewValue(tftypes.Number, tftypes.UnknownValue))
 	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
-	r.Update(ctx, hostGroupUpdateRequest(t, s, objType, &want), resp)
+	r.Update(ctx, req, resp)
 
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())

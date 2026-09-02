@@ -56,7 +56,7 @@ resource "fivenines_host_group" "lab" {
 
 ### Optional
 
-- `position` (Number) 1-based position in the group list. Setting it slots the group in and renumbers the others, so repositioning one group can shift the recorded position of every other group. Omit it to let new groups land on top, which is the right choice unless you intend to manage the whole ordering. The API clamps a position beyond the number of existing groups, and it never reports an error for doing so: a configuration asking for a position past the end settles at the last slot, disagrees with the configuration forever, and shows a diff on every plan whose apply silently re-issues a move that renumbers the other groups. Keep configured positions within the number of groups you manage. The planned value is only known after apply because of that clamping.
+- `position` (Number) 1-based position in the group list. Setting it slots the group in and renumbers the others, so repositioning one group shifts the position of every other group in the organisation. Omit it to let new groups land on top, which is the right choice unless you intend to manage the whole ordering. A configured position is the position you are asking for: the API clamps anything beyond the number of existing groups without reporting an error, so a position past the end settles at the last slot and every later plan shows a diff that can never converge. Keep configured positions within the number of groups you manage.
 
 ### Read-Only
 

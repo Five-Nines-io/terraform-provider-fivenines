@@ -38,32 +38,6 @@ type hostGroupModel struct {
 	UpdatedAt types.String `tfsdk:"updated_at"`
 }
 
-// unknownOnPositionChange defers the planned position to apply time whenever it
-// changes. The API clamps a position beyond the number of existing groups and
-// renumbers the neighbours, so the value that comes back is not always the one
-// that was asked for — planning it as known would fail the apply on an
-// "inconsistent result" the moment the server adjusts it. Creating three groups
-// at positions 1, 2 and 3 in a single apply is enough to hit that: Terraform
-// creates them in parallel, and whichever lands first is clamped to 1.
-type unknownOnPositionChange struct{}
-
-func (m unknownOnPositionChange) Description(_ context.Context) string {
-	return "Positions are resolved by the API, so a changed position is only known after apply."
-}
-
-func (m unknownOnPositionChange) MarkdownDescription(ctx context.Context) string {
-	return m.Description(ctx)
-}
-
-func (m unknownOnPositionChange) PlanModifyInt64(_ context.Context, req planmodifier.Int64Request, resp *planmodifier.Int64Response) {
-	if req.Plan.Raw.IsNull() {
-		return // destroy plan
-	}
-	if !req.PlanValue.Equal(req.StateValue) {
-		resp.PlanValue = types.Int64Unknown()
-	}
-}
-
 // isNotFound reports whether an error is the API's 404. errors.As rather than a
 // bare type assertion: the client already wraps errors elsewhere, and a future
 // wrap would silently turn "the group vanished" into a hard apply failure.
@@ -76,6 +50,28 @@ func vanishedHostGroupDetail(id int64) string {
 	return fmt.Sprintf("Host group %d was removed outside of Terraform — the API deletes a group once its "+
 		"last instance leaves it. Re-run the apply to recreate it; if the plan was saved or refreshing is "+
 		"disabled, refresh first so Terraform can see it is gone.", id)
+}
+
+// settledPosition decides which position an apply records: the one Terraform
+// planned, or the one the API reports.
+//
+// Terraform requires the applied value to equal a KNOWN planned value, and it
+// enforces that on both ends — a provider may not plan unknown over a configured
+// position (Terraform rejects the plan itself), and it may not apply a value that
+// differs from one (Terraform rejects the result). Two things routinely make the
+// API disagree: it clamps a position beyond the number of groups, and it
+// renumbers a group whenever a NEIGHBOUR moves, so even an update that never
+// touched position can come back carrying a different one.
+//
+// So a known plan wins, and Read reports the server's truth on the next refresh —
+// a diff the practitioner can see and act on, rather than a dead apply. A plan
+// that is unknown has nothing to keep, which is the case where the practitioner
+// left position out and the API's assignment is the only answer there is.
+func settledPosition(planned, fromAPI types.Int64) types.Int64 {
+	if planned.IsUnknown() || planned.IsNull() {
+		return fromAPI
+	}
+	return planned
 }
 
 func NewHostGroupResource() resource.Resource {
@@ -108,21 +104,17 @@ func (r *hostGroupResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			},
 			"position": schema.Int64Attribute{
 				Description: "1-based position in the group list. Setting it slots the group in and renumbers " +
-					"the others, so repositioning one group can shift the recorded position of every other " +
-					"group. Omit it to let new groups land on top, which is the right choice unless you " +
-					"intend to manage the whole ordering. The API clamps a position beyond the number of " +
-					"existing groups, and it never reports an error for doing so: a configuration asking " +
-					"for a position past the end settles at the last slot, disagrees with the configuration " +
-					"forever, and shows a diff on every plan whose apply silently re-issues a move that " +
-					"renumbers the other groups. Keep configured positions within the number of groups you " +
-					"manage. The planned value is only known after apply because of that clamping.",
+					"the others, so repositioning one group shifts the position of every other group in the " +
+					"organisation. Omit it to let new groups land on top, which is the right choice unless " +
+					"you intend to manage the whole ordering. A configured position is the position you are " +
+					"asking for: the API clamps anything beyond the number of existing groups without " +
+					"reporting an error, so a position past the end settles at the last slot and every " +
+					"later plan shows a diff that can never converge. Keep configured positions within the " +
+					"number of groups you manage.",
 				Optional: true,
 				Computed: true,
 				Validators: []validator.Int64{
 					int64validator.AtLeast(1),
-				},
-				PlanModifiers: []planmodifier.Int64{
-					unknownOnPositionChange{},
 				},
 			},
 			"created_at": schema.StringAttribute{
@@ -159,19 +151,14 @@ func (r *hostGroupResource) Create(ctx context.Context, req resource.CreateReque
 		return
 	}
 
-	// The planned position is unknown whenever it changes, so the requested value
-	// has to come from the configuration.
-	var config hostGroupModel
-	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
 	input := client.CreateHostGroupInput{
 		Name: plan.Name.ValueString(),
 	}
-	if !config.Position.IsNull() && !config.Position.IsUnknown() {
-		v := config.Position.ValueInt64()
+	// Unknown means the configuration left the position out, and the API reads an
+	// omitted position as "put this group on top". There is no zero value that
+	// says the same thing, so the key has to be absent rather than empty.
+	if !plan.Position.IsNull() && !plan.Position.IsUnknown() {
+		v := plan.Position.ValueInt64()
 		input.Position = &v
 	}
 
@@ -183,7 +170,10 @@ func (r *hostGroupResource) Create(ctx context.Context, req resource.CreateReque
 		return
 	}
 
+	plannedPosition := plan.Position
 	mapHostGroupToState(group, &plan)
+	plan.Position = settledPosition(plannedPosition, plan.Position)
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -295,19 +285,7 @@ func (r *hostGroupResource) Update(ctx context.Context, req resource.UpdateReque
 
 	plannedPosition := plan.Position
 	mapHostGroupToState(group, &plan)
-
-	// A group's position is renumbered by the server whenever a NEIGHBOUR moves,
-	// so an update that never touched position can still come back carrying a
-	// different one. The plan modifier cannot catch that: this configuration does
-	// not move this group, so the planned position equals state and stays known.
-	// Terraform rejects an applied value that differs from a known planned one, so
-	// writing the server's number here fails the whole apply — two managed groups
-	// in a single apply, where the other one moves, is enough to hit it. Keep the
-	// planned value instead; the next refresh reports the server's truth and plans
-	// the correction, which is a diff rather than a dead apply.
-	if !plannedPosition.IsUnknown() && !plannedPosition.IsNull() {
-		plan.Position = plannedPosition
-	}
+	plan.Position = settledPosition(plannedPosition, plan.Position)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }

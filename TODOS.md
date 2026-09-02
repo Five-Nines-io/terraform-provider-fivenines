@@ -98,6 +98,27 @@
   sequential 30s requests before the ceiling reports anything
 - Fix: cap the backoff, and bound total records rather than pages
 
+### Unit tests cannot see Terraform's plan validation
+- Driving `Create`/`Update` directly, the way every `internal/resources/*_test.go`
+  does, skips the step where Terraform compares the planned object to the
+  configuration. A provider can be structurally unable to produce a valid plan
+  while that entire suite stays green
+- Proof: #13 shipped a plan modifier that set `position` to unknown whenever it
+  changed. Every unit test passed. Real Terraform rejected it for every
+  practitioner who configured a position, before the API was called at all —
+  `planned value cty.UnknownVal(cty.Number) does not match config value
+  cty.NumberIntVal(5)`. A provider may not plan unknown over a known config value,
+  even for Optional+Computed
+- #13 added `internal/provider/host_group_plan_test.go`: real Terraform against an
+  httptest server, so it needs no organisation and no key and runs in `make test`
+  wherever the terraform binary is. The other six resources have no equivalent —
+  their plan-time behaviour is only covered by the TF_ACC suite, which does not
+  run in CI and needs a staging org that does not exist yet
+- Fix: extend the hermetic pattern to the resources whose plan behaviour is
+  non-trivial — uptime monitor (`protocolForbidden`), status page (items/sections
+  semantics), task (`schedule_type` switching)
+- Found by: /ship Codex structured review, 2026-09-02
+
 ### Required name attributes are overwritten from the API response
 - `mapXToState` writes the API's `name` into state for instances, tasks, network
   devices, status pages and host groups, but `name` is `Required` (not Computed)

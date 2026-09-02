@@ -757,6 +757,41 @@ type UpdateMQTTTopicMonitorInput struct {
 	CapturePayload *bool `json:"capture_payload,omitempty"`
 }
 
+// APIToken represents a bearer credential for this API.
+//
+// The plaintext value is NOT part of this struct's normal life: the server
+// stores only a SHA-256 digest, so `Token` is populated by CreateAPIToken and
+// by nothing else, ever. `TokenPrefix` (the first 8 characters) is what
+// identifies a row against a secret you already hold.
+type APIToken struct {
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	TokenPrefix string   `json:"token_prefix"`
+	Scopes      []string `json:"scopes"`
+	ExpiresAt   *string  `json:"expires_at"`
+	LastUsedAt  *string  `json:"last_used_at"`
+	RevokedAt   *string  `json:"revoked_at"`
+	Active      bool     `json:"active"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at"`
+	// Token is the plaintext bearer value, returned by the create call only.
+	Token string `json:"token,omitempty"`
+}
+
+// CreateAPITokenInput is the request body for creating an API token.
+//
+// There is no update counterpart: the API exposes create, list and revoke, so
+// every field here is immutable once minted.
+type CreateAPITokenInput struct {
+	Name string `json:"name"`
+	// Scopes accepts "read" and/or "write". Omitted means ["read"]; an explicit
+	// empty array is refused (422) rather than treated as the default.
+	Scopes []string `json:"scopes,omitempty"`
+	// ExpiresAt is ISO 8601 and must be in the future. Omitted means a token
+	// that never expires.
+	ExpiresAt *string `json:"expires_at,omitempty"`
+}
+
 // APIError represents an error response from the API.
 type APIError struct {
 	StatusCode int

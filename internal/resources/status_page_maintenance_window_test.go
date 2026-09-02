@@ -18,7 +18,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
 
-// --- parseWindowTime ---
+// --- parseISOTime ---
 
 func TestParseWindowTime(t *testing.T) {
 	paris, err := time.LoadLocation("Europe/Paris")
@@ -48,18 +48,18 @@ func TestParseWindowTime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, zoned, ok := parseWindowTime(tt.input, paris)
+			got, zoned, ok := parseISOTime(tt.input, paris)
 			if ok != tt.wantOK {
-				t.Fatalf("parseWindowTime(%q) ok = %v, want %v", tt.input, ok, tt.wantOK)
+				t.Fatalf("parseISOTime(%q) ok = %v, want %v", tt.input, ok, tt.wantOK)
 			}
 			if !ok {
 				return
 			}
 			if zoned != tt.wantZoned {
-				t.Errorf("parseWindowTime(%q) zoned = %v, want %v", tt.input, zoned, tt.wantZoned)
+				t.Errorf("parseISOTime(%q) zoned = %v, want %v", tt.input, zoned, tt.wantZoned)
 			}
 			if utc := got.UTC().Format(time.RFC3339); utc != tt.wantUTC {
-				t.Errorf("parseWindowTime(%q) = %s, want %s", tt.input, utc, tt.wantUTC)
+				t.Errorf("parseISOTime(%q) = %s, want %s", tt.input, utc, tt.wantUTC)
 			}
 		})
 	}
@@ -244,6 +244,14 @@ func TestStatusPageMaintenanceWindowResource_ValidateConfig(t *testing.T) {
 		{"mixed offset information", "2026-09-02T00:00:00", "2026-09-01T22:00:00Z", false},
 		// An offset that actually resolves the apparent inversion.
 		{"inverted wall clock, ordered instants", "2026-09-02T00:00:00+02:00", "2026-09-01T23:00:00Z", false},
+		// A bare date parses since the layouts moved to mapping.go and gained the
+		// date-only form for api_token expiries. The window API's own format
+		// requires a time, so these are values it will refuse anyway — but the
+		// ordering check now sees them, and that is a decision this table records
+		// rather than a side effect nobody pinned.
+		{"date only, ordered", "2026-09-01", "2026-09-02", false},
+		{"date only, inverted", "2026-09-02", "2026-09-01", true},
+		{"date only against a local time, inverted", "2026-09-02T10:00:00", "2026-09-02", true},
 	}
 
 	for _, tt := range tests {

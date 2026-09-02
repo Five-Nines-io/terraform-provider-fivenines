@@ -226,8 +226,8 @@ func (r *statusPageMaintenanceWindowResource) ValidateConfig(ctx context.Context
 		return
 	}
 
-	start, startZoned, startOK := parseWindowTime(config.StartsAt.ValueString(), time.UTC)
-	end, endZoned, endOK := parseWindowTime(config.EndsAt.ValueString(), time.UTC)
+	start, startZoned, startOK := parseISOTime(config.StartsAt.ValueString(), time.UTC)
+	end, endZoned, endOK := parseISOTime(config.EndsAt.ValueString(), time.UTC)
 	if !startOK || !endOK || startZoned != endZoned {
 		return
 	}
@@ -490,71 +490,6 @@ func mapMaintenanceWindowToState(w *client.StatusPageMaintenanceWindow, state *s
 	state.State = types.StringValue(w.State)
 	state.CreatedAt = types.StringValue(w.CreatedAt)
 	state.UpdatedAt = types.StringValue(w.UpdatedAt)
-}
-
-// preserveTimestamp keeps the configured timestamp string whenever it denotes
-// the same instant as the value the API returned. The API normalizes timestamps
-// into the status page timezone, so a window configured as
-// "2026-09-01T22:00:00Z" comes back as "2026-09-02T00:00:00+02:00" — the same
-// moment, but a permanent diff if stored verbatim.
-func preserveTimestamp(configured types.String, apiValue, timeZone string) types.String {
-	if !isKnown(configured) {
-		return types.StringValue(apiValue)
-	}
-	loc := time.UTC
-	if timeZone != "" {
-		if l, err := time.LoadLocation(timeZone); err == nil {
-			loc = l
-		}
-	}
-	want, _, wantOK := parseWindowTime(configured.ValueString(), loc)
-	got, _, gotOK := parseWindowTime(apiValue, loc)
-	if wantOK && gotOK && want.Equal(got) {
-		return configured
-	}
-	return types.StringValue(apiValue)
-}
-
-// Layouts accepted by parseWindowTime, after the date/time separator has been
-// normalized to "T". The zoned set carries an explicit UTC offset; the local
-// set is resolved in the status page timezone.
-var (
-	maintenanceWindowZonedLayouts = []string{
-		"2006-01-02T15:04:05.999999999Z07:00",
-		"2006-01-02T15:04:05.999999999Z0700",
-		"2006-01-02T15:04Z07:00",
-		"2006-01-02T15:04Z0700",
-	}
-	maintenanceWindowLocalLayouts = []string{
-		"2006-01-02T15:04:05.999999999",
-		"2006-01-02T15:04",
-	}
-)
-
-// parseWindowTime parses an extended ISO 8601 timestamp, resolving values with
-// no UTC offset in loc. It reports whether the input carried its own offset,
-// and whether it parsed at all.
-func parseWindowTime(s string, loc *time.Location) (parsed time.Time, zoned bool, ok bool) {
-	// Normalise the two spellings the API's pattern allows but Go's layouts do
-	// not: a space in place of the T, and whitespace before the offset. Replacing
-	// the first space blindly turns "...00:00 +02:00" into "...00:00T+02:00",
-	// which then fails to parse and makes the attribute drift on every read.
-	s = strings.TrimSpace(s)
-	if len(s) > 10 && s[10] == ' ' {
-		s = s[:10] + "T" + s[11:]
-	}
-	s = strings.Join(strings.Fields(s), "")
-	for _, layout := range maintenanceWindowZonedLayouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, true, true
-		}
-	}
-	for _, layout := range maintenanceWindowLocalLayouts {
-		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
-			return t, false, true
-		}
-	}
-	return time.Time{}, false, false
 }
 
 // affectedItemsToState converts the API list back to state. An empty API list

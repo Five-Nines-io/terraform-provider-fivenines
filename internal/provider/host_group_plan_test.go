@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os/exec"
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
@@ -25,15 +24,7 @@ import (
 //	cty.NumberIntVal(5)
 func hostGroupPlanTest(t *testing.T, respond func(w http.ResponseWriter, r *http.Request)) *httptest.Server {
 	t.Helper()
-	if _, err := exec.LookPath("terraform"); err != nil {
-		t.Skip("terraform CLI not on PATH — skipping plan-validation test")
-	}
-	srv := httptest.NewServer(http.HandlerFunc(respond))
-	t.Cleanup(srv.Close)
-	t.Setenv("FIVENINES_BASE_URL", srv.URL)
-	t.Setenv("FIVENINES_API_KEY", "fn_test")
-	t.Setenv("TF_ACC", "1") // hermetic: the fake server above is the whole API
-	return srv
+	return planTest(t, respond)
 }
 
 func hostGroupHandler(position int) func(http.ResponseWriter, *http.Request) {

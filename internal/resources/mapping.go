@@ -1,6 +1,9 @@
 package resources
 
 import (
+	"strings"
+	"time"
+
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -120,4 +123,79 @@ func optionalNonEmptyStringOrKeep(s *string, current types.String) types.String 
 		return current
 	}
 	return types.StringNull()
+}
+
+// preserveTimestamp keeps the configured timestamp string whenever it denotes
+// the same instant as the value the API returned. The API re-renders timestamps
+// in its own form — a maintenance window configured as "2026-09-01T22:00:00Z"
+// comes back as "2026-09-02T00:00:00+02:00" in the status page timezone, and an
+// api_token expiry written as "2026-12-01" comes back as
+// "2026-12-01T00:00:00Z". The same moment either way, but a permanent diff if
+// stored verbatim.
+//
+// Pass "" for timeZone when the API renders in UTC, which is every caller but
+// the maintenance window.
+func preserveTimestamp(configured types.String, apiValue, timeZone string) types.String {
+	if !isKnown(configured) {
+		return types.StringValue(apiValue)
+	}
+	loc := time.UTC
+	if timeZone != "" {
+		if l, err := time.LoadLocation(timeZone); err == nil {
+			loc = l
+		}
+	}
+	want, _, wantOK := parseISOTime(configured.ValueString(), loc)
+	got, _, gotOK := parseISOTime(apiValue, loc)
+	if wantOK && gotOK && want.Equal(got) {
+		return configured
+	}
+	return types.StringValue(apiValue)
+}
+
+// Layouts accepted by parseISOTime, after the date/time separator has been
+// normalized to "T". The zoned set carries an explicit UTC offset; the local set
+// is resolved in the caller-supplied location — the status page timezone for a
+// maintenance window, UTC for everything else.
+var (
+	isoZonedLayouts = []string{
+		"2006-01-02T15:04:05.999999999Z07:00",
+		"2006-01-02T15:04:05.999999999Z0700",
+		"2006-01-02T15:04Z07:00",
+		"2006-01-02T15:04Z0700",
+	}
+	isoLocalLayouts = []string{
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02T15:04",
+		// Date-only, which the api_tokens API accepts for expires_at (a
+		// maintenance window's own format requires a time, so a bare date there
+		// is refused by the API long before it reaches this comparison).
+		"2006-01-02",
+	}
+)
+
+// parseISOTime parses an extended ISO 8601 timestamp, resolving values with no
+// UTC offset in loc. It reports whether the input carried its own offset, and
+// whether it parsed at all.
+func parseISOTime(s string, loc *time.Location) (parsed time.Time, zoned bool, ok bool) {
+	// Normalise the two spellings maintenanceWindowTimestampRE allows but Go's
+	// layouts do not: a space in place of the T, and whitespace before the offset. Replacing
+	// the first space blindly turns "...00:00 +02:00" into "...00:00T+02:00",
+	// which then fails to parse and makes the attribute drift on every read.
+	s = strings.TrimSpace(s)
+	if len(s) > 10 && s[10] == ' ' {
+		s = s[:10] + "T" + s[11:]
+	}
+	s = strings.Join(strings.Fields(s), "")
+	for _, layout := range isoZonedLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true, true
+		}
+	}
+	for _, layout := range isoLocalLayouts {
+		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
+			return t, false, true
+		}
+	}
+	return time.Time{}, false, false
 }

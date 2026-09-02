@@ -17,6 +17,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_host_group` | Named groups of hosts |
 | `fivenines_mqtt_broker` | MQTT brokers watched by one of your agent hosts |
 | `fivenines_mqtt_topic_monitor` | Per-topic freshness & payload checks on a broker |
+| `fivenines_api_token` | API tokens for this provider, so key rotation is code |
 
 ## Data Sources
 
@@ -170,9 +171,38 @@ terraform apply   # create resources
 
 The API key can be provided in three ways (in order of precedence):
 
-1. Provider configuration: `api_key = "fn_live_..."`
-2. Environment variable: `export FIVENINES_API_KEY="fn_live_..."`
+1. Provider configuration: `api_key = "fn_..."`
+2. Environment variable: `export FIVENINES_API_KEY="fn_..."`
 3. Terraform variable: `var.fivenines_api_key`
+
+### Rotating the key
+
+API keys are themselves a resource, so rotation can be a scheduled apply instead
+of a browser errand:
+
+```hcl
+resource "fivenines_api_token" "deploy" {
+  name       = "deploy-${time_rotating.key.id}"
+  scopes     = ["write"]
+  expires_at = timeadd(time_rotating.key.rotation_rfc3339, "168h")
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+Three things to know before you use it:
+
+- **The value is returned once.** `token` is readable in state and outputs, but
+  the server keeps only a digest — nothing can hand it back later. An imported
+  token has no value at all.
+- **`create_before_destroy` is the rotation order.** Create the replacement,
+  deploy it, then revoke the old one. Without it Terraform revokes first and
+  everything holding the old key fails in the gap.
+- **Managing tokens needs a `write`-scoped key**, and no token can grant a scope
+  it does not hold itself. Destroying the token the provider is authenticated
+  with is refused unless you set `allow_self_revoke = true`.
 
 ## Secrets in state
 
@@ -189,6 +219,7 @@ What ends up there:
 | `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
 | `fivenines_integration.url`, `secret`, `routing_key`, `user_key`, `app_token` | Write-only — the API never serializes an integration's metadata, so state holds the value you configured. |
 | `fivenines_integration.webhook_signing_secret`, `webhook_verification_token` | Returned once, by the create call, and never readable again. State is the **only** copy: lose it and the signing key has to be rotated by replacing the channel. |
+| `fivenines_api_token.token` | Returned once, by the create call. The server keeps only a SHA-256 digest, so state is the **only** copy — and unlike the rows above, it is a key to the API itself. Anyone who can read the state file can act as that token, up to its scopes. An imported token has no value here at all. |
 
 ### Upgrading: unset attributes are now null, not `""`
 
@@ -260,6 +291,10 @@ terraform import fivenines_mqtt_broker.factory <broker-uuid>
 
 # Topic monitors live under their broker, so both UUIDs are part of the ID
 terraform import fivenines_mqtt_topic_monitor.temperature <broker-uuid>:<monitor-uuid>
+
+# API tokens are the one numeric id here, and import brings the metadata only:
+# `token` stays null, because the value was readable exactly once
+terraform import fivenines_api_token.ci <api-token-id>
 ```
 
 `fivenines_integration` has no import: the API never returns an integration's
@@ -298,7 +333,7 @@ acceptance tests notice when the API changes underneath it, so they drive real
 Terraform plans and applies against a live organisation:
 
 ```bash
-TF_ACC=1 FIVENINES_API_KEY=fn_live_... make testacc
+TF_ACC=1 FIVENINES_API_KEY=fn_... make testacc
 ```
 
 They need the `terraform` CLI on `PATH`, and they skip entirely without

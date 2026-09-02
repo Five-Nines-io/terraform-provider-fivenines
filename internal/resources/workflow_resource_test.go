@@ -1244,6 +1244,212 @@ func TestWorkflowUpdate_ActivatesAPausedWorkflow(t *testing.T) {
 	}
 }
 
+// Dropping a pinned layout has to republish the graph without a canvas, which is
+// how the API is asked to lay it out again. Leaving the published version alone
+// while state forgets the canvas hides a stale layout forever: Read skips an
+// unconfigured canvas, so nothing would ever surface it again.
+func TestWorkflowUpdate_RepublishesWhenAPinnedCanvasIsDropped(t *testing.T) {
+	ctx := context.Background()
+	s := workflowSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	graph := `{"nodes":[],"edges":[]}`
+	var versionBody map[string]interface{}
+	var versionCalls int
+	r := newWorkflowResource(t, func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case strings.HasSuffix(req.URL.Path, "/versions"):
+			versionCalls++
+			json.NewDecoder(req.Body).Decode(&versionBody)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"version": map[string]interface{}{"id": 11, "version_number": 2, "created_at": "x"},
+			})
+		case strings.HasSuffix(req.URL.Path, "/publish"):
+			w.WriteHeader(http.StatusOK)
+		default:
+			json.NewEncoder(w).Encode(workflowJSON(map[string]interface{}{"published_version_id": 11}))
+		}
+	})
+
+	plan := nullObjectValue(t, objType, map[string]tftypes.Value{
+		"id":                   tftypes.NewValue(tftypes.Number, 42),
+		"name":                 tftypes.NewValue(tftypes.String, "CPU Alert"),
+		"active":               tftypes.NewValue(tftypes.Bool, false),
+		"execution_graph_json": tftypes.NewValue(tftypes.String, graph),
+	})
+	state := nullObjectValue(t, objType, map[string]tftypes.Value{
+		"id":                   tftypes.NewValue(tftypes.Number, 42),
+		"name":                 tftypes.NewValue(tftypes.String, "CPU Alert"),
+		"active":               tftypes.NewValue(tftypes.Bool, false),
+		"execution_graph_json": tftypes.NewValue(tftypes.String, graph),
+		"canvas_data_json":     tftypes.NewValue(tftypes.String, `{"viewport":{"zoom":1}}`),
+	})
+
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: state}}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: s, Raw: plan},
+		State:  tfsdk.State{Schema: s, Raw: state},
+		Config: tfsdk.Config{Schema: s, Raw: plan},
+	}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if versionCalls != 1 {
+		t.Fatalf("dropping a pinned canvas must publish a new version, got %d", versionCalls)
+	}
+	if _, ok := versionBody["canvas_data"]; ok {
+		t.Errorf("the republish must omit canvas_data so the API lays the graph out, got %v",
+			versionBody["canvas_data"])
+	}
+}
+
+// The same drop on a workflow that has no graph has nothing to republish, and
+// must not try: publishing needs a graph to send.
+func TestWorkflowUpdate_DroppedCanvasWithNoGraphPublishesNothing(t *testing.T) {
+	ctx := context.Background()
+	s := workflowSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	var versionCalls int
+	r := newWorkflowResource(t, func(w http.ResponseWriter, req *http.Request) {
+		if strings.HasSuffix(req.URL.Path, "/versions") {
+			versionCalls++
+		}
+		json.NewEncoder(w).Encode(workflowJSON(nil))
+	})
+
+	plan := nullObjectValue(t, objType, map[string]tftypes.Value{
+		"id":     tftypes.NewValue(tftypes.Number, 42),
+		"name":   tftypes.NewValue(tftypes.String, "CPU Alert"),
+		"active": tftypes.NewValue(tftypes.Bool, false),
+	})
+	state := nullObjectValue(t, objType, map[string]tftypes.Value{
+		"id":               tftypes.NewValue(tftypes.Number, 42),
+		"name":             tftypes.NewValue(tftypes.String, "CPU Alert"),
+		"active":           tftypes.NewValue(tftypes.Bool, false),
+		"canvas_data_json": tftypes.NewValue(tftypes.String, `{"viewport":{"zoom":1}}`),
+	})
+
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: state}}
+	r.Update(ctx, resource.UpdateRequest{
+		Plan:   tfsdk.Plan{Schema: s, Raw: plan},
+		State:  tfsdk.State{Schema: s, Raw: state},
+		Config: tfsdk.Config{Schema: s, Raw: plan},
+	}, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	if versionCalls != 0 {
+		t.Errorf("there is no graph to republish, got %d version calls", versionCalls)
+	}
+}
+
+// --- shouldRepublishCanvas ---
+
+func TestShouldRepublishCanvas(t *testing.T) {
+	pinned := jsontypes.NewNormalizedValue(`{"viewport":{"zoom":1}}`)
+
+	tests := []struct {
+		name            string
+		planned, stored jsontypes.Normalized
+		want            bool
+	}{
+		{"never pinned", jsontypes.NewNormalizedNull(), jsontypes.NewNormalizedNull(), false},
+		{"newly pinned", pinned, jsontypes.NewNormalizedNull(), true},
+		{"dropped", jsontypes.NewNormalizedNull(), pinned, true},
+		{"reformatted", jsontypes.NewNormalizedValue("{\n  \"viewport\": { \"zoom\": 1 }\n}"), pinned, false},
+		{"moved", jsontypes.NewNormalizedValue(`{"viewport":{"zoom":4}}`), pinned, true},
+		{"unknown waits", jsontypes.NewNormalizedUnknown(), pinned, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, diags := shouldRepublishCanvas(context.Background(), tt.planned, tt.stored)
+			if diags.HasError() {
+				t.Fatalf("diagnostics: %v", diags)
+			}
+			if got != tt.want {
+				t.Errorf("shouldRepublishCanvas = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// --- unresolved creation-time inputs ---
+
+// An unknown template_slug used to fall out of the template branch and quietly
+// create a plain workflow instead. Failing loudly beats creating the wrong thing.
+func TestWorkflowCreate_RejectsAnUnknownTemplateSlug(t *testing.T) {
+	ctx := context.Background()
+	s := workflowSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	var called bool
+	r := newWorkflowResource(t, func(w http.ResponseWriter, req *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(workflowJSON(nil))
+	})
+
+	plan := nullObjectValue(t, objType, map[string]tftypes.Value{
+		"name":                 tftypes.NewValue(tftypes.String, "CPU Alert"),
+		"active":               tftypes.NewValue(tftypes.Bool, false),
+		"template_slug":        tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+		"execution_graph_json": tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+	})
+
+	resp := &resource.CreateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Create(ctx, resource.CreateRequest{
+		Plan:   tfsdk.Plan{Schema: s, Raw: plan},
+		Config: tfsdk.Config{Schema: s, Raw: plan},
+	}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("an unknown template_slug must fail rather than create a plain workflow")
+	}
+	if called {
+		t.Error("nothing must be created before the slug is known")
+	}
+}
+
+// An unknown canvas would be omitted from the published version and then written
+// into state as unknown, which fails the apply with a much vaguer message.
+func TestWorkflowCreate_RejectsAnUnknownCanvas(t *testing.T) {
+	ctx := context.Background()
+	s := workflowSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	var called bool
+	r := newWorkflowResource(t, func(w http.ResponseWriter, req *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(workflowJSON(nil))
+	})
+
+	plan := nullObjectValue(t, objType, map[string]tftypes.Value{
+		"name":                 tftypes.NewValue(tftypes.String, "CPU Alert"),
+		"active":               tftypes.NewValue(tftypes.Bool, false),
+		"execution_graph_json": tftypes.NewValue(tftypes.String, `{"nodes":[]}`),
+		"canvas_data_json":     tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+	})
+
+	resp := &resource.CreateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Create(ctx, resource.CreateRequest{
+		Plan:   tfsdk.Plan{Schema: s, Raw: plan},
+		Config: tfsdk.Config{Schema: s, Raw: plan},
+	}, resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("an unknown canvas must fail rather than be dropped from the version")
+	}
+	if called {
+		t.Error("nothing must be created before the canvas is known")
+	}
+}
+
 // --- mapWorkflowToState ---
 
 func TestMapWorkflowToState_LeavesGraphAttributesAlone(t *testing.T) {

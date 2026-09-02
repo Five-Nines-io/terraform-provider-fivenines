@@ -96,7 +96,7 @@ func (r *workflowResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			// would land in state, and every republish would then owe that
 			// generated value an update the practitioner never asked for.
 			"canvas_data_json": schema.StringAttribute{
-				Description: "JSON-encoded React Flow canvas layout, published alongside the execution graph. Leave unset to let the API generate a layout for the graph. Compared semantically, so reformatting it does not publish a new workflow version.",
+				Description: "JSON-encoded React Flow canvas layout, published alongside the execution graph. Omit it and the API lays the graph out itself; the generated layout is not tracked here. Removing it from a configuration that had one stops Terraform managing the layout, it does not restore the generated one. Requires execution_graph_json, since a layout is only ever published as part of a workflow version. Compared semantically, so reformatting it does not publish a new version.",
 				Optional:    true,
 				CustomType:  jsontypes.NormalizedType{},
 			},
@@ -185,15 +185,18 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 		return
 	}
 
+	resp.Diagnostics.Append(unresolvedInputDiagnostics(plan)...)
 	if d := canvasNeedsGraphDiagnostic(plan.ExecutionGraphJSON, plan.CanvasDataJSON); d != nil {
 		resp.Diagnostics.Append(d)
+	}
+	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	var workflow *client.Workflow
 	var err error
 
-	if !plan.TemplateSlug.IsNull() && !plan.TemplateSlug.IsUnknown() {
+	if !plan.TemplateSlug.IsNull() {
 		slug := plan.TemplateSlug.ValueString()
 		tflog.Debug(ctx, "Creating workflow from template", map[string]interface{}{"slug": slug})
 
@@ -314,8 +317,11 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
+	resp.Diagnostics.Append(unresolvedInputDiagnostics(plan)...)
 	if d := canvasNeedsGraphDiagnostic(plan.ExecutionGraphJSON, plan.CanvasDataJSON); d != nil {
 		resp.Diagnostics.Append(d)
+	}
+	if resp.Diagnostics.HasError() {
 		return
 	}
 
@@ -334,13 +340,16 @@ func (r *workflowResource) Update(ctx context.Context, req resource.UpdateReques
 	// updated at all.
 	graphChanged, d := shouldPublishGraph(ctx, plan.ExecutionGraphJSON, state.ExecutionGraphJSON)
 	resp.Diagnostics.Append(d...)
-	canvasChanged, d := shouldPublishGraph(ctx, plan.CanvasDataJSON, state.CanvasDataJSON)
+	canvasChanged, d := shouldRepublishCanvas(ctx, plan.CanvasDataJSON, state.CanvasDataJSON)
 	resp.Diagnostics.Append(d...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	if graphChanged || canvasChanged {
+	// A canvas can be dropped from a workflow that has no graph either — there is
+	// simply no version to cut in that case.
+	hasGraph := !plan.ExecutionGraphJSON.IsNull() && !plan.ExecutionGraphJSON.IsUnknown()
+	if hasGraph && (graphChanged || canvasChanged) {
 		if err := r.publishGraph(ctx, id, plan.ExecutionGraphJSON, plan.CanvasDataJSON); err != nil {
 			resp.Diagnostics.AddError("Error publishing workflow version", err.Error())
 			return
@@ -413,6 +422,64 @@ func workflowUpdateInput(plan workflowModel) client.UpdateWorkflowInput {
 		Description:     stringPtr(plan.Description),
 		IntervalSeconds: int64Ptr(plan.IntervalSeconds),
 	}
+}
+
+// unresolvedInputDiagnostics rejects the inputs that are read once, at publish
+// time, while they are still unknown. Terraform re-plans with dependencies
+// resolved before it applies, so this should not be reachable — but every
+// alternative if it ever is comes out worse: an unknown template_slug falls out
+// of the template branch and quietly creates a plain workflow instead, and an
+// unknown canvas is dropped from the published version and then written into
+// state, failing the apply with a far vaguer message than this one.
+func unresolvedInputDiagnostics(plan workflowModel) diag.Diagnostics {
+	var diags diag.Diagnostics
+	for _, input := range []struct {
+		name    string
+		unknown bool
+	}{
+		{"template_slug", plan.TemplateSlug.IsUnknown()},
+		{"canvas_data_json", plan.CanvasDataJSON.IsUnknown()},
+	} {
+		if !input.unknown {
+			continue
+		}
+		diags.Append(diag.NewAttributeErrorDiagnostic(
+			path.Root(input.name),
+			"Value is not known at apply time",
+			fmt.Sprintf("%s is read once, when the workflow version is published, so it has to be "+
+				"known before the workflow is created. Remove whatever leaves it unknown at plan "+
+				"time, or give it a literal value.", input.name),
+		))
+	}
+	return diags
+}
+
+// shouldRepublishCanvas is deliberately not shouldPublishGraph. For the graph, a
+// null plan means "no graph configured, publish nothing". For the canvas it
+// means "stop pinning this layout", and the only way to act on that is to
+// republish the graph without a canvas so the API lays it out again. Treating
+// null as "nothing to do" left the pinned layout on the published version while
+// Terraform quietly dropped it from state.
+func shouldRepublishCanvas(ctx context.Context, planned, stored jsontypes.Normalized) (bool, diag.Diagnostics) {
+	var diags diag.Diagnostics
+
+	if planned.IsUnknown() || stored.IsUnknown() {
+		return false, diags
+	}
+	if planned.IsNull() != stored.IsNull() {
+		// Newly pinned, or newly dropped. Both change the published version.
+		return true, diags
+	}
+	if planned.IsNull() {
+		return false, diags
+	}
+
+	unchanged, d := planned.StringSemanticEquals(ctx, stored)
+	diags.Append(d...)
+	if diags.HasError() {
+		return false, diags
+	}
+	return !unchanged, diags
 }
 
 // canvasNeedsGraphDiagnostic rejects a layout pinned with no graph to publish it

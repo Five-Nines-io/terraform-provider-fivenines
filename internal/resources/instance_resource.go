@@ -57,7 +57,10 @@ func (r *instanceResource) Metadata(_ context.Context, req resource.MetadataRequ
 
 func (r *instanceResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Manages a FiveNines instance (monitored server).",
+		Description: "Manages a FiveNines instance (monitored server).\n\n" +
+			"Destroying an instance waits for the deletion to finish. The API answers 202 and tears " +
+			"the host down asynchronously, so the provider polls until it is gone (up to five minutes) " +
+			"before releasing state, which is what makes replacing a host in a single apply safe.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				Description: "Unique identifier (UUID).",
@@ -228,13 +231,10 @@ func (r *instanceResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
-	displayName := plan.DisplayName.ValueString()
-	enabled := plan.Enabled.ValueBool()
-	maintenance := plan.MaintenanceMode.ValueBool()
 	input := client.UpdateInstanceInput{
-		DisplayName:     &displayName,
-		Enabled:         &enabled,
-		MaintenanceMode: &maintenance,
+		DisplayName:     stringPtr(plan.DisplayName),
+		Enabled:         boolPtr(plan.Enabled),
+		MaintenanceMode: boolPtr(plan.MaintenanceMode),
 	}
 
 	var instance *client.Instance
@@ -267,14 +267,26 @@ func (r *instanceResource) Delete(ctx context.Context, req resource.DeleteReques
 		return
 	}
 
-	tflog.Debug(ctx, "Deleting instance", map[string]interface{}{"id": state.ID.ValueString()})
+	id := state.ID.ValueString()
+	tflog.Debug(ctx, "Deleting instance", map[string]interface{}{"id": id})
 
-	err := r.client.DeleteInstance(ctx, state.ID.ValueString())
+	accepted, err := r.client.DeleteInstance(ctx, id)
 	if err != nil {
 		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting instance", err.Error())
+		return
+	}
+
+	// A 202 means the host is only queued for deletion. Returning here would
+	// drop it from state while it still exists, which breaks replacing a host
+	// in a single apply.
+	if accepted {
+		tflog.Debug(ctx, "Waiting for asynchronous instance deletion", map[string]interface{}{"id": id})
+		if err := r.client.WaitForInstanceDeletion(ctx, id, client.AsyncDeletionTimeout); err != nil {
+			resp.Diagnostics.AddError("Error waiting for instance deletion", err.Error())
+		}
 	}
 }
 
@@ -287,28 +299,22 @@ func mapInstanceToState(i *client.Instance, state *instanceModel) {
 	state.DisplayName = types.StringValue(i.DisplayName)
 	state.Enabled = types.BoolValue(i.Enabled)
 	state.MaintenanceMode = types.BoolValue(i.MaintenanceMode)
-	state.Hostname = types.StringValue(i.Hostname)
-	state.OperatingSystemName = types.StringValue(i.OperatingSystemName)
-	state.KernelVersion = types.StringValue(i.KernelVersion)
-	state.CPUArchitecture = types.StringValue(i.CPUArchitecture)
-	state.CPUModel = types.StringValue(i.CPUModel)
-	state.CPUCount = types.Int64Value(int64(i.CPUCount))
-	state.MemorySize = types.Int64Value(i.MemorySize)
-	state.IPv4 = types.StringValue(i.IPv4)
-	state.IPv6 = types.StringValue(i.IPv6)
-	state.Source = types.StringValue(i.Source)
-	state.ClientVersion = types.StringValue(i.ClientVersion)
+	// Everything the agent reports is null until it first syncs.
+	state.Hostname = optionalString(i.Hostname)
+	state.OperatingSystemName = optionalString(i.OperatingSystemName)
+	state.KernelVersion = optionalString(i.KernelVersion)
+	state.CPUArchitecture = optionalString(i.CPUArchitecture)
+	state.CPUModel = optionalString(i.CPUModel)
+	state.CPUCount = optionalInt64(i.CPUCount)
+	state.MemorySize = optionalInt64(i.MemorySize)
+	state.IPv4 = optionalString(i.IPv4)
+	state.IPv6 = optionalString(i.IPv6)
+	state.Source = optionalString(i.Source)
+	state.ClientVersion = optionalString(i.ClientVersion)
 	state.Status = types.StringValue(i.Status)
 	state.FirstSyncAt = optionalString(i.FirstSyncAt)
 	state.LastSyncAt = optionalString(i.LastSyncAt)
 	state.LastRequestAt = optionalString(i.LastRequestAt)
 	state.CreatedAt = types.StringValue(i.CreatedAt)
 	state.UpdatedAt = types.StringValue(i.UpdatedAt)
-}
-
-func optionalString(s *string) types.String {
-	if s == nil {
-		return types.StringNull()
-	}
-	return types.StringValue(*s)
 }

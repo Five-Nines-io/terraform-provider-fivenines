@@ -149,7 +149,7 @@ func (r *dashboardResource) Create(ctx context.Context, req resource.CreateReque
 
 	input := client.CreateDashboardInput{
 		Name:        plan.Name.ValueString(),
-		Description: nullableString(plan.Description),
+		Description: stringPtr(plan.Description),
 	}
 
 	tflog.Debug(ctx, "Creating dashboard", map[string]interface{}{"name": input.Name})
@@ -209,7 +209,7 @@ func (r *dashboardResource) createFromTemplate(ctx context.Context, plan dashboa
 
 	updated, err := r.client.UpdateDashboard(ctx, dashboard.ID, "", client.UpdateDashboardInput{
 		Name:        name,
-		Description: nullableString(plan.Description),
+		Description: stringPtr(plan.Description),
 	})
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -261,7 +261,7 @@ func (r *dashboardResource) Update(ctx context.Context, req resource.UpdateReque
 	id := state.ID.ValueInt64()
 	input := client.UpdateDashboardInput{
 		Name:        plan.Name.ValueString(),
-		Description: nullableString(plan.Description),
+		Description: stringPtr(plan.Description),
 	}
 
 	var dashboard *client.Dashboard
@@ -338,17 +338,6 @@ func mapDashboardToState(d *client.Dashboard, state *dashboardModel) {
 	state.VisualizationCount = types.Int64Value(d.VisualizationCount)
 	state.CreatedAt = types.StringValue(d.CreatedAt)
 	state.UpdatedAt = types.StringValue(d.UpdatedAt)
-}
-
-// nullableString turns a Terraform string into the pointer the dashboards API
-// expects, where an explicit null clears the field and a missing key would
-// leave it alone. Unknown is treated as null: nothing else can be sent.
-func nullableString(v types.String) *string {
-	if v.IsNull() || v.IsUnknown() {
-		return nil
-	}
-	s := v.ValueString()
-	return &s
 }
 
 // trimmedPattern matches a string with no leading or trailing whitespace and at

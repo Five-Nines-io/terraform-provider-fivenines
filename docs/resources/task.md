@@ -48,7 +48,7 @@ resource "fivenines_task" "seasonal_import" {
 ### Optional
 
 - `grace_period_minutes` (Number) Grace period in minutes before marking as missed.
-- `host_id` (String) Optional host ID to associate this task with.
+- `host_id` (String) Optional host ID to associate this task with. Omit it to detach; an empty string is not a host id.
 - `interval_seconds` (Number) Interval in seconds. Required while schedule_type is "interval". Once schedule_type is "cron" you may drop it, but the API keeps the last value rather than clearing it.
 - `paused` (Boolean) Whether the task is paused.
 - `schedule` (String) Cron expression. Required while schedule_type is "cron". Once schedule_type is "interval" you may drop it, but the API keeps the last value rather than clearing it.
@@ -61,7 +61,7 @@ resource "fivenines_task" "seasonal_import" {
 - `id` (String) Unique identifier (UUID).
 - `last_ping_at` (String) Last ping received time.
 - `monitoring_status` (String) Monitoring status.
-- `ping_key` (String, Sensitive) Ping key for sending heartbeats.
-- `ping_url` (String) URL to send heartbeat pings to.
+- `ping_key` (String, Sensitive) Ping key for sending heartbeats. Server-generated, and stored in Terraform state — treat the state file as a secret. The key only authenticates heartbeats for this one task; replace the task to issue a new one.
+- `ping_url` (String, Sensitive) URL to send heartbeat pings to. Embeds ping_key, so it carries the same secret and the same state-file caveat.
 - `status` (String) Current status.
 - `updated_at` (String) Last update timestamp.

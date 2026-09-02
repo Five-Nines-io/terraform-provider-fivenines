@@ -62,7 +62,7 @@ func TestClient_GetDashboard(t *testing.T) {
 	}
 }
 
-func TestClient_CreateDashboard_SendsExplicitNullDescription(t *testing.T) {
+func TestClient_CreateDashboard_OmitsAbsentDescription(t *testing.T) {
 	var body map[string]map[string]interface{}
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || r.URL.Path != "/api/v1/dashboards" {
@@ -84,15 +84,33 @@ func TestClient_CreateDashboard_SendsExplicitNullDescription(t *testing.T) {
 		t.Errorf("expected id 12, got %d", dashboard.ID)
 	}
 
-	// An omitted description would leave a stale one behind on update; the key
-	// has to be present and null.
-	payload, ok := body["dashboard"]
-	if !ok {
-		t.Fatalf("expected a dashboard container, got %v", body)
+	// There is nothing to clear on a dashboard that does not exist yet, so an
+	// absent description is omitted rather than sent as an explicit null.
+	if _, present := body["dashboard"]["description"]; present {
+		t.Errorf("expected an absent description to be omitted on create, got %v", body["dashboard"])
 	}
-	value, present := payload["description"]
+}
+
+func TestClient_UpdateDashboard_ClearsAbsentDescription(t *testing.T) {
+	var body map[string]map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		json.Unmarshal(raw, &body)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"dashboard": map[string]interface{}{"id": 12, "name": "Fleet health"},
+		})
+	})
+
+	_, err := c.UpdateDashboard(context.Background(), 12, "", UpdateDashboardInput{Name: "Fleet health"})
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	// The other half of the split: dropping `description` from a configuration
+	// has to clear it, so update sends the key with an explicit null.
+	value, present := body["dashboard"]["description"]
 	if !present {
-		t.Error("expected description to be sent explicitly")
+		t.Fatalf("expected description to be sent explicitly on update, got %v", body["dashboard"])
 	}
 	if value != nil {
 		t.Errorf("expected a null description, got %v", value)

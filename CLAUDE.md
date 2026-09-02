@@ -2,16 +2,44 @@
 
 Terraform provider for the FiveNines monitoring API.
 
+Cross-cutting engineering debt and deferred work lives in `TODOS.md`; API-parity
+work is tracked in GitHub issues #5-#26.
+
 ## Build and test
 
 - `make build` / `make test` / `make fmt` — standard targets.
-- `make docs` runs `tfplugindocs generate`. It derives the provider name from the
-  directory name, so from a checkout not named `terraform-provider-fivenines`
-  (a git worktree, for example) you must pass both flags or it deletes `docs/`
-  and fails:
-  `tfplugindocs generate --provider-name fivenines --rendered-provider-name terraform-provider-fivenines`
+- `make testacc` runs the acceptance suite (`internal/provider/*_resource_test.go`)
+  against a live organisation, creating and destroying real resources. It needs
+  `TF_ACC=1`, a staging `FIVENINES_API_KEY` and the `terraform` CLI on `PATH`;
+  without `TF_ACC` those tests skip, so `make test` stays offline.
+- `internal/provider/*_plan_test.go` is a third tier and is *not* gated on the
+  staging org, despite living in the same package. `planTest` in
+  `plan_test_harness_test.go` points real Terraform at an `httptest` server and
+  sets `TF_ACC` itself, so those cases run under plain `make test` wherever the
+  `terraform` binary is, and skip only when it is missing. They are the only
+  tests that exercise plan validation: the unit tests drive Create and Update
+  directly, which skips the step where Terraform compares the plan to the
+  configuration. Add one when a resource's plan-time behaviour is non-trivial.
+- `make docs` runs `tfplugindocs generate --provider-name fivenines
+  --rendered-provider-name terraform-provider-fivenines`. The flags are not
+  optional: tfplugindocs derives the provider name from the directory name, so
+  from a checkout not named `terraform-provider-fivenines` (a git worktree, for
+  example) a bare `tfplugindocs generate` deletes `docs/` and then fails
+  mid-render. The flagged form is byte-identical to the bare command CI runs from
+  the correctly-named checkout, so use `make docs` rather than calling the tool
+  directly.
 - CI regenerates docs and fails on any diff, so commit `docs/` alongside schema
   or `examples/` changes.
+
+## Releases and versioning
+
+- There is no `VERSION` file and no `CHANGELOG.md`, by design. `.goreleaser.yml`
+  reads `{{ .Version }}` from the git tag and generates release notes from the
+  commit subjects since the last tag (excluding `^docs:`, `^test:`, `^chore:`).
+  Do not create either file — commit subjects are the changelog, so write the
+  subject for the person reading the release page.
+- Cut a release by tagging: `git tag vX.Y.Z && git push origin vX.Y.Z`. The
+  Terraform Registry picks the release up automatically.
 
 ## Skill routing
 

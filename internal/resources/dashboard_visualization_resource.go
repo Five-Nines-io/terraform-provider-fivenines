@@ -398,7 +398,7 @@ func (r *dashboardVisualizationResource) Delete(ctx context.Context, req resourc
 }
 
 func (r *dashboardVisualizationResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	dashboardID, id, err := parseNestedDashboardID(req.ID, "visualization")
+	dashboardID, id, err := parseCompositeInt64ID(req.ID, "dashboard_id", "visualization_id")
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid import ID", err.Error())
 		return
@@ -409,11 +409,11 @@ func (r *dashboardVisualizationResource) ImportState(ctx context.Context, req re
 
 func visualizationInputFromPlan(plan *dashboardVisualizationModel) client.VisualizationInput {
 	return client.VisualizationInput{
-		Title:       nullableString(plan.Title),
-		Description: nullableString(plan.Description),
+		Title:       stringPtr(plan.Title),
+		Description: stringPtr(plan.Description),
 		Metric:      plan.Metric.ValueString(),
 		ChartType:   plan.ChartType.ValueString(),
-		Section:     nullableString(plan.Section),
+		Section:     stringPtr(plan.Section),
 		Layout:      layoutFromPlan(plan.Layout),
 		Targets:     targetsFromPlan(plan.Targets),
 		Options:     optionsFromPlan(plan.Options),
@@ -612,47 +612,4 @@ func objectStringSlicePtr(attrs map[string]attr.Value, key string) *[]string {
 		out = []string{}
 	}
 	return &out
-}
-
-// --- attr.Value constructors ---
-
-func optionalInt64(i *int64) types.Int64 {
-	if i == nil {
-		return types.Int64Null()
-	}
-	return types.Int64Value(*i)
-}
-
-func optionalBool(b *bool) types.Bool {
-	if b == nil {
-		return types.BoolNull()
-	}
-	return types.BoolValue(*b)
-}
-
-func optionalFloat64(f *float64) types.Float64 {
-	if f == nil {
-		return types.Float64Null()
-	}
-	return types.Float64Value(*f)
-}
-
-// stringListValue renders a list the API always sends, where empty is a real
-// value rather than an absent one.
-func stringListValue(values []string) types.List {
-	elements := make([]attr.Value, len(values))
-	for i, v := range values {
-		elements[i] = types.StringValue(v)
-	}
-	list, _ := types.ListValue(types.StringType, elements)
-	return list
-}
-
-// optionalStringListValue renders a list the API sends as null when the panel
-// stores nothing for it.
-func optionalStringListValue(values []string) types.List {
-	if values == nil {
-		return types.ListNull(types.StringType)
-	}
-	return stringListValue(values)
 }

@@ -2,9 +2,6 @@ package resources
 
 import (
 	"context"
-	"fmt"
-	"strconv"
-	"strings"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -124,8 +121,8 @@ func (r *dashboardSectionResource) Create(ctx context.Context, req resource.Crea
 	dashboardID := plan.DashboardID.ValueInt64()
 	input := client.DashboardSectionInput{
 		Name:      plan.Name.ValueString(),
-		Collapsed: nullableBool(plan.Collapsed),
-		Position:  nullableInt64(configPosition),
+		Collapsed: boolPtr(plan.Collapsed),
+		Position:  int64Ptr(configPosition),
 	}
 
 	tflog.Debug(ctx, "Creating dashboard section", map[string]interface{}{
@@ -197,8 +194,8 @@ func (r *dashboardSectionResource) Update(ctx context.Context, req resource.Upda
 	id := state.ID.ValueInt64()
 	input := client.DashboardSectionInput{
 		Name:      plan.Name.ValueString(),
-		Collapsed: nullableBool(plan.Collapsed),
-		Position:  nullableInt64(configPosition),
+		Collapsed: boolPtr(plan.Collapsed),
+		Position:  int64Ptr(configPosition),
 	}
 
 	section, err := r.client.UpdateDashboardSection(ctx, dashboardID, id, input)
@@ -233,7 +230,7 @@ func (r *dashboardSectionResource) Delete(ctx context.Context, req resource.Dele
 }
 
 func (r *dashboardSectionResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	dashboardID, id, err := parseNestedDashboardID(req.ID, "section")
+	dashboardID, id, err := parseCompositeInt64ID(req.ID, "dashboard_id", "section_id")
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid import ID", err.Error())
 		return
@@ -259,38 +256,4 @@ func mapDashboardSectionToState(s *client.DashboardSection, dashboardID int64, s
 	if !keepPlannedPosition || state.Position.IsNull() || state.Position.IsUnknown() {
 		state.Position = types.Int64Value(s.Position)
 	}
-}
-
-// parseNestedDashboardID splits the "<dashboard_id>:<id>" form the nested
-// dashboard resources import with.
-func parseNestedDashboardID(importID, kind string) (int64, int64, error) {
-	parts := strings.Split(importID, ":")
-	if len(parts) != 2 {
-		return 0, 0, fmt.Errorf("expected %q in the form \"<dashboard_id>:<%s_id>\", got %q", importID, kind, importID)
-	}
-	dashboardID, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("cannot parse dashboard id %q as int64: %s", parts[0], err)
-	}
-	id, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return 0, 0, fmt.Errorf("cannot parse %s id %q as int64: %s", kind, parts[1], err)
-	}
-	return dashboardID, id, nil
-}
-
-func nullableBool(v types.Bool) *bool {
-	if v.IsNull() || v.IsUnknown() {
-		return nil
-	}
-	b := v.ValueBool()
-	return &b
-}
-
-func nullableInt64(v types.Int64) *int64 {
-	if v.IsNull() || v.IsUnknown() {
-		return nil
-	}
-	i := v.ValueInt64()
-	return &i
 }

@@ -124,10 +124,10 @@ func TestMapDashboardSectionToState_KeepsPlannedPosition(t *testing.T) {
 	}
 }
 
-// --- parseNestedDashboardID ---
+// --- parseCompositeInt64ID, via the dashboard import forms ---
 
 func TestParseNestedDashboardID(t *testing.T) {
-	dashboardID, id, err := parseNestedDashboardID("12:88", "visualization")
+	dashboardID, id, err := parseCompositeInt64ID("12:88", "dashboard_id", "visualization_id")
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
@@ -137,8 +137,8 @@ func TestParseNestedDashboardID(t *testing.T) {
 }
 
 func TestParseNestedDashboardID_Invalid(t *testing.T) {
-	for _, importID := range []string{"12", "12:88:99", "", "abc:88", "12:abc"} {
-		if _, _, err := parseNestedDashboardID(importID, "section"); err == nil {
+	for _, importID := range []string{"12", "12:88:99", "", "abc:88", "12:abc", ":88", "12:"} {
+		if _, _, err := parseCompositeInt64ID(importID, "dashboard_id", "section_id"); err == nil {
 			t.Errorf("expected %q to be refused", importID)
 		}
 	}

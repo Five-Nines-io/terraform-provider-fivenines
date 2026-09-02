@@ -226,7 +226,9 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 	}{
 		input: CreateWorkflowInput{},
 		policy: map[string]string{
-			"name": always, "description": dropsZero, "interval_seconds": preserves,
+			// description was dropsZero, which is only safe when "" is not a
+			// legal config value — it is, on an Optional attribute.
+			"name": always, "description": preserves, "interval_seconds": preserves,
 		},
 	}, struct {
 		input  interface{}

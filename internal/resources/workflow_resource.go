@@ -216,10 +216,8 @@ func (r *workflowResource) Create(ctx context.Context, req resource.CreateReques
 	} else {
 		input := client.CreateWorkflowInput{
 			Name:            plan.Name.ValueString(),
+			Description:     stringPtr(plan.Description),
 			IntervalSeconds: int64Ptr(plan.IntervalSeconds),
-		}
-		if !plan.Description.IsNull() && !plan.Description.IsUnknown() {
-			input.Description = plan.Description.ValueString()
 		}
 
 		tflog.Debug(ctx, "Creating workflow", map[string]interface{}{"name": input.Name})

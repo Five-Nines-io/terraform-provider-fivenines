@@ -2,7 +2,9 @@ package resources
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
@@ -13,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
@@ -61,6 +64,20 @@ func (m unknownOnPositionChange) PlanModifyInt64(_ context.Context, req planmodi
 	}
 }
 
+// isNotFound reports whether an error is the API's 404. errors.As rather than a
+// bare type assertion: the client already wraps errors elsewhere, and a future
+// wrap would silently turn "the group vanished" into a hard apply failure.
+func isNotFound(err error) bool {
+	var apiErr *client.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
+func vanishedHostGroupDetail(id int64) string {
+	return fmt.Sprintf("Host group %d was removed outside of Terraform — the API deletes a group once its "+
+		"last instance leaves it. Re-run the apply to recreate it; if the plan was saved or refreshing is "+
+		"disabled, refresh first so Terraform can see it is gone.", id)
+}
+
 func NewHostGroupResource() resource.Resource {
 	return &hostGroupResource{}
 }
@@ -86,14 +103,19 @@ func (r *hostGroupResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 				Description: "Name of the host group. Up to 50 characters, unique per organization (case-insensitive).",
 				Required:    true,
 				Validators: []validator.String{
-					stringvalidator.LengthBetween(1, 50),
+					stringvalidator.UTF8LengthBetween(1, 50),
 				},
 			},
 			"position": schema.Int64Attribute{
 				Description: "1-based position in the group list. Setting it slots the group in and renumbers " +
 					"the others, so repositioning one group can shift the recorded position of every other " +
-					"group. Omit it to let new groups land on top. A position beyond the number of existing " +
-					"groups is clamped by the API, which is why the planned value is only known after apply.",
+					"group. Omit it to let new groups land on top, which is the right choice unless you " +
+					"intend to manage the whole ordering. The API clamps a position beyond the number of " +
+					"existing groups, and it never reports an error for doing so: a configuration asking " +
+					"for a position past the end settles at the last slot, disagrees with the configuration " +
+					"forever, and shows a diff on every plan whose apply silently re-issues a move that " +
+					"renumbers the other groups. Keep configured positions within the number of groups you " +
+					"manage. The planned value is only known after apply because of that clamping.",
 				Optional: true,
 				Computed: true,
 				Validators: []validator.Int64{
@@ -106,6 +128,9 @@ func (r *hostGroupResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 			"created_at": schema.StringAttribute{
 				Description: "Creation timestamp.",
 				Computed:    true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"updated_at": schema.StringAttribute{
 				Description: "Last update timestamp. Position changes do not bump it.",
@@ -173,7 +198,7 @@ func (r *hostGroupResource) Read(ctx context.Context, req resource.ReadRequest, 
 	if err != nil {
 		// The API drops a group as soon as its last instance leaves it, so a 404 here
 		// is an expected outcome rather than a hard failure.
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if isNotFound(err) {
 			tflog.Debug(ctx, "Host group no longer exists, removing from state", map[string]interface{}{"id": state.ID.ValueInt64()})
 			resp.State.RemoveResource(ctx)
 			return
@@ -211,23 +236,25 @@ func (r *hostGroupResource) Update(ctx context.Context, req resource.UpdateReque
 	input := client.UpdateHostGroupInput{
 		Name: &name,
 	}
-	// Omitted from the configuration means "leave the group where it is".
-	if !config.Position.IsNull() && !config.Position.IsUnknown() {
+	// Only send a position when the configuration actually MOVES the group.
+	// Omitted means "leave it where it is", and so does a configured position the
+	// group already occupies — re-sending that still counts as a move server-side,
+	// which renumbers every other group in the organisation. A rename must not
+	// reshuffle the whole list.
+	if !config.Position.IsNull() && !config.Position.IsUnknown() && !config.Position.Equal(state.Position) {
 		v := config.Position.ValueInt64()
 		input.Position = &v
 	}
 
-	// ETag retry loop
+	// ETag retry loop. The ETag is harvested from a GET immediately before the
+	// PATCH, so a 412 means something moved in between — which for host groups is
+	// routine, since any group's move invalidates every other group's ETag.
 	var group *client.HostGroup
 	for attempt := 0; attempt < 3; attempt++ {
 		_, etag, err := r.client.GetHostGroup(ctx, id)
 		if err != nil {
-			if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
-				resp.Diagnostics.AddError(
-					"Host group no longer exists",
-					fmt.Sprintf("Host group %d was removed outside of Terraform — the API deletes a group "+
-						"once its last instance leaves it. Re-run the apply to recreate it.", id),
-				)
+			if isNotFound(err) {
+				resp.Diagnostics.AddError("Host group no longer exists", vanishedHostGroupDetail(id))
 				return
 			}
 			resp.Diagnostics.AddError("Error reading host group for update", err.Error())
@@ -239,10 +266,31 @@ func (r *hostGroupResource) Update(ctx context.Context, req resource.UpdateReque
 				tflog.Debug(ctx, "ETag mismatch on host group update, retrying", map[string]interface{}{"attempt": attempt + 1})
 				continue
 			}
+			// The group can also vanish in the GET-to-PATCH window.
+			if isNotFound(err) {
+				resp.Diagnostics.AddError("Host group no longer exists", vanishedHostGroupDetail(id))
+				return
+			}
+			if client.IsPreconditionFailed(err) {
+				resp.Diagnostics.AddError(
+					"Host group was modified concurrently",
+					fmt.Sprintf("Host group %d changed between reading its ETag and updating it, three times "+
+						"running. Any group's move renumbers the others, so a large reordering applied in "+
+						"parallel can collide this way. Re-run the apply.", id),
+				)
+				return
+			}
 			resp.Diagnostics.AddError("Error updating host group", err.Error())
 			return
 		}
 		break
+	}
+
+	// Unreachable while the loop bound and the retry guard agree, but decoupling
+	// them would otherwise fall through into a nil dereference below.
+	if group == nil {
+		resp.Diagnostics.AddError("Error updating host group", "the update retry loop produced no result")
+		return
 	}
 
 	plannedPosition := plan.Position
@@ -276,7 +324,7 @@ func (r *hostGroupResource) Delete(ctx context.Context, req resource.DeleteReque
 	// Deleting a group only ungroups its instances; the instances themselves survive.
 	err := r.client.DeleteHostGroup(ctx, state.ID.ValueInt64())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if isNotFound(err) {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting host group", err.Error())
@@ -287,6 +335,10 @@ func (r *hostGroupResource) ImportState(ctx context.Context, req resource.Import
 	id, err := strconv.ParseInt(req.ID, 10, 64)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid ID", fmt.Sprintf("Cannot parse %q as int64: %s", req.ID, err))
+		return
+	}
+	if id < 1 {
+		resp.Diagnostics.AddError("Invalid ID", fmt.Sprintf("Host group ids start at 1, got %q.", req.ID))
 		return
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)

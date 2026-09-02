@@ -574,6 +574,11 @@ type UpdateStatusPageInput struct {
 }
 
 // HostGroup represents a named group of monitored hosts.
+//
+// Position is a plain int64 rather than a pointer, against the nullable-fields
+// convention above, because the API documents it as a column defaulting to 0
+// rather than a nullable one: every group has a position, and 0 is the real
+// value carried by groups that were never explicitly ordered.
 type HostGroup struct {
 	ID        int64  `json:"id"`
 	Name      string `json:"name"`

@@ -8,11 +8,15 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -200,6 +204,72 @@ func TestHostGroupSchema_PositionIsOptionalComputed(t *testing.T) {
 	}
 	if !attr.IsComputed() {
 		t.Error("position must be Computed so the API's value can settle into state")
+	}
+}
+
+// An immutable creation timestamp must not plan as "(known after apply)" on
+// every update.
+func TestHostGroupSchema_CreatedAtUsesStateForUnknown(t *testing.T) {
+	attr, ok := hostGroupSchema(t).Attributes["created_at"]
+	if !ok {
+		t.Fatal("created_at is missing from the schema")
+	}
+	stringAttr, ok := attr.(rschema.StringAttribute)
+	if !ok {
+		t.Fatalf("expected created_at to be a StringAttribute, got %T", attr)
+	}
+	if len(stringAttr.PlanModifiers) == 0 {
+		t.Error("created_at needs UseStateForUnknown: a creation time never changes")
+	}
+}
+
+// The API's limit is 50 CHARACTERS, and stringvalidator.LengthBetween counts
+// bytes — upstream's own doc comment says to use UTF8LengthBetween for
+// multi-byte characters. With the byte validator a 50-character accented name is
+// rejected at plan time against a visibly 50-character string.
+func TestHostGroupSchema_NameLimitCountsCharactersNotBytes(t *testing.T) {
+	ctx := context.Background()
+	attr, ok := hostGroupSchema(t).Attributes["name"]
+	if !ok {
+		t.Fatal("name is missing from the schema")
+	}
+	stringAttr, ok := attr.(rschema.StringAttribute)
+	if !ok {
+		t.Fatalf("expected name to be a StringAttribute, got %T", attr)
+	}
+	if len(stringAttr.Validators) == 0 {
+		t.Fatal("name has no validators")
+	}
+
+	tests := []struct {
+		name      string
+		value     string
+		wantError bool
+	}{
+		// 50 two-byte characters: 50 characters, 100 bytes.
+		{name: "50 accented characters are accepted", value: strings.Repeat("é", 50)},
+		{name: "51 accented characters are rejected", value: strings.Repeat("é", 51), wantError: true},
+		{name: "50 ascii characters are accepted", value: strings.Repeat("a", 50)},
+		{name: "51 ascii characters are rejected", value: strings.Repeat("a", 51), wantError: true},
+		{name: "empty is rejected", value: "", wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var diags diag.Diagnostics
+			for _, v := range stringAttr.Validators {
+				resp := &validator.StringResponse{}
+				v.ValidateString(ctx, validator.StringRequest{
+					Path:        path.Root("name"),
+					ConfigValue: types.StringValue(tt.value),
+				}, resp)
+				diags.Append(resp.Diagnostics...)
+			}
+			if got := diags.HasError(); got != tt.wantError {
+				t.Errorf("%d-character name: error=%v, want %v (%v)",
+					utf8.RuneCountInString(tt.value), got, tt.wantError, diags.Errors())
+			}
+		})
 	}
 }
 
@@ -602,6 +672,100 @@ func TestHostGroupUpdate_TakesAPIPositionWhenPlanIsUnknown(t *testing.T) {
 	}
 }
 
+// A configured position the group ALREADY occupies is not a move. Re-sending it
+// still counts as one server-side, which renumbers every other group in the
+// organisation — so a rename must not carry a position along with it.
+func TestHostGroupUpdate_OmitsUnchangedPosition(t *testing.T) {
+	ctx := context.Background()
+	s := hostGroupSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	var patchBody map[string]interface{}
+	r := newHostGroupResource(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPatch {
+			json.NewDecoder(req.Body).Decode(&patchBody)
+		}
+		w.Header().Set("ETag", `"hg-etag"`)
+		json.NewEncoder(w).Encode(hostGroupJSON(map[string]interface{}{"name": "Prod EU"}))
+	})
+
+	// The helper's state position is 1, so configuring 1 is a no-op move.
+	same := int64(1)
+	req := hostGroupUpdateRequestWithPlan(t, s, objType, &same, tftypes.NewValue(tftypes.Number, 1))
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Update(ctx, req, resp)
+
+	if resp.Diagnostics.HasError() {
+		t.Fatalf("unexpected diagnostics: %v", resp.Diagnostics.Errors())
+	}
+	sent := patchBody["host_group"].(map[string]interface{})
+	if _, present := sent["position"]; present {
+		t.Errorf("a rename must not re-send the position it already has, got %v", sent["position"])
+	}
+}
+
+// The group can also vanish between the ETag GET and the PATCH, which lands in a
+// different branch from the GET's own 404.
+func TestHostGroupUpdate_ExplainsGroupVanishingDuringPatch(t *testing.T) {
+	ctx := context.Background()
+	s := hostGroupSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	r := newHostGroupResource(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPatch {
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Not found"})
+			return
+		}
+		w.Header().Set("ETag", `"hg-etag"`)
+		json.NewEncoder(w).Encode(hostGroupJSON(nil))
+	})
+
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Update(ctx, hostGroupUpdateRequest(t, s, objType, nil), resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected a diagnostic when the group vanishes mid-update")
+	}
+	if summary := resp.Diagnostics.Errors()[0].Summary(); !strings.Contains(summary, "no longer exists") {
+		t.Errorf("a 404 on the PATCH must explain the group is gone, got %q", summary)
+	}
+}
+
+// Exhausting the retries must say the update collided, not just "API error 412".
+// Any group's move invalidates every other group's ETag, so a wide reordering
+// applied in parallel reaches this path without anything being broken.
+func TestHostGroupUpdate_ExplainsExhaustedETagRetries(t *testing.T) {
+	ctx := context.Background()
+	s := hostGroupSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	var patches int32
+	r := newHostGroupResource(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPatch {
+			atomic.AddInt32(&patches, 1)
+			w.WriteHeader(http.StatusPreconditionFailed)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Precondition Failed"})
+			return
+		}
+		w.Header().Set("ETag", `"hg-etag"`)
+		json.NewEncoder(w).Encode(hostGroupJSON(nil))
+	})
+
+	resp := &resource.UpdateResponse{State: tfsdk.State{Schema: s, Raw: tftypes.NewValue(objType, nil)}}
+	r.Update(ctx, hostGroupUpdateRequest(t, s, objType, nil), resp)
+
+	if !resp.Diagnostics.HasError() {
+		t.Fatal("expected a diagnostic once the retries are exhausted")
+	}
+	if got := atomic.LoadInt32(&patches); got != 3 {
+		t.Errorf("expected 3 PATCH attempts before giving up, got %d", got)
+	}
+	if summary := resp.Diagnostics.Errors()[0].Summary(); !strings.Contains(summary, "modified concurrently") {
+		t.Errorf("expected a concurrency diagnostic, got %q", summary)
+	}
+}
+
 // --- Delete ---
 
 // Delete races the same auto-deletion, so a 404 means the desired end state has
@@ -668,6 +832,8 @@ func TestHostGroupImportState(t *testing.T) {
 		{name: "numeric id", id: "7", wantID: 7},
 		{name: "uuid is rejected", id: "3f1a-not-a-number", wantErr: true},
 		{name: "empty is rejected", id: "", wantErr: true},
+		{name: "zero is rejected", id: "0", wantErr: true},
+		{name: "negative is rejected", id: "-1", wantErr: true},
 	}
 
 	for _, tt := range tests {

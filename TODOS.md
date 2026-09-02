@@ -98,6 +98,45 @@
   sequential 30s requests before the ceiling reports anything
 - Fix: cap the backoff, and bound total records rather than pages
 
+### Required name attributes are overwritten from the API response
+- `mapXToState` writes the API's `name` into state for instances, tasks, network
+  devices, status pages and host groups, but `name` is `Required` (not Computed)
+  on all of them, so Terraform pins the applied value to the exact config string
+- If the API ever normalises a name — trims it, folds case, collapses whitespace —
+  the apply aborts with "Provider produced inconsistent result after apply", and
+  on a create the resource exists server-side against a failed apply
+- Unverified either way: no evidence the API normalises today. Host groups make it
+  more likely to matter, since their names are documented unique per organisation
+  *case-insensitively*, which is the kind of constraint normalisation usually
+  accompanies
+- Fix, if confirmed: keep the planned name rather than the response value, the way
+  #13 keeps the planned position
+- Found by: /ship adversarial review, 2026-09-02
+
+### The ETag retry loop retries instantly, three times, with no backoff
+- Every resource does GET(ETag) then PATCH(If-Match), retrying a 412 immediately
+  up to three times. All three attempts land inside the same contention window
+  that caused the first failure
+- Host groups make this sharper than the rest: any group's move renumbers every
+  other group, so at parallelism 10 one group's PATCH invalidates the ETag a
+  sibling just fetched. #13 added a 412-specific diagnostic telling the user to
+  re-run, but the retries themselves are still unjittered
+- Fix: jittered backoff and a higher attempt count, applied across all resources
+  rather than one — this is the same call site copy-pasted seven times
+- Found by: /ship adversarial review, 2026-09-02
+
+### sanitizeETag only understands nginx, and a stripped ETag silently disables If-Match
+- `sanitizeETag` rewrites nginx's `-gzip` suffix and nothing else. A CDN that
+  rewrites a strong ETag to `W/"..."` produces an If-Match that can never match
+  under strong comparison: permanent 412, three wasted round trips, dead apply
+- Worse, a proxy that drops `ETag` entirely leaves `etag == ""`, and every
+  `Update*` skips the `If-Match` header when the ETag is empty — the write goes
+  through unconditionally, with no warning, and the optimistic concurrency the
+  whole retry loop exists to provide is silently gone
+- Fix: treat a missing ETag as a condition worth surfacing rather than a reason to
+  drop the precondition, and decide explicitly what a weak ETag should do
+- Found by: /ship adversarial review, 2026-09-02
+
 ## P2 — Nice to have
 
 ### Delete timeout is not operator-tunable

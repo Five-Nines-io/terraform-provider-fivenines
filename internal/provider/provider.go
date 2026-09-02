@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"os"
+	"strconv"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/datasources"
@@ -19,8 +20,9 @@ var _ provider.Provider = &fiveninesProvider{}
 type fiveninesProvider struct{}
 
 type fiveninesProviderModel struct {
-	APIKey  types.String `tfsdk:"api_key"`
-	BaseURL types.String `tfsdk:"base_url"`
+	APIKey             types.String `tfsdk:"api_key"`
+	BaseURL            types.String `tfsdk:"base_url"`
+	SkipPlanValidation types.Bool   `tfsdk:"skip_plan_validation"`
 }
 
 func New() provider.Provider {
@@ -45,6 +47,14 @@ func (p *fiveninesProvider) Schema(_ context.Context, _ provider.SchemaRequest, 
 			"base_url": schema.StringAttribute{
 				Description: "FiveNines API base URL. Defaults to https://fivenines.io. Can also be set via FIVENINES_BASE_URL environment variable.",
 				Optional:    true,
+			},
+			"skip_plan_validation": schema.BoolAttribute{
+				Description: "Skip the dry-run requests that pre-validate destructive organization changes during " +
+					"`terraform plan`. Defaults to false. Set it when the API key used to plan is not the one used " +
+					"to apply — a read-only key is refused by the dry-run even though the apply would succeed. " +
+					"Can also be set via the FIVENINES_SKIP_PLAN_VALIDATION environment variable, which accepts " +
+					"`1`, `t`, `T`, `TRUE`, `true` or `True`.",
+				Optional: true,
 			},
 		},
 	}
@@ -79,7 +89,17 @@ func (p *fiveninesProvider) Configure(ctx context.Context, req provider.Configur
 		baseURL = "https://fivenines.io"
 	}
 
+	// Resolve plan validation: config > env > default (enabled). ParseBool takes
+	// the whole 1/t/T/TRUE/true/True family, so FIVENINES_SKIP_PLAN_VALIDATION=TRUE
+	// does not silently leave the pre-flight armed; an unparseable value keeps
+	// the safe default.
+	skipPlanValidation := config.SkipPlanValidation.ValueBool()
+	if config.SkipPlanValidation.IsNull() {
+		skipPlanValidation, _ = strconv.ParseBool(os.Getenv("FIVENINES_SKIP_PLAN_VALIDATION"))
+	}
+
 	c := client.NewClient(baseURL, apiKey)
+	c.SkipPlanValidation = skipPlanValidation
 	resp.DataSourceData = c
 	resp.ResourceData = c
 }
@@ -92,6 +112,9 @@ func (p *fiveninesProvider) Resources(_ context.Context) []func() resource.Resou
 		resources.NewUptimeMonitorResource,
 		resources.NewNetworkDeviceResource,
 		resources.NewStatusPageResource,
+		resources.NewOrganizationResource,
+		resources.NewOrganizationMemberResource,
+		resources.NewOrganizationInvitationResource,
 		resources.NewStatusPageMaintenanceWindowResource,
 		resources.NewIntegrationResource,
 		resources.NewHostGroupResource,
@@ -114,6 +137,10 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 		datasources.NewWorkflowTemplatesDataSource,
 		datasources.NewWorkflowNodeTypesDataSource,
 		datasources.NewIncidentsDataSource,
+		datasources.NewOrganizationDataSource,
+		datasources.NewOrganizationMembersDataSource,
+		datasources.NewOrganizationSecurityDataSource,
+		datasources.NewOrganizationSAMLDataSource,
 		datasources.NewUptimeMonitorsDataSource,
 		datasources.NewUptimeMonitorStatusDataSource,
 		datasources.NewDashboardTemplatesDataSource,

@@ -127,6 +127,23 @@ What ends up there:
 | `fivenines_task.ping_key` / `ping_url` | Server-generated; the API returns the key on every read, and `ping_url` embeds it. This is what you feed to the job that pings the task, so it has to be readable as an output. |
 | `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
 
+### Upgrading: `ping_url` is now sensitive
+
+`fivenines_task.ping_url` embeds `ping_key` verbatim, so it is marked
+`Sensitive` from this release on. Terraform refuses to expose a sensitive value
+through a root-module output unless the output says so, so if you export it,
+add one line:
+
+```hcl
+output "backup_ping_url" {
+  value     = fivenines_task.backup.ping_url
+  sensitive = true   # required from this release on
+}
+```
+
+Nothing else changes: the value is identical and still readable by anything that
+consumes the output.
+
 `ping_key` is deliberately kept in state rather than made write-only or
 ephemeral. It is a Computed value, and Terraform's write-only arguments apply to
 values the practitioner supplies, not to ones the server generates. An ephemeral

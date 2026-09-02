@@ -20,6 +20,7 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 	const (
 		clears    = "clears on nil (Optional-only: the provider owns it)"
 		preserves = "preserves on nil (Optional+Computed, defaulted, or write-only)"
+		always    = "always sent (Required: not a pointer, so there is no nil case)"
 	)
 
 	specs := []struct {
@@ -29,8 +30,8 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		{
 			input: UpdateInstanceInput{},
 			policy: map[string]string{
-				"display_name": preserves, "description": preserves,
-				"enabled": preserves, "maintenance_mode": preserves,
+				"display_name": preserves, "enabled": preserves,
+				"maintenance_mode": preserves,
 			},
 		},
 		{
@@ -95,6 +96,31 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		},
 	}
 
+	// Create inputs follow the same rule, and the same copy-a-neighbour trap:
+	// CreateStatusPageInput dropped an explicit `description = ""` for exactly
+	// that reason until it was pointerised.
+	specs = append(specs, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateStatusPageInput{},
+		policy: map[string]string{
+			"name": always, "description": preserves, "public": preserves,
+			"uptime": preserves, "custom_domain": preserves,
+			"custom_domain_enabled": preserves, "custom_footer": preserves,
+			"custom_footer_enabled": preserves, "incidents_history_enabled": preserves,
+			"theme_variant": always, "items": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
+		input: CreateInstanceInput{},
+		policy: map[string]string{
+			"display_name": always, "enabled": preserves, "maintenance_mode": preserves,
+		},
+	})
+
 	for _, spec := range specs {
 		typ := reflect.TypeOf(spec.input)
 		t.Run(typ.Name(), func(t *testing.T) {
@@ -117,9 +143,16 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 					continue
 				}
 
-				got := preserves
-				if !strings.Contains(opts, "omitempty") {
-					got = clears
+				// A field that cannot be nil has no clear case at all, so its tag
+				// says nothing about clearing — it is simply always on the wire.
+				// Pointers, slices and maps all have one.
+				got := always
+				switch field.Type.Kind() {
+				case reflect.Ptr, reflect.Slice, reflect.Map:
+					got = preserves
+					if !strings.Contains(opts, "omitempty") {
+						got = clears
+					}
 				}
 				if got != want {
 					t.Errorf("%s.%s (json:%q) %s, but the policy says it %s",

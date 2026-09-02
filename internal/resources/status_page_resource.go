@@ -138,7 +138,7 @@ func (r *statusPageResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				},
 			},
 			"items": schema.ListNestedAttribute{
-				Description: "Items displayed on the status page, in order. Omit this attribute to leave the page's items as they are — useful when they are curated in the FiveNines dashboard. Set it to [] to remove every item.",
+				Description: "Items displayed on the status page, in order. Omit this attribute and the provider tracks whatever the API last reported, which leaves items curated in the FiveNines dashboard alone (it follows the last refresh, so `-refresh=false` can replay a stale list). Set it to [] to remove every item.",
 				Optional:    true,
 				// Computed so that omitting the attribute resolves to whatever the
 				// API holds. As Optional-only, a null plan against a page that has
@@ -221,9 +221,9 @@ func (r *statusPageResource) Create(ctx context.Context, req resource.CreateRequ
 	if !plan.ThemeVariant.IsNull() && !plan.ThemeVariant.IsUnknown() {
 		input.ThemeVariant = plan.ThemeVariant.ValueString()
 	}
-	if !plan.Items.IsNull() && !plan.Items.IsUnknown() {
-		input.Items = planItemsToClient(plan.Items)
-	}
+	// Same shape as the update: `items = []` at create has to reach the API as
+	// an explicit [], which a plain slice with omitempty would drop.
+	input.Items = planItemsToUpdateInput(plan.Items)
 
 	tflog.Debug(ctx, "Creating status page", map[string]interface{}{"name": input.Name})
 

@@ -47,7 +47,6 @@ type Instance struct {
 // CreateInstanceInput is the request body for creating an instance.
 type CreateInstanceInput struct {
 	DisplayName     string `json:"display_name"`
-	Description     string `json:"description,omitempty"`
 	Enabled         *bool  `json:"enabled,omitempty"`
 	MaintenanceMode *bool  `json:"maintenance_mode,omitempty"`
 }
@@ -55,7 +54,6 @@ type CreateInstanceInput struct {
 // UpdateInstanceInput is the request body for updating an instance.
 type UpdateInstanceInput struct {
 	DisplayName     *string `json:"display_name,omitempty"`
-	Description     *string `json:"description,omitempty"`
 	Enabled         *bool   `json:"enabled,omitempty"`
 	MaintenanceMode *bool   `json:"maintenance_mode,omitempty"`
 }
@@ -443,17 +441,17 @@ type StatusPageItem struct {
 // dropped from the body, the API stores null, and the read maps that back to a
 // Terraform null the plan never asked for.
 type CreateStatusPageInput struct {
-	Name                    string           `json:"name"`
-	Description             *string          `json:"description,omitempty"`
-	Public                  *bool            `json:"public,omitempty"`
-	Uptime                  *bool            `json:"uptime,omitempty"`
-	CustomDomain            *string          `json:"custom_domain,omitempty"`
-	CustomDomainEnabled     *bool            `json:"custom_domain_enabled,omitempty"`
-	CustomFooter            *string          `json:"custom_footer,omitempty"`
-	CustomFooterEnabled     *bool            `json:"custom_footer_enabled,omitempty"`
-	IncidentsHistoryEnabled *bool            `json:"incidents_history_enabled,omitempty"`
-	ThemeVariant            string           `json:"theme_variant,omitempty"`
-	Items                   []StatusPageItem `json:"items,omitempty"`
+	Name                    string            `json:"name"`
+	Description             *string           `json:"description,omitempty"`
+	Public                  *bool             `json:"public,omitempty"`
+	Uptime                  *bool             `json:"uptime,omitempty"`
+	CustomDomain            *string           `json:"custom_domain,omitempty"`
+	CustomDomainEnabled     *bool             `json:"custom_domain_enabled,omitempty"`
+	CustomFooter            *string           `json:"custom_footer,omitempty"`
+	CustomFooterEnabled     *bool             `json:"custom_footer_enabled,omitempty"`
+	IncidentsHistoryEnabled *bool             `json:"incidents_history_enabled,omitempty"`
+	ThemeVariant            string            `json:"theme_variant,omitempty"`
+	Items                   *[]StatusPageItem `json:"items,omitempty"`
 }
 
 // UpdateStatusPageInput is the request body for updating a status page.

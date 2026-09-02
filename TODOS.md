@@ -99,6 +99,54 @@
 
 ## P2 — Nice to have
 
+### Delete timeout is not operator-tunable
+- `AsyncDeletionTimeout` (client.go) is a compile-time 5 minutes, passed straight
+  through from instance and network device Delete. A backend slower than that
+  fails `terraform destroy` where the old fire-and-forget delete succeeded, and
+  there is no way to raise it
+- Fix: a per-resource `timeouts { delete = "..." }` block via
+  terraform-plugin-framework-timeouts, defaulting to the current 5 minutes
+- Found by: /ship performance specialist, 2026-09-02
+
+### SNMP credentials can never be cleared
+- `snmp_community` / `snmp_auth_password` / `snmp_priv_password` keep `omitempty`
+  because the API treats blank as "keep", so no config the provider can produce
+  clears a stored credential: removing the attribute, switching `snmp_version`,
+  and importing all omit the key
+- A rotated-out password stays live server-side and `terraform plan` shows nothing
+- Fix: confirm whether an explicit null clears one. If it does, drive the
+  omit/null choice off plan-vs-state rather than a fixed struct tag; if it cannot,
+  document that replacing the device is the only revocation path
+- Found by: /ship security specialist, 2026-09-02
+
+### Acceptance workflow goes green while running zero tests
+- `.github/workflows/acceptance.yml` skips the run step when `FIVENINES_API_KEY`
+  is unset and the job still succeeds, so a permanently unconfigured nightly is
+  indistinguishable from a passing one
+- Fix: fail (or `::warning::`) on the `schedule` trigger, and record the number of
+  tests actually executed in `$GITHUB_STEP_SUMMARY`
+- Found by: /ship testing specialist, 2026-09-02
+
+### CI actions are pinned to mutable tags
+- `acceptance.yml` is the first workflow handed a live API key with create/destroy
+  rights, and pins `actions/checkout@v4`, `actions/setup-go@v5`,
+  `hashicorp/setup-terraform@v3` — `setup-terraform` installs the very binary that
+  later runs with the key in its environment
+- Fix: pin all `uses:` refs to full commit SHAs (repo-wide, not just this file) and
+  add Dependabot's `github-actions` ecosystem
+- Found by: /ship security specialist, 2026-09-02
+
+### Network device import leaves defaulted attributes null if the API omits them
+- `mapNetworkDeviceToState` uses `stringOrKeep` for the defaulted SNMP attributes,
+  but import starts from an empty model (`ImportStatePassthroughID` sets only
+  `id`), so there is nothing to keep and they fall back to whatever the API sends
+- Harmless while the API returns them — `snmp_version` is Required and stored —
+  and `TestMapNetworkDeviceToState_ImportStartsFromEmptyState` pins that assumption
+- Only an acceptance run against a real v2c device settles it; if it fails, either
+  add them to `ImportStateVerifyIgnore` or fall back to the schema default
+- Found by: /ship testing specialist + red team, 2026-09-02
+
+
 ### Unescaped resource ids in request paths
 - #9 applied `url.PathEscape` across the uptime monitor endpoints; instances,
   tasks, workflows, network devices and status pages still concatenate the raw id

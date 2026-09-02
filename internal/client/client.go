@@ -144,10 +144,27 @@ func parseError(resp *http.Response) error {
 	return apiErr
 }
 
+// errMalformedBody marks a response body the client could not parse. It is a
+// permanent failure — the same bytes will not parse on a retry — as opposed to
+// a read that died in transit, which is worth another attempt.
+var errMalformedBody = errors.New("malformed response body")
+
 // decodeResponse reads and decodes a JSON response body.
 func decodeResponse(resp *http.Response, target interface{}) error {
 	defer resp.Body.Close()
-	return json.NewDecoder(resp.Body).Decode(target)
+	err := json.NewDecoder(resp.Body).Decode(target)
+	if err == nil {
+		return nil
+	}
+
+	// Only a syntactically bad body is permanent. An unexpected EOF or a reset
+	// mid-body is the transport failing, not the server sending garbage.
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+		return fmt.Errorf("%w: %w", errMalformedBody, err)
+	}
+	return err
 }
 
 // AsyncDeletionTimeout bounds the wait for a 202-accepted deletion to complete.
@@ -179,13 +196,31 @@ func deletionDone(err error) (bool, error) {
 // connection mid-teardown should not turn a successful destroy into a failure.
 // A 4xx will not fix itself, so those fail immediately.
 func retryablePoll(err error) bool {
+	// A syntactically bad body will be just as bad next time. Everything else
+	// that is not an API error is the transport failing mid-flight — a reset, a
+	// truncated read, a DNS blip — and is worth another attempt.
+	if errors.Is(err, errMalformedBody) {
+		return false
+	}
+
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) {
-		// A body the client cannot decode will not decode on the next attempt
-		// either, so only transport-level failures are worth retrying.
-		return !strings.Contains(err.Error(), "decoding response")
+		return true
 	}
-	return apiErr.StatusCode >= 500
+
+	// 429 is the one 4xx that fixes itself. doRequest already backs off, but it
+	// gives up after five attempts and hands the 429 up: a fleet destroy is
+	// exactly the workload that trips the limiter, and the DELETE was accepted
+	// already, so failing here would abort an apply over a transient limit.
+	switch {
+	case apiErr.StatusCode >= 500:
+		return true
+	case apiErr.StatusCode == http.StatusTooManyRequests,
+		apiErr.StatusCode == http.StatusRequestTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 // waitForDeletion polls gone until it reports the record has disappeared,
@@ -214,9 +249,11 @@ func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(conte
 
 	for {
 		done, err := gone(pollCtx)
-		if err != nil && retryablePoll(err) {
-			// Recorded before the deadline check so the timeout message names it
-			// even when the very first poll outlives the deadline.
+		// Recorded before the deadline check so the timeout message names it even
+		// when the very first poll outlives the deadline — but never record the
+		// deadline itself, or it overwrites the API error worth reporting.
+		if err != nil && retryablePoll(err) &&
+			!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 			lastErr = err
 		}
 		switch {

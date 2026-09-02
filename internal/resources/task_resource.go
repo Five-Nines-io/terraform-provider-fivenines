@@ -392,7 +392,7 @@ func mapTaskToState(t *client.Task, state *taskModel) {
 	state.IntervalSeconds = optionalInt64(t.IntervalSeconds)
 	state.GracePeriodMinutes = types.Int64Value(int64(t.GracePeriodMinutes))
 	state.TimeZone = stringOrKeep(t.TimeZone, state.TimeZone)
-	state.HostID = optionalString(t.HostID)
+	state.HostID = optionalNonEmptyString(t.HostID)
 	state.Status = types.StringValue(t.Status)
 	state.MonitoringStatus = types.StringValue(t.MonitoringStatus)
 	state.PingKey = types.StringValue(t.PingKey)

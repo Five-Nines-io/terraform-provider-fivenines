@@ -412,7 +412,9 @@ func mapNetworkDeviceToState(d *client.NetworkDevice, state *networkDeviceModel)
 	state.ID = types.StringValue(d.ID)
 	state.Name = types.StringValue(d.Name)
 	state.IPAddress = types.StringValue(d.IPAddress)
-	state.PollingHostID = optionalString(d.PollingHostID)
+	// Optional-only: "" and null both mean unset, and "" is not a legal config
+	// value, so collapse both or an API "" fails the apply against a null plan.
+	state.PollingHostID = optionalNonEmptyString(d.PollingHostID)
 	// Attributes with a schema default keep the planned value when the API
 	// leaves them null, so a v2c device doesn't wipe its defaults to null.
 	state.DeviceType = stringOrKeep(d.DeviceType, state.DeviceType)
@@ -421,7 +423,7 @@ func mapNetworkDeviceToState(d *client.NetworkDevice, state *networkDeviceModel)
 	// snmp_username has no default and is not Computed, so the config owns it:
 	// keeping the prior value on a null would hide an out-of-band change forever
 	// instead of letting the next plan repair it.
-	state.SNMPUsername = optionalString(d.SNMPUsername)
+	state.SNMPUsername = optionalNonEmptyString(d.SNMPUsername)
 	state.SNMPSecurityLevel = stringOrKeep(d.SNMPSecurityLevel, state.SNMPSecurityLevel)
 	state.SNMPAuthProtocol = stringOrKeep(d.SNMPAuthProtocol, state.SNMPAuthProtocol)
 	state.SNMPPrivProtocol = stringOrKeep(d.SNMPPrivProtocol, state.SNMPPrivProtocol)

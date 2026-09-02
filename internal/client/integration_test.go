@@ -21,6 +21,17 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// readPageItems re-reads a page's items so the update below can refuse to send
+// an empty list it did not mean.
+func readPageItems(ctx context.Context, t *testing.T, c *Client, id int64) []StatusPageItem {
+	t.Helper()
+	page, _, err := c.GetStatusPage(ctx, id)
+	if err != nil {
+		t.Fatalf("GetStatusPage failed: %v", err)
+	}
+	return page.Items
+}
+
 func derefOr[T any](v *T, fallback T) T {
 	if v == nil {
 		return fallback
@@ -30,6 +41,11 @@ func derefOr[T any](v *T, fallback T) T {
 
 func skipIfNoAPIKey(t *testing.T) {
 	t.Helper()
+	// TF_ACC as well as the key: these tests mutate a real organisation, and
+	// `make test` must never do that just because a key happens to be exported.
+	if os.Getenv("TF_ACC") == "" {
+		t.Skip("TF_ACC not set — skipping integration test against a live API")
+	}
 	if testAPIKey == "" {
 		t.Skip("FIVENINES_API_KEY not set — skipping integration test")
 	}
@@ -57,6 +73,12 @@ func TestIntegration_StatusPage_UpdateExistingPage(t *testing.T) {
 	}
 	if targetPage == nil {
 		t.Skip("No existing page with items found")
+	}
+	// Items is a pointer now, so sending an empty slice CLEARS the page. Never
+	// round-trip a read that came back empty — that would delete every item on
+	// a real page instead of leaving it alone.
+	if len(readPageItems(ctx, t, c, targetPage.ID)) == 0 {
+		t.Skip("Page reports no items on re-read — refusing to PATCH an empty items list")
 	}
 
 	t.Logf("Target page: id=%d name=%q theme=%q items=%d", targetPage.ID, targetPage.Name, derefOr(targetPage.ThemeVariant, ""), len(targetPage.Items))

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1751,11 +1752,46 @@ func shrinkDeletionPolling(t *testing.T) {
 	})
 }
 
-// A body the client cannot decode will not decode on the next attempt either,
-// so it must not burn the whole timeout window.
-func TestRetryablePoll_DecodeFailureIsNotRetried(t *testing.T) {
-	if retryablePoll(fmt.Errorf("decoding response: %w", errors.New("unexpected EOF"))) {
-		t.Error("expected a decode failure to fail fast")
+// A syntactically bad body will be just as bad next time, so it must not burn
+// the whole timeout window. Driven end to end: classifying on a message string
+// would pin nothing about the production path.
+func TestClient_WaitForInstanceDeletion_MalformedBodyFailsFast(t *testing.T) {
+	shrinkDeletionPolling(t)
+	var gets int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&gets, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("{ this is not json"))
+	})
+
+	err := c.WaitForInstanceDeletion(context.Background(), "abc-123", 30*time.Second)
+	if err == nil {
+		t.Fatal("expected an undecodable body to fail")
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("expected a fast failure, not a timeout: %v", err)
+	}
+	if got := atomic.LoadInt32(&gets); got != 1 {
+		t.Errorf("expected a single poll, got %d", got)
+	}
+}
+
+// A read that dies in transit is the transport failing, not the server sending
+// garbage — the case retrying exists for.
+func TestRetryablePoll_TruncatedReadIsRetried(t *testing.T) {
+	if !retryablePoll(fmt.Errorf("decoding response: %w", io.ErrUnexpectedEOF)) {
+		t.Error("expected a truncated read to be retried")
+	}
+	if retryablePoll(fmt.Errorf("%w: bad", errMalformedBody)) {
+		t.Error("expected a malformed body to fail fast")
+	}
+}
+
+// 429 is the one 4xx that fixes itself, and a fleet destroy is exactly the
+// workload that trips the limiter.
+func TestRetryablePoll_RateLimitIsRetried(t *testing.T) {
+	if !retryablePoll(&APIError{StatusCode: http.StatusTooManyRequests}) {
+		t.Error("expected 429 to be retried")
 	}
 }
 

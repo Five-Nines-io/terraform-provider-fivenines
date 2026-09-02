@@ -1,10 +1,14 @@
 package resources
 
 import (
+	"context"
 	"testing"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 )
 
 // --- optionalString ---
@@ -195,6 +199,135 @@ func TestMapWorkflowToState_NilOptionals(t *testing.T) {
 	}
 	if !state.NextEvaluationAt.IsNull() {
 		t.Error("expected next_evaluation_at to be null")
+	}
+}
+
+// --- mapHostGroupToState ---
+
+func TestMapHostGroupToState(t *testing.T) {
+	group := &client.HostGroup{
+		ID:        7,
+		Name:      "Production",
+		Position:  2,
+		CreatedAt: "2026-01-01T00:00:00Z",
+		UpdatedAt: "2026-01-02T00:00:00Z",
+	}
+
+	state := &hostGroupModel{}
+	mapHostGroupToState(group, state)
+
+	if state.ID.ValueInt64() != 7 {
+		t.Errorf("expected ID 7, got %d", state.ID.ValueInt64())
+	}
+	if state.Name.ValueString() != "Production" {
+		t.Errorf("expected name Production, got %s", state.Name.ValueString())
+	}
+	if state.Position.ValueInt64() != 2 {
+		t.Errorf("expected position 2, got %d", state.Position.ValueInt64())
+	}
+	if state.UpdatedAt.ValueString() != "2026-01-02T00:00:00Z" {
+		t.Errorf("expected updated_at 2026-01-02T00:00:00Z, got %s", state.UpdatedAt.ValueString())
+	}
+}
+
+// Groups that were never explicitly positioned come back with position 0, which
+// must land in state as a known 0 rather than null.
+func TestMapHostGroupToState_UnpositionedGroup(t *testing.T) {
+	group := &client.HostGroup{
+		ID:        1,
+		Name:      "Legacy",
+		Position:  0,
+		CreatedAt: "2026-01-01T00:00:00Z",
+		UpdatedAt: "2026-01-01T00:00:00Z",
+	}
+
+	state := &hostGroupModel{}
+	mapHostGroupToState(group, state)
+
+	if state.Position.IsNull() {
+		t.Fatal("expected position to be known")
+	}
+	if state.Position.ValueInt64() != 0 {
+		t.Errorf("expected position 0, got %d", state.Position.ValueInt64())
+	}
+}
+
+// --- unknownOnPositionChange ---
+
+var hostGroupObjectType = tftypes.Object{
+	AttributeTypes: map[string]tftypes.Type{"position": tftypes.Number},
+}
+
+// hostGroupRaw builds the raw plan/state value the plan modifier inspects. A nil
+// position stands for the whole object being absent (create or destroy).
+func hostGroupRaw(present bool) tftypes.Value {
+	if !present {
+		return tftypes.NewValue(hostGroupObjectType, nil)
+	}
+	return tftypes.NewValue(hostGroupObjectType, map[string]tftypes.Value{
+		"position": tftypes.NewValue(tftypes.Number, 1),
+	})
+}
+
+func TestUnknownOnPositionChange(t *testing.T) {
+	tests := []struct {
+		name         string
+		planPresent  bool
+		statePresent bool
+		planValue    types.Int64
+		stateValue   types.Int64
+		wantUnknown  bool
+	}{
+		{
+			name:         "create with an explicit position defers to the API",
+			planPresent:  true,
+			statePresent: false,
+			planValue:    types.Int64Value(2),
+			stateValue:   types.Int64Null(),
+			wantUnknown:  true,
+		},
+		{
+			name:         "update that moves the group defers to the API",
+			planPresent:  true,
+			statePresent: true,
+			planValue:    types.Int64Value(3),
+			stateValue:   types.Int64Value(1),
+			wantUnknown:  true,
+		},
+		{
+			name:         "unchanged position stays known",
+			planPresent:  true,
+			statePresent: true,
+			planValue:    types.Int64Value(1),
+			stateValue:   types.Int64Value(1),
+			wantUnknown:  false,
+		},
+		{
+			name:         "destroy plan is left alone",
+			planPresent:  false,
+			statePresent: true,
+			planValue:    types.Int64Null(),
+			stateValue:   types.Int64Value(1),
+			wantUnknown:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := planmodifier.Int64Request{
+				Plan:       tfsdk.Plan{Raw: hostGroupRaw(tt.planPresent)},
+				State:      tfsdk.State{Raw: hostGroupRaw(tt.statePresent)},
+				PlanValue:  tt.planValue,
+				StateValue: tt.stateValue,
+			}
+			resp := &planmodifier.Int64Response{PlanValue: tt.planValue}
+
+			unknownOnPositionChange{}.PlanModifyInt64(context.Background(), req, resp)
+
+			if got := resp.PlanValue.IsUnknown(); got != tt.wantUnknown {
+				t.Errorf("expected unknown=%v, got plan value %v", tt.wantUnknown, resp.PlanValue)
+			}
+		})
 	}
 }
 

@@ -379,6 +379,28 @@ type UpdateStatusPageInput struct {
 	Items                   []StatusPageItem `json:"items,omitempty"`
 }
 
+// HostGroup represents a named group of monitored hosts.
+type HostGroup struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Position  int64  `json:"position"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// CreateHostGroupInput is the request body for creating a host group.
+type CreateHostGroupInput struct {
+	Name string `json:"name"`
+	// Position is 1-based. Omitted, the group is created on top of the list.
+	Position *int64 `json:"position,omitempty"`
+}
+
+// UpdateHostGroupInput is the request body for updating a host group.
+type UpdateHostGroupInput struct {
+	Name     *string `json:"name,omitempty"`
+	Position *int64  `json:"position,omitempty"`
+}
+
 // APIError represents an error response from the API.
 type APIError struct {
 	StatusCode int

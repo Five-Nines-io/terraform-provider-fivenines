@@ -12,6 +12,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_workflow` | Automation workflows with version management |
 | `fivenines_network_device` | SNMP-monitored network devices |
 | `fivenines_status_page` | Public status pages with items |
+| `fivenines_host_group` | Named groups of hosts |
 
 ## Data Sources
 
@@ -83,6 +84,12 @@ resource "fivenines_network_device" "switch" {
   snmp_community = var.snmp_community
 }
 
+# Group hosts by environment
+resource "fivenines_host_group" "production" {
+  name     = "Production"
+  position = 1
+}
+
 # Create a public status page
 resource "fivenines_status_page" "public" {
   name   = "Service Status"
@@ -122,6 +129,7 @@ terraform import fivenines_uptime_monitor.api <monitor-uuid>
 terraform import fivenines_workflow.alert <workflow-id>
 terraform import fivenines_network_device.switch <device-uuid>
 terraform import fivenines_status_page.public <status-page-id>
+terraform import fivenines_host_group.production <host-group-id>
 ```
 
 ## Development

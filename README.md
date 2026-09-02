@@ -21,6 +21,8 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_integrations` | Configured notification integrations |
 | `fivenines_workflow_runs` | Workflow execution history |
 | `fivenines_incidents` | Incidents triggered by workflows |
+| `fivenines_uptime_monitors` | Uptime monitors, filterable by status, protocol, search text and update time |
+| `fivenines_uptime_monitor_status` | Lightweight current status of a single uptime monitor |
 
 ## Quick Start
 
@@ -134,16 +136,22 @@ make install    # install locally for testing
 make docs       # regenerate registry documentation
 ```
 
+`make docs` regenerates `docs/` from the Go schema descriptions and `examples/`.
+Never hand-edit `docs/` — CI regenerates it and fails on any diff. From a checkout
+not named `terraform-provider-fivenines` (a git worktree, for example) run
+`tfplugindocs generate --provider-name fivenines --rendered-provider-name terraform-provider-fivenines`
+instead; the bare command infers the wrong provider name, deletes `docs/`, and fails.
+
 ## Publishing
 
-Releases are automated via GitHub Actions. To create a release:
+Releases are automated via GitHub Actions. The git tag *is* the version — there is no `VERSION` file and no changelog to update. To create a release:
 
 ```bash
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
-This triggers GoReleaser to build cross-platform binaries, sign checksums with GPG, and create a GitHub release. The Terraform Registry picks up new releases automatically.
+This triggers GoReleaser to build cross-platform binaries, sign checksums with GPG, and create a GitHub release, with release notes generated from the commit subjects since the last tag. The Terraform Registry picks up new releases automatically.
 
 ### Required GitHub Secrets
 

@@ -16,7 +16,7 @@ terraform {
   required_providers {
     fivenines = {
       source  = "Five-Nines-io/fivenines"
-      version = "~> 0.1"
+      version = "~> 0.3"
     }
   }
 }

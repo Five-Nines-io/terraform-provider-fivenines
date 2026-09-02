@@ -36,9 +36,11 @@ func (p *fiveninesProvider) Schema(_ context.Context, _ provider.SchemaRequest, 
 		Description: "Terraform provider for FiveNines server monitoring and observability platform.",
 		Attributes: map[string]schema.Attribute{
 			"api_key": schema.StringAttribute{
-				Description: "FiveNines API key (starts with fn_). Can also be set via FIVENINES_API_KEY environment variable.",
-				Optional:    true,
-				Sensitive:   true,
+				Description: "FiveNines API key (starts with `fn_`). Must carry the **write** scope: " +
+					"a read-scoped token answers 403 on every create, update and delete. " +
+					"Can also be set via the FIVENINES_API_KEY environment variable.",
+				Optional:  true,
+				Sensitive: true,
 			},
 			"base_url": schema.StringAttribute{
 				Description: "FiveNines API base URL. Defaults to https://fivenines.io. Can also be set via FIVENINES_BASE_URL environment variable.",

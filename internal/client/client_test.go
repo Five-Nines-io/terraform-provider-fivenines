@@ -2311,6 +2311,115 @@ func TestClient_RateLimit_ContextCancellation(t *testing.T) {
 	}
 }
 
+// --- Error Envelope (code / request_id) ---
+
+// The exact shape the PUBLIC envelope renders through render_error: error plus
+// request_id, and no code — the public renderer drops it. Nothing in the client
+// may require a code to work, so this is the fixture that matters.
+func TestClient_APIError_ParsesRequestIDFromBody(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "header-id")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Not found", "request_id": "body-id",
+		})
+	})
+
+	_, _, err := c.GetInstance(context.Background(), "missing")
+	apiErr := AsAPIError(err)
+	if apiErr == nil {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	// The body wins: it survives a proxy that strips response headers.
+	if apiErr.RequestID != "body-id" {
+		t.Errorf("expected request_id %q, got %q", "body-id", apiErr.RequestID)
+	}
+	if apiErr.Code != "" {
+		t.Errorf("the public envelope emits no code, got %q", apiErr.Code)
+	}
+	if !IsNotFound(err) {
+		t.Error("a 404 with no code must still classify as not-found")
+	}
+}
+
+// Code is parsed when a surface DOES send one (the partner envelope carries a
+// code today, and the public error table is specified to grow one). This is
+// forward-compatibility only: no behaviour may depend on it, which is why the
+// case above is the one that drives IsNotFound.
+func TestClient_APIError_ParsesCodeWhenPresent(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Unknown query key: statuss", "request_id": "req-9",
+			"code": "unknown_parameter",
+		})
+	})
+
+	_, _, err := c.GetInstance(context.Background(), "abc")
+	apiErr := AsAPIError(err)
+	if apiErr == nil {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.Code != ErrCodeUnknownParameter {
+		t.Errorf("expected code %q, got %q", ErrCodeUnknownParameter, apiErr.Code)
+	}
+	// A 400 is not drift, whatever code it carries.
+	if IsNotFound(err) {
+		t.Error("a 400 must never classify as not-found")
+	}
+}
+
+// A 422 renders `{"errors": [...]}` alone — no message, no request_id — so the
+// only place to recover the correlation id is the X-Request-Id header.
+func TestClient_APIError_RequestIDFallsBackToHeader(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "header-id")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]interface{}{"errors": []string{"Name can't be blank"}})
+	})
+
+	_, err := c.CreateInstance(context.Background(), CreateInstanceInput{})
+	apiErr := AsAPIError(err)
+	if apiErr == nil {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.RequestID != "header-id" {
+		t.Errorf("expected request_id from header %q, got %q", "header-id", apiErr.RequestID)
+	}
+}
+
+// The request_id must reach the diagnostic, which renders err.Error().
+func TestAPIError_ErrorStringIncludesRequestIDAndCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  *APIError
+		want string
+	}{
+		{
+			name: "code and request_id",
+			err:  &APIError{StatusCode: 404, Message: "Not found", Code: ErrCodeNotFound, RequestID: "req-1"},
+			want: "API error 404 [not_found]: Not found (request_id: req-1)",
+		},
+		{
+			name: "validation errors without code",
+			err:  &APIError{StatusCode: 422, Errors: []string{"Name can't be blank"}, RequestID: "req-2"},
+			want: "API error 422: [Name can't be blank] (request_id: req-2)",
+		},
+		{
+			name: "no code, no request_id (pre-envelope server)",
+			err:  &APIError{StatusCode: 500, Message: "boom"},
+			want: "API error 500: boom",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.Error(); got != tt.want {
+				t.Errorf("Error() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- Update input clearing convention, outside the uptime monitor ---
 //
 // The same tag convention #9 established for protocol-scoped monitor fields
@@ -2866,6 +2975,107 @@ func TestClient_CreateAPIToken_RejectionIsAnError(t *testing.T) {
 				t.Errorf("expected status %d, got %d", tc.status, apiErr.StatusCode)
 			}
 		})
+	}
+}
+
+// A non-JSON body (an HTML 404 from a routing miss, or a proxy error page) must
+// still produce a usable APIError rather than a blank one.
+func TestClient_APIError_NonJSONBody(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "header-id")
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, "<html>502 Bad Gateway</html>\n")
+	})
+
+	_, _, err := c.GetInstance(context.Background(), "abc")
+	apiErr := AsAPIError(err)
+	if apiErr == nil {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.Message != "<html>502 Bad Gateway</html>" {
+		t.Errorf("expected raw body as message, got %q", apiErr.Message)
+	}
+	if apiErr.RequestID != "header-id" {
+		t.Errorf("expected request_id from header, got %q", apiErr.RequestID)
+	}
+}
+
+func TestErrorPredicates(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func(error) bool
+		err  error
+		want bool
+	}{
+		{"404 is not found", IsNotFound, &APIError{StatusCode: 404}, true},
+		// The status decides, not the code. This case is the guard on that:
+		// IsNotFound authorises state removal, so a non-404 that merely
+		// mentions not_found must NOT be allowed to delete a live resource
+		// from state.
+		{"not_found code without a 404 status is not not-found", IsNotFound,
+			&APIError{StatusCode: 400, Code: ErrCodeNotFound}, false},
+		{"403 is not not-found", IsNotFound, &APIError{StatusCode: 403}, false},
+		{"401 is not not-found", IsNotFound, &APIError{StatusCode: 401}, false},
+		{"non-API error is not not-found", IsNotFound, fmt.Errorf("dial tcp: refused"), false},
+		{"nil error is not not-found", IsNotFound, nil, false},
+		{"412 is precondition failed", IsPreconditionFailed, &APIError{StatusCode: 412}, true},
+		{"409 is not precondition failed", IsPreconditionFailed, &APIError{StatusCode: 409}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.fn(tt.err); got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// The predicates must see through a wrapped error, since AsAPIError uses errors.As.
+func TestErrorPredicates_Wrapped(t *testing.T) {
+	wrapped := fmt.Errorf("reading instance: %w", &APIError{StatusCode: 404})
+	if !IsNotFound(wrapped) {
+		t.Error("expected IsNotFound to unwrap a wrapped *APIError")
+	}
+}
+
+// --- Dry Run ---
+
+func TestClient_DryRun(t *testing.T) {
+	var gotHeader string
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Dry-Run")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instance": map[string]interface{}{"id": "abc-123", "display_name": "dry"},
+		})
+	})
+
+	if _, err := c.CreateInstance(WithDryRun(context.Background()), CreateInstanceInput{DisplayName: "dry"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The server parses the header as a boolean and 400s on anything outside
+	// its accepted token set, so the value must be one of those tokens.
+	if gotHeader != "true" {
+		t.Errorf("expected X-Dry-Run 'true', got %q", gotHeader)
+	}
+}
+
+func TestClient_NoDryRunHeaderByDefault(t *testing.T) {
+	var present bool
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, present = r.Header["X-Dry-Run"]
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"instance": map[string]interface{}{"id": "abc-123", "display_name": "real"},
+		})
+	})
+
+	if _, err := c.CreateInstance(context.Background(), CreateInstanceInput{DisplayName: "real"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Absent, not "false": the header must not be sent at all on a real write.
+	if present {
+		t.Error("expected no X-Dry-Run header on a normal request")
 	}
 }
 

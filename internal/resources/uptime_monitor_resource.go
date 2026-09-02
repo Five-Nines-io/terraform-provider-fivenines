@@ -539,7 +539,7 @@ func (r *uptimeMonitorResource) Read(ctx context.Context, req resource.ReadReque
 
 	monitor, _, err := r.client.GetUptimeMonitor(ctx, state.ID.ValueString())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -758,7 +758,7 @@ func (r *uptimeMonitorResource) Delete(ctx context.Context, req resource.DeleteR
 
 	err := r.client.DeleteUptimeMonitor(ctx, state.ID.ValueString())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting uptime monitor", err.Error())

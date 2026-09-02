@@ -324,7 +324,7 @@ func (r *networkDeviceResource) Read(ctx context.Context, req resource.ReadReque
 
 	device, _, err := r.client.GetNetworkDevice(ctx, state.ID.ValueString())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -428,7 +428,7 @@ func (r *networkDeviceResource) Delete(ctx context.Context, req resource.DeleteR
 
 	accepted, err := r.client.DeleteNetworkDevice(ctx, id)
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting network device", err.Error())

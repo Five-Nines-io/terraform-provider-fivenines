@@ -58,6 +58,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if isDryRun(ctx) {
+		req.Header.Set("X-Dry-Run", dryRunHeaderValue)
+	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -112,18 +115,45 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	return resp, nil
 }
 
+// dryRunHeaderValue is the token sent for X-Dry-Run. The server parses the
+// header as a BOOLEAN rather than testing for presence, and accepts only
+// true/1/t/yes/y/on (or their false counterparts) — anything else is a 400
+// with code invalid_dry_run_header rather than a guess.
+const dryRunHeaderValue = "true"
+
+// dryRunKey is the context key carrying the dry-run opt-in. Unexported and of a
+// distinct type so no other package can collide with it.
+type dryRunKey struct{}
+
+// WithDryRun returns a context that makes every request built from it send
+// X-Dry-Run: true. The server runs the action inside a transaction and rolls it
+// back, returning the JSON the real write would have produced — so a caller can
+// validate a risky write (org members, workflow graphs) without performing it.
+//
+// It is context-scoped rather than a field on Client because a dry run is a
+// property of one call, not of the client: a Client with dry-run latched on
+// would silently discard every write made through it.
+func WithDryRun(ctx context.Context) context.Context {
+	return context.WithValue(ctx, dryRunKey{}, true)
+}
+
+// isDryRun reports whether ctx was marked by WithDryRun.
+func isDryRun(ctx context.Context) bool {
+	v, _ := ctx.Value(dryRunKey{}).(bool)
+	return v
+}
+
 // sanitizeETag strips the "-gzip" suffix that Nginx/reverse proxies append
 // to strong ETags when gzip-compressing the response body.
 func sanitizeETag(etag string) string {
 	return strings.Replace(etag, "-gzip\"", "\"", 1)
 }
 
-// IsPreconditionFailed returns true if the error is a 412 Precondition Failed.
+// IsPreconditionFailed returns true if the error is a 412 Precondition Failed:
+// an If-Match ETag no longer matches because the resource changed underneath us.
 func IsPreconditionFailed(err error) bool {
-	if apiErr, ok := err.(*APIError); ok {
-		return apiErr.StatusCode == 412
-	}
-	return false
+	apiErr := AsAPIError(err)
+	return apiErr != nil && apiErr.StatusCode == http.StatusPreconditionFailed
 }
 
 // parseError reads an error response body into an APIError.
@@ -133,7 +163,15 @@ func parseError(resp *http.Response) error {
 
 	apiErr := &APIError{StatusCode: resp.StatusCode}
 	if err := json.Unmarshal(body, apiErr); err != nil {
-		apiErr.Message = string(body)
+		apiErr.Message = strings.TrimSpace(string(body))
+	}
+
+	// Not every error path renders request_id INTO the body: a 422 carries only
+	// its `errors` array, and the authentication 401s only their message. The
+	// X-Request-Id header is set on every response, so prefer the body (which
+	// survives a proxy that strips headers) and fall back to the header.
+	if apiErr.RequestID == "" {
+		apiErr.RequestID = resp.Header.Get("X-Request-Id")
 	}
 	// A body keyed differently ({"message": ...}, {"detail": ...}) unmarshals
 	// without error and leaves both fields empty, which renders as a diagnostic

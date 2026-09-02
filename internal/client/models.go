@@ -2,7 +2,10 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 )
 
 // PaginationMeta represents pagination metadata in list responses.
@@ -1123,18 +1126,85 @@ type DashboardTemplateSkip struct {
 	Reason string `json:"reason"`
 }
 
+// Machine-readable error codes from the public API contract's error table —
+// the vocabulary for reading APIError.Code, so callers match a constant instead
+// of a string literal.
+//
+// Two things are true about them and both matter. The PUBLIC envelope currently
+// DISCARDS the code (only the partner envelope renders one), so APIError.Code
+// is empty against today's server on every path. And no decision in this client
+// branches on a code: IsNotFound deliberately reads the STATUS alone, because a
+// predicate that authorises removing a resource from Terraform state must not
+// widen onto a field the transport does not guarantee. Codes are surfaced in
+// Error() and available to callers; nothing may REQUIRE one to work.
+const (
+	ErrCodeUnknownParameter    = "unknown_parameter"
+	ErrCodeInvalidFilter       = "invalid_filter"
+	ErrCodeInvalidBody         = "invalid_body"
+	ErrCodeMissingParameter    = "missing_parameter"
+	ErrCodeInvalidDryRunHeader = "invalid_dry_run_header"
+	ErrCodeForbidden           = "forbidden"
+	ErrCodeNotFound            = "not_found"
+)
+
 // APIError represents an error response from the API.
+//
+// The public API (/api/v1) error envelope is `{"error", "request_id"}`, except
+// on a 422 validation failure, which renders `{"errors": [...]}` alone — no
+// message and no request_id. RequestID therefore falls back to the X-Request-Id
+// response header (set on every response); see parseError.
 type APIError struct {
 	StatusCode int
 	Message    string   `json:"error"`
 	Errors     []string `json:"errors"`
+	// Code is the machine-readable code from the contract's error table. Empty
+	// against a server whose public envelope drops it — always keep a
+	// status-code fallback when branching on it.
+	Code string `json:"code"`
+	// RequestID is what a support ticket should quote.
+	RequestID string `json:"request_id"`
 }
 
 func (e *APIError) Error() string {
-	if len(e.Errors) > 0 {
-		return fmt.Sprintf("API error %d: %v", e.StatusCode, e.Errors)
+	var b strings.Builder
+	fmt.Fprintf(&b, "API error %d", e.StatusCode)
+	if e.Code != "" {
+		fmt.Fprintf(&b, " [%s]", e.Code)
 	}
-	return fmt.Sprintf("API error %d: %s", e.StatusCode, e.Message)
+	if len(e.Errors) > 0 {
+		fmt.Fprintf(&b, ": %v", e.Errors)
+	} else if e.Message != "" {
+		fmt.Fprintf(&b, ": %s", e.Message)
+	}
+	// Appended here rather than at each call site so every diagnostic that
+	// renders err.Error() carries it without the resource layer opting in.
+	if e.RequestID != "" {
+		fmt.Fprintf(&b, " (request_id: %s)", e.RequestID)
+	}
+	return b.String()
+}
+
+// AsAPIError returns err as an *APIError, or nil if it is not one.
+func AsAPIError(err error) *APIError {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr
+	}
+	return nil
+}
+
+// IsNotFound reports whether err is a 404 — the resource is gone and Terraform
+// should drop it from state rather than fail.
+//
+// The STATUS decides, never Code. This predicate authorises state removal, so a
+// false positive silently drops a live resource out of Terraform's management;
+// the status is the one signal the transport guarantees. Matching Code too
+// would widen that authority onto a field the public envelope does not even
+// emit, and it would buy nothing: every `not_found` the server renders is
+// already paired with a 404.
+func IsNotFound(err error) bool {
+	apiErr := AsAPIError(err)
+	return apiErr != nil && apiErr.StatusCode == http.StatusNotFound
 }
 
 // StatusPageMaintenanceWindow represents a scheduled maintenance window on a status page.

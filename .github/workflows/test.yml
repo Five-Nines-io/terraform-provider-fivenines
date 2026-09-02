@@ -18,6 +18,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # The plan tests drive REAL Terraform against a fake API, so they are
+      # hermetic — no organisation, no key — but they SKIP when the binary is
+      # missing. Without this step they were skipping here, which is the worst
+      # of both worlds: a green build that ran none of the checks that catch a
+      # plan-time or apply-time inconsistency.
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.*"
+          terraform_wrapper: false
       - run: go build ./...
       - run: go test ./... -v
 

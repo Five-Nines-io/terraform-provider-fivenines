@@ -338,6 +338,17 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		input  interface{}
 		policy map[string]string
 	}{
+		input: CreateEnrollmentTokenInput{},
+		policy: map[string]string{
+			// The whole input. The API accepts a name and nothing else — no expiry,
+			// no registration cap — and there is no update endpoint, so there is no
+			// nil case and no unrelated apply that could reach this field.
+			"name": always,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
 		input: CreateWorkflowVersionInput{},
 		policy: map[string]string{
 			// A version is meaningless without its graph, and the resource always

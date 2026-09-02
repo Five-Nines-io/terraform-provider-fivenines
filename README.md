@@ -12,6 +12,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_workflow` | Automation workflows with version management |
 | `fivenines_network_device` | SNMP-monitored network devices |
 | `fivenines_status_page` | Public status pages with items |
+| `fivenines_integration` | Notification channels (webhook, PagerDuty, Pushover) |
 
 ## Data Sources
 
@@ -63,6 +64,13 @@ resource "fivenines_task" "backup" {
   schedule_type = "cron"
   schedule      = "0 2 * * *"
   grace_period_minutes = 5
+}
+
+# Notify a webhook — workflow notification nodes reference it by integration_id
+resource "fivenines_integration" "ops_webhook" {
+  type = "webhook"
+  name = "Ops hook"
+  url  = "https://example.com/hooks/fivenines"
 }
 
 # Create a workflow with execution graph
@@ -123,6 +131,12 @@ terraform import fivenines_workflow.alert <workflow-id>
 terraform import fivenines_network_device.switch <device-uuid>
 terraform import fivenines_status_page.public <status-page-id>
 ```
+
+`fivenines_integration` has no import: the API never returns an integration's
+URL, routing key or tokens, so an imported channel would plan an immediate
+destroy-and-recreate. Reference channels created elsewhere — including Slack,
+Discord, Teams, Telegram and email, which cannot be created over the API at all —
+with the `fivenines_integrations` data source.
 
 ## Development
 

@@ -46,8 +46,9 @@
 ## P2 — Nice to have
 
 ### Cross-field validation
-- No `ConfigValidators` anywhere: cron ⇒ `schedule`, interval ⇒ `interval_seconds`,
-  https ⇒ `url`, tcp ⇒ `hostname`+`port`, dns ⇒ `dns_record_type`
+- Only `fivenines_integration` validates its type-dependent arguments. Still
+  missing: cron ⇒ `schedule`, interval ⇒ `interval_seconds`, https ⇒ `url`,
+  tcp ⇒ `hostname`+`port`, dns ⇒ `dns_record_type`
 - The API 422s cleanly, so this is UX only: fail at plan time, not apply time
 
 ### ping_key security model

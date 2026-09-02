@@ -1060,22 +1060,42 @@ func (c *Client) ListProbeRegions(ctx context.Context) ([]ProbeRegion, error) {
 
 // --- Integrations ---
 
+// ListIntegrations walks the whole index. The endpoint became paginated on
+// 2026-09-01 at 25 per page; until it routed through morePages this was a
+// single un-paginated GET, so an organisation with more than 25 channels got a
+// silently truncated list — the same failure the meta rename caused everywhere
+// else, arriving separately because this loop never had a meta to misread.
 func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
-	resp, err := c.doRequest(ctx, "GET", "/api/v1/integrations", nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, parseError(resp)
-	}
+	var all []Integration
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/integrations?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
 
-	var result struct {
-		Integrations []Integration `json:"integrations"`
+		var result struct {
+			Integrations []Integration  `json:"integrations"`
+			Meta         PaginationMeta `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.Integrations...)
+		more, err := morePages(len(result.Integrations), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
+			break
+		}
+		page++
 	}
-	if err := decodeResponse(resp, &result); err != nil {
-		return nil, fmt.Errorf("decoding response: %w", err)
-	}
-	return result.Integrations, nil
+	return all, nil
 }
 
 // --- Incidents ---

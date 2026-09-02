@@ -1235,6 +1235,7 @@ func TestClient_ListIntegrations(t *testing.T) {
 			"integrations": []map[string]interface{}{
 				{"id": 1, "type": "SlackIntegration", "name": "Slack", "provider": "slack", "enabled": true, "verified": true, "created_at": "2026-01-01T00:00:00Z"},
 			},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
 		})
 	})
 
@@ -1247,6 +1248,68 @@ func TestClient_ListIntegrations(t *testing.T) {
 	}
 	if integrations[0].Provider != "slack" {
 		t.Errorf("expected provider slack, got %s", integrations[0].Provider)
+	}
+}
+
+// The index went 25-per-page on 2026-09-01 while this client still sent a
+// single un-paginated GET, so an organisation with more channels than one page
+// silently lost the rest — and the data source fed that short list to for_each.
+func TestClient_ListIntegrations_Pagination(t *testing.T) {
+	var requestCount int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := int(atomic.AddInt32(&requestCount, 1))
+		if got := r.URL.Query().Get("page"); got != strconv.Itoa(page) {
+			t.Errorf("request %d asked for page %q, want %d", page, got, page)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"integrations": []map[string]interface{}{
+				{"id": page, "type": "WebhookIntegration", "provider": "Webhook"},
+			},
+			"meta": map[string]int{"current_page": page, "total_pages": 3, "total_count": 3, "per_page": 1},
+		})
+	})
+
+	integrations, err := c.ListIntegrations(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(integrations) != 3 {
+		t.Fatalf("expected 3 integrations across 3 pages, got %d", len(integrations))
+	}
+	for i, want := range []int64{1, 2, 3} {
+		if integrations[i].ID != want {
+			t.Errorf("integration %d: expected id %d, got %d", i, want, integrations[i].ID)
+		}
+	}
+}
+
+// An envelope the client cannot read must over-fetch, not truncate: that is the
+// guard morePages exists for, and the reason the last meta rename cost eight
+// list loops instead of being caught by one.
+func TestClient_ListIntegrations_UnrecognisedMetaWalksToEmptyPage(t *testing.T) {
+	var requestCount int32
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := atomic.AddInt32(&requestCount, 1)
+		body := map[string]interface{}{
+			"integrations": []map[string]interface{}{},
+			// The pre-2026-09 envelope: every field decodes to zero.
+			"meta": map[string]int{"count": 1, "total": 2, "offset": 0},
+		}
+		if page == 1 {
+			body["integrations"] = []map[string]interface{}{{"id": 1, "type": "WebhookIntegration"}}
+		}
+		json.NewEncoder(w).Encode(body)
+	})
+
+	integrations, err := c.ListIntegrations(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(integrations) != 1 {
+		t.Errorf("expected 1 integration, got %d", len(integrations))
+	}
+	if requestCount != 2 {
+		t.Errorf("expected the walk to continue past the unreadable meta to an empty page (2 requests), got %d", requestCount)
 	}
 }
 
@@ -1437,6 +1500,27 @@ func TestClient_DeleteIntegration(t *testing.T) {
 
 	if err := c.DeleteIntegration(context.Background(), 7); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// Delete is the one integration call with no body to decode, so the status code
+// is the entire result. Swallowing a non-204 would drop the channel from state
+// while it still exists server-side and still delivers.
+func TestClient_DeleteIntegration_Errors(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusNotFound, http.StatusInternalServerError} {
+		_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "nope"})
+		})
+
+		err := c.DeleteIntegration(context.Background(), 7)
+		apiErr, ok := err.(*APIError)
+		if !ok {
+			t.Fatalf("status %d: expected *APIError, got %T (%v)", status, err, err)
+		}
+		if apiErr.StatusCode != status {
+			t.Errorf("expected status %d, got %d", status, apiErr.StatusCode)
+		}
 	}
 }
 

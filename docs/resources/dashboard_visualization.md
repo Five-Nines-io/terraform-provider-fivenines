@@ -150,10 +150,10 @@ resource "fivenines_dashboard_visualization" "noisiest_hosts" {
 
 - `chart_type` (String) The panel type. Must be one the metric can render.
 - `description` (String) Panel description. Stored stripped of surrounding whitespace, and a blank one is stored as no description at all.
-- `layout` (Attributes) Grid geometry in 24-column gridstack space, relative to the panel's own section. Omit it and the dashboard places the panel; `x + w` may not exceed 24. (see [below for nested schema](#nestedatt--layout))
+- `layout` (Attributes) Grid geometry in 24-column gridstack space, relative to the panel's own section. Omit it and the dashboard places the panel and keeps owning the position — it is read back into state but never written, so dragging the panel in the UI survives an unrelated change here. `x + w` may not exceed 24. (see [below for nested schema](#nestedatt--layout))
 - `options` (Attributes) Panel settings. Which ones apply depends on the panel type; an inapplicable one is stored and ignored. Leaving a setting unset means the panel renders the metric's own default, and removing one from the configuration clears it back to that default rather than leaving the old value behind. (see [below for nested schema](#nestedatt--options))
 - `section` (String) The NAME of a section on this dashboard, or unset for the ungrouped grid at the top. A name that does not exist is an error — create the `fivenines_dashboard_section` first and reference its `name`, which also gives Terraform the dependency it needs to order the two.
-- `targets` (Attributes) The entities this panel charts, by kind. Send only the kind the metric binds — `target_kind` says which that is, and attaching the wrong kind is rejected. Org-wide metrics take no entities at all. (see [below for nested schema](#nestedatt--targets))
+- `targets` (Attributes) The entities this panel charts, by kind. Send only the kind the metric binds — `target_kind` says which that is, and attaching the wrong kind is rejected. Org-wide metrics take no entities at all. Omit the block entirely and the panel's entities are left to the dashboard: they are read back into state but never written, so an unrelated change here cannot detach something attached in the UI. (see [below for nested schema](#nestedatt--targets))
 - `title` (String) Panel title. Stored stripped of surrounding whitespace, and a blank one is stored as no title at all — so write the trimmed value or leave it unset.
 
 ### Read-Only

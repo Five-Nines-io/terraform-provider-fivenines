@@ -293,7 +293,7 @@ func TestVisualizationInputFromPlan_AlwaysSendsOptions(t *testing.T) {
 		ChartType: types.StringValue("line"),
 	}
 
-	input := visualizationInputFromPlan(plan)
+	input := visualizationInputFromPlan(plan, plan)
 
 	// An absent options block must clear the panel's settings rather than leave
 	// them behind, which means sending the block with explicit nulls.
@@ -342,7 +342,7 @@ func TestVisualizationInputFromPlan_TargetsAndLayout(t *testing.T) {
 		Layout:  layout,
 	}
 
-	input := visualizationInputFromPlan(plan)
+	input := visualizationInputFromPlan(plan, plan)
 
 	if input.Targets.Hosts == nil || len(*input.Targets.Hosts) != 1 {
 		t.Errorf("expected one host, got %v", input.Targets.Hosts)
@@ -562,7 +562,7 @@ func TestVisualizationInputFromPlan_SendsMetricAndChartType(t *testing.T) {
 		Section:   types.StringValue("Compute"),
 	}
 
-	input := visualizationInputFromPlan(plan)
+	input := visualizationInputFromPlan(plan, plan)
 
 	if input.Metric != "memory_usage" {
 		t.Errorf("expected metric memory_usage, got %q", input.Metric)
@@ -591,10 +591,11 @@ func TestVisualizationInputFromPlan_UnknownTargetKindIsOmitted(t *testing.T) {
 		t.Fatalf("building targets: %v", diags)
 	}
 
-	input := visualizationInputFromPlan(&dashboardVisualizationModel{
+	declared := &dashboardVisualizationModel{
 		Metric:  types.StringValue("cpu_usage"),
 		Targets: targets,
-	})
+	}
+	input := visualizationInputFromPlan(declared, declared)
 
 	if input.Targets.Hosts == nil || len(*input.Targets.Hosts) != 1 {
 		t.Errorf("expected the configured hosts to be sent, got %v", input.Targets.Hosts)
@@ -643,5 +644,54 @@ func TestTemplateSkipWarning_SilentWhenNothingSkipped(t *testing.T) {
 	}
 	if _, _, ok := templateSkipWarning("postgresql", nil); ok {
 		t.Error("expected no warning for a nil result")
+	}
+}
+
+func TestVisualizationInputFromPlan_UndeclaredTargetsAreNotSent(t *testing.T) {
+	// The plan for an undeclared Optional+Computed block carries the prior
+	// state, so `plan` here holds a full set of target kinds while `config`
+	// holds none. Sending them would make an unrelated title edit replace the
+	// panel's entities with Terraform's last known set.
+	planned, diags := types.ObjectValue(visualizationTargetsAttrTypes, map[string]attr.Value{
+		"hosts":           stringListValue([]string{"host-uuid-1"}),
+		"uptime_monitors": stringListValue(nil),
+		"tasks":           stringListValue(nil),
+		"network_devices": stringListValue(nil),
+		"ceph_clusters":   stringListValue(nil),
+	})
+	if diags.HasError() {
+		t.Fatalf("building targets: %v", diags)
+	}
+	layout, diags := types.ObjectValue(visualizationLayoutAttrTypes, map[string]attr.Value{
+		"x": types.Int64Value(0), "y": types.Int64Value(6),
+		"w": types.Int64Value(12), "h": types.Int64Value(6),
+	})
+	if diags.HasError() {
+		t.Fatalf("building layout: %v", diags)
+	}
+
+	plan := &dashboardVisualizationModel{
+		Metric: types.StringValue("cpu_usage"), Targets: planned, Layout: layout,
+		Title: types.StringValue("Renamed"),
+	}
+	config := &dashboardVisualizationModel{
+		Metric: types.StringValue("cpu_usage"), Title: types.StringValue("Renamed"),
+		Targets: types.ObjectNull(visualizationTargetsAttrTypes),
+		Layout:  types.ObjectNull(visualizationLayoutAttrTypes),
+	}
+
+	input := visualizationInputFromPlan(plan, config)
+
+	if input.Targets != nil {
+		t.Errorf("expected undeclared targets to be omitted, got %+v", input.Targets)
+	}
+	// Same reasoning for the grid: a panel dragged in the dashboard must not be
+	// shoved back to Terraform's last known coordinates by a title change.
+	if input.Layout != nil {
+		t.Errorf("expected an undeclared layout to be omitted, got %+v", input.Layout)
+	}
+	// The attribute the configuration DOES own still goes out.
+	if input.Title == nil || *input.Title != "Renamed" {
+		t.Errorf("expected the configured title to be sent, got %v", input.Title)
 	}
 }

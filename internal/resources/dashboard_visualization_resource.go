@@ -144,7 +144,9 @@ func (r *dashboardVisualizationResource) Schema(_ context.Context, _ resource.Sc
 			},
 			"layout": schema.SingleNestedAttribute{
 				Description: "Grid geometry in 24-column gridstack space, relative to the panel's own " +
-					"section. Omit it and the dashboard places the panel; `x + w` may not exceed 24.",
+					"section. Omit it and the dashboard places the panel and keeps owning the " +
+					"position — it is read back into state but never written, so dragging the panel " +
+					"in the UI survives an unrelated change here. `x + w` may not exceed 24.",
 				Optional: true,
 				Computed: true,
 				Attributes: map[string]schema.Attribute{
@@ -177,7 +179,9 @@ func (r *dashboardVisualizationResource) Schema(_ context.Context, _ resource.Sc
 			"targets": schema.SingleNestedAttribute{
 				Description: "The entities this panel charts, by kind. Send only the kind the metric binds " +
 					"— `target_kind` says which that is, and attaching the wrong kind is rejected. " +
-					"Org-wide metrics take no entities at all.",
+					"Org-wide metrics take no entities at all. Omit the block entirely and the panel's " +
+					"entities are left to the dashboard: they are read back into state but never " +
+					"written, so an unrelated change here cannot detach something attached in the UI.",
 				Optional: true,
 				Computed: true,
 				Attributes: map[string]schema.Attribute{
@@ -296,8 +300,18 @@ func (r *dashboardVisualizationResource) Create(ctx context.Context, req resourc
 		return
 	}
 
+	// The CONFIG, not the plan: `layout` and `targets` are Optional+Computed, so
+	// an undeclared block plans to whatever the server last reported. Sending
+	// that back would make the provider assert ownership of entities and a grid
+	// position the configuration never claimed.
+	var config dashboardVisualizationModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	dashboardID := plan.DashboardID.ValueInt64()
-	input := visualizationInputFromPlan(&plan)
+	input := visualizationInputFromPlan(&plan, &config)
 
 	tflog.Debug(ctx, "Creating dashboard visualization", map[string]interface{}{
 		"dashboard_id": dashboardID,
@@ -349,9 +363,15 @@ func (r *dashboardVisualizationResource) Update(ctx context.Context, req resourc
 		return
 	}
 
+	var config dashboardVisualizationModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	dashboardID := plan.DashboardID.ValueInt64()
 	id := state.ID.ValueInt64()
-	input := visualizationInputFromPlan(&plan)
+	input := visualizationInputFromPlan(&plan, &config)
 
 	var panel *client.Visualization
 	for attempt := 0; attempt < 3; attempt++ {
@@ -407,21 +427,30 @@ func (r *dashboardVisualizationResource) ImportState(ctx context.Context, req re
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), types.Int64Value(id))...)
 }
 
-func visualizationInputFromPlan(plan *dashboardVisualizationModel) client.VisualizationInput {
+// visualizationInputFromPlan builds the write body. `config` decides whether the
+// Optional+Computed blocks are sent at all; `plan` supplies their values.
+//
+// The distinction is load-bearing for `targets`. An undeclared block plans to
+// the prior state, and sending that back means every apply REPLACES the panel's
+// entities with Terraform's last known set — so an unrelated title edit under
+// `-refresh=false` silently detaches whatever was attached in the dashboard
+// since. Omitting the key instead is what "the API owns this" means on the
+// wire, and it is the same call `position` makes on a section.
+func visualizationInputFromPlan(plan, config *dashboardVisualizationModel) client.VisualizationInput {
 	return client.VisualizationInput{
 		Title:       stringPtr(plan.Title),
 		Description: stringPtr(plan.Description),
 		Metric:      plan.Metric.ValueString(),
 		ChartType:   plan.ChartType.ValueString(),
 		Section:     stringPtr(plan.Section),
-		Layout:      layoutFromPlan(plan.Layout),
-		Targets:     targetsFromPlan(plan.Targets),
+		Layout:      layoutFromPlan(plan.Layout, config.Layout),
+		Targets:     targetsFromPlan(plan.Targets, config.Targets),
 		Options:     optionsFromPlan(plan.Options),
 	}
 }
 
-func layoutFromPlan(o types.Object) *client.VisualizationLayout {
-	if o.IsNull() || o.IsUnknown() {
+func layoutFromPlan(o, configured types.Object) *client.VisualizationLayout {
+	if configured.IsNull() || o.IsNull() || o.IsUnknown() {
 		return nil
 	}
 	attrs := o.Attributes()
@@ -433,8 +462,8 @@ func layoutFromPlan(o types.Object) *client.VisualizationLayout {
 	}
 }
 
-func targetsFromPlan(o types.Object) *client.VisualizationTargetsInput {
-	if o.IsNull() || o.IsUnknown() {
+func targetsFromPlan(o, configured types.Object) *client.VisualizationTargetsInput {
+	if configured.IsNull() || o.IsNull() || o.IsUnknown() {
 		return nil
 	}
 	attrs := o.Attributes()

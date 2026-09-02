@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
 // The dashboard resources are the provider's first with three nested write
@@ -50,6 +52,10 @@ type fakeDashboardAPI struct {
 	sectionDeleted          bool
 
 	panel map[string]interface{}
+
+	// lastPanelWrite is the raw body of the most recent panel write, so a test
+	// can assert on what was OMITTED rather than only on what came back.
+	lastPanelWrite map[string]interface{}
 }
 
 func newFakeDashboardAPI() *fakeDashboardAPI {
@@ -200,6 +206,7 @@ func (f *fakeDashboardAPI) handler() func(http.ResponseWriter, *http.Request) {
 
 		case strings.Contains(path, "/visualizations"):
 			if panel, ok := body["visualization"].(map[string]interface{}); ok {
+				f.lastPanelWrite = panel
 				f.applyPanel(panel, r.Method == http.MethodPost)
 			}
 			if r.Method == http.MethodPost {
@@ -579,6 +586,93 @@ resource "fivenines_dashboard_section" "compute" {
 			Config:             config,
 			PlanOnly:           true,
 			ExpectNonEmptyPlan: true,
+		}},
+	})
+}
+
+// An option the panel type cannot render is STORED and ignored, not rejected and
+// not dropped — the API says so outright, and panel_input.rb applies every key
+// in OPTION_KEYS with no chart-type gate. A review flagged this as an apply
+// inconsistency ("the API reads the unstored option back as null"); it is not,
+// and this test is the standing disproof so the claim does not get re-litigated.
+func TestDashboardVisualizationPlan_InapplicableOptionIsStoredNotDropped(t *testing.T) {
+	planTest(t, newFakeDashboardAPI().handler())
+
+	config := providerConfig + `
+resource "fivenines_dashboard" "test" {
+  name = "Fleet health"
+}
+
+resource "fivenines_dashboard_visualization" "cpu" {
+  dashboard_id = fivenines_dashboard.test.id
+  metric       = "cpu_usage"
+  chart_type   = "stat"
+
+  # stacked means nothing on a stat panel. The API stores it anyway.
+  options = {
+    stacked = true
+  }
+}`
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: config,
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr("fivenines_dashboard_visualization.cpu", "options.stacked", "true"),
+				resource.TestCheckResourceAttr("fivenines_dashboard_visualization.cpu", "chart_type", "stat"),
+			),
+		}, {
+			Config:   config,
+			PlanOnly: true,
+		}},
+	})
+}
+
+// An unrelated edit must not touch entities the configuration never claimed.
+// `targets` is Optional+Computed, so an undeclared block plans to the prior
+// state; sending that back would make every apply REPLACE the panel's entities
+// with Terraform's last known set, detaching whatever was attached in the
+// dashboard since.
+func TestDashboardVisualizationPlan_UndeclaredTargetsAreNotWritten(t *testing.T) {
+	api := newFakeDashboardAPI()
+	planTest(t, api.handler())
+
+	withTitle := func(title string) string {
+		return providerConfig + `
+resource "fivenines_dashboard" "test" {
+  name = "Fleet health"
+}
+
+resource "fivenines_dashboard_visualization" "cpu" {
+  dashboard_id = fivenines_dashboard.test.id
+  metric       = "cpu_usage"
+  title        = "` + title + `"
+}`
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: withTitle("CPU usage"),
+		}, {
+			// A pure rename. The PATCH body must carry the title and neither of
+			// the blocks the configuration never declared.
+			Config: withTitle("Processor load"),
+			Check: func(_ *terraform.State) error {
+				api.mu.Lock()
+				defer api.mu.Unlock()
+				if got := api.lastPanelWrite["title"]; got != "Processor load" {
+					return fmt.Errorf("expected the rename to be sent, got %v", got)
+				}
+				if _, sent := api.lastPanelWrite["targets"]; sent {
+					return fmt.Errorf("a rename wrote targets: %v", api.lastPanelWrite["targets"])
+				}
+				if _, sent := api.lastPanelWrite["layout"]; sent {
+					return fmt.Errorf("a rename wrote layout: %v", api.lastPanelWrite["layout"])
+				}
+				return nil
+			},
 		}},
 	})
 }

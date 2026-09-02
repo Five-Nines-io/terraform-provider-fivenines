@@ -18,6 +18,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_mqtt_broker` | MQTT brokers watched by one of your agent hosts |
 | `fivenines_mqtt_topic_monitor` | Per-topic freshness & payload checks on a broker |
 | `fivenines_api_token` | API tokens for this provider, so key rotation is code |
+| `fivenines_enrollment_token` | Bootstrap credentials so hosts self-enroll |
 
 ## Data Sources
 
@@ -157,6 +158,11 @@ resource "fivenines_status_page_maintenance_window" "db_upgrade" {
     },
   ]
 }
+
+# Mint a bootstrap credential so hosts enroll themselves
+resource "fivenines_enrollment_token" "web_fleet" {
+  name = "web fleet"
+}
 ```
 
 ### 4. Apply
@@ -295,6 +301,11 @@ terraform import fivenines_mqtt_topic_monitor.temperature <broker-uuid>:<monitor
 # API tokens are the one numeric id here, and import brings the metadata only:
 # `token` stays null, because the value was readable exactly once
 terraform import fivenines_api_token.ci <api-token-id>
+
+# Enrollment tokens are numeric too, and import is metadata-only for the same
+# reason: `token` and `install_command` stay null, because the value was
+# readable exactly once
+terraform import fivenines_enrollment_token.fleet <enrollment-token-id>
 ```
 
 `fivenines_integration` has no import: the API never returns an integration's

@@ -95,6 +95,27 @@
   anything indexing positionally and unstable keys in an index-keyed `for_each`
 - Fix: a Set, or make `order` mandatory
 
+### Offset pagination skips a row when an earlier one is deleted mid-walk
+- Every index walk (12 of them, including the two that back a resource Read:
+  `walkAPITokens` and `walkEnrollmentTokens`) pages by `page`/`per_page`. Deleting
+  a row sorted BEFORE the one being sought, between two page requests, re-slices
+  the remaining rows and shifts the boundary row onto a page already read — so it
+  is never served
+- Confirmed empirically, 2026-09-02: page 1 = [1,2] of 4, row 1 deleted, page 2
+  serves [4,5]. Row 3 exists and `GetEnrollmentToken(3)` reports 404
+- Consequence for the two token resources specifically: a false 404 removes the
+  resource from state, and the next apply mints a replacement while the ORIGINAL
+  token stays live — a working credential Terraform no longer tracks
+- `direction=asc` on the enrollment token walk (#17) closes the INSERTION half of
+  this (a row created mid-walk is appended, not shifted) but not the deletion half
+- Needs >100 rows of that type before any of it is reachable, since `per_page` is
+  already at the API maximum
+- No clean fix available client-side: the API has no cursor parameter and does not
+  expose `id` as a sortable column, so keyset pagination cannot be expressed. A
+  server-side cursor is the real fix. A cheaper partial one is to confirm a
+  synthetic 404 with a second walk before removing a resource from state
+- Found by: /ship adversarial review (Codex), 2026-09-02
+
 ### morePages trusts that the server honours `page`
 - The unreadable-envelope fallback walks until an empty page. If an index ever
   returns no recognised meta AND ignores `page` — the shape `ListIntegrations`
@@ -110,10 +131,13 @@
   helper rather than in one caller
 - Found by: /ship performance specialist, 2026-09-02
 
-### ImportState duplicates the same int64 parse seven times
+### ImportState duplicates the same int64 parse eight times
 - `host_group`, `status_page`, `network_device`, `workflow`, `task`,
-  `maintenance_window` and now `api_token` each carry the same seven-line
-  `strconv.ParseInt` + `SetAttribute` block
+  `maintenance_window`, `api_token` and now `enrollment_token` each carry the same
+  seven-line `strconv.ParseInt` + `SetAttribute` block
+- `enrollment_token` appends a warning diagnostic after the parse (an imported
+  token has no value and never will), so the helper needs to return control rather
+  than own the whole function body
 - Fix: `importInt64ID(ctx, req, resp)` in `internal/resources/mapping.go`, where
   the other shared mapping helpers live. ~40 lines repo-wide
 - Found by: /ship simplification specialist, 2026-09-02
@@ -151,8 +175,9 @@
 
 ### Required name attributes are overwritten from the API response
 - `mapXToState` writes the API's `name` into state for instances, tasks, network
-  devices, status pages and host groups, but `name` is `Required` (not Computed)
-  on all of them, so Terraform pins the applied value to the exact config string
+  devices, status pages, host groups and enrollment tokens, but `name` is
+  `Required` (not Computed) on all of them, so Terraform pins the applied value
+  to the exact config string
 - If the API ever normalises a name — trims it, folds case, collapses whitespace —
   the apply aborts with "Provider produced inconsistent result after apply", and
   on a create the resource exists server-side against a failed apply
@@ -160,6 +185,10 @@
   more likely to matter, since their names are documented unique per organisation
   *case-insensitively*, which is the kind of constraint normalisation usually
   accompanies
+- Enrollment tokens (#17) raise the stakes rather than the likelihood: `name` is
+  `RequiresReplace` there, so a normalisation would not merely fail one apply — it
+  would make every subsequent refresh propose replacing every token, revoking live
+  fleet credentials and minting values nothing has deployed
 - Fix, if confirmed: keep the planned name rather than the response value, the way
   #13 keeps the planned position
 - Found by: /ship adversarial review, 2026-09-02

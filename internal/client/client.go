@@ -2184,3 +2184,158 @@ func (c *Client) RevokeAPIToken(ctx context.Context, id int64) error {
 	resp.Body.Close()
 	return nil
 }
+
+// --- Enrollment Tokens ---
+
+// GetEnrollmentToken returns one enrollment token by id.
+//
+// The API has no GET /enrollment_tokens/:id — the value is write-once, so the
+// route was never opened — which leaves the index as the only way to read a
+// token back. Same shape as GetAPIToken, including the synthetic 404 that lets
+// the resource treat a deleted token like one on any other resource.
+func (c *Client) GetEnrollmentToken(ctx context.Context, id int64) (*EnrollmentToken, error) {
+	var found *EnrollmentToken
+	err := c.walkEnrollmentTokens(ctx, func(page []EnrollmentToken) bool {
+		for i := range page {
+			if page[i].ID == id {
+				found = &page[i]
+				return false
+			}
+		}
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	if found == nil {
+		return nil, &APIError{
+			StatusCode: http.StatusNotFound,
+			Message:    fmt.Sprintf("no enrollment token with id %d belongs to you in this organization", id),
+		}
+	}
+	return found, nil
+}
+
+// walkEnrollmentTokens pages through the index, handing each page to fn. fn
+// returns false to stop the walk early.
+//
+// Ordered ascending, unlike the other walks: the server appends `id DESC` as a
+// tiebreaker, so with the newest rows sorted LAST a token minted while we are
+// paging is appended rather than shifting an unread row onto a page already
+// read. The default `created_at desc` has that hazard, and this is the one index
+// a fleet bootstrap can be actively growing while Terraform refreshes it.
+func (c *Client) walkEnrollmentTokens(ctx context.Context, fn func([]EnrollmentToken) bool) error {
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/enrollment_tokens?page=%d&per_page=100&order=created_at&direction=asc", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return parseError(resp)
+		}
+
+		var result struct {
+			EnrollmentTokens []EnrollmentToken `json:"enrollment_tokens"`
+			Meta             PaginationMeta    `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
+		if !fn(result.EnrollmentTokens) {
+			return nil
+		}
+		more, err := morePages(len(result.EnrollmentTokens), result.Meta, page)
+		if err != nil {
+			return err
+		}
+		if !more {
+			return nil
+		}
+		page++
+	}
+}
+
+// CreateEnrollmentToken mints an enrollment token. The returned EnrollmentToken
+// is the only place the value ever appears: index and revoke render metadata, so
+// a lost value can only be replaced, never recovered.
+func (c *Client) CreateEnrollmentToken(ctx context.Context, input CreateEnrollmentTokenInput) (*EnrollmentToken, error) {
+	body := map[string]interface{}{"enrollment_token": input}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/enrollment_tokens", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		EnrollmentToken EnrollmentToken `json:"enrollment_token"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	// A create that decodes without a value has lost it for good. Failing here
+	// beats writing a token to state that cannot enroll anything.
+	if result.EnrollmentToken.Token == "" {
+		return nil, fmt.Errorf("enrollment token %d was created but the response carried no token value; "+
+			"the value is returned once and cannot be fetched back", result.EnrollmentToken.ID)
+	}
+	return &result.EnrollmentToken, nil
+}
+
+// RevokeEnrollmentToken stops a token from enrolling any new host, keeping the
+// row and the hosts it already registered. Idempotent server-side. The response
+// is metadata only — Token is empty on the returned struct.
+func (c *Client) RevokeEnrollmentToken(ctx context.Context, id int64) (*EnrollmentToken, error) {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/enrollment_tokens/"+strconv.FormatInt(id, 10)+"/revoke", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		EnrollmentToken EnrollmentToken `json:"enrollment_token"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	// A 200 decoding to an empty or mismatched token would otherwise be reported
+	// as a successful revoke of a token we never touched.
+	if result.EnrollmentToken.ID != id {
+		return nil, fmt.Errorf("revoke returned an unexpected enrollment token id %d, want %d", result.EnrollmentToken.ID, id)
+	}
+	return &result.EnrollmentToken, nil
+}
+
+// DeleteEnrollmentToken permanently deletes a token. Unlike RevokeAPIToken, this
+// really is a delete — but only for a token that has never registered a host.
+// Once one has, the API refuses with 422 rather than orphan the hosts, and
+// IsTokenHasRegisteredHosts identifies that refusal so the caller can revoke
+// instead.
+func (c *Client) DeleteEnrollmentToken(ctx context.Context, id int64) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/enrollment_tokens/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// IsTokenHasRegisteredHosts reports whether err is the enrollment token DELETE
+// refusing because the token has registered hosts.
+//
+// The public API envelope drops the machine-readable `code` the controller
+// passes to render_error, so status is all there is to match on. It is enough
+// here: destroy answers 403, 404 or this one 422, and the other two are already
+// handled by the time this is asked.
+func IsTokenHasRegisteredHosts(err error) bool {
+	apiErr, ok := err.(*APIError)
+	return ok && apiErr.StatusCode == http.StatusUnprocessableEntity
+}

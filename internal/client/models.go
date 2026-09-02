@@ -792,6 +792,32 @@ type CreateAPITokenInput struct {
 	ExpiresAt *string `json:"expires_at,omitempty"`
 }
 
+// EnrollmentToken represents a bootstrap credential an agent presents to
+// /collect to self-enroll a host.
+type EnrollmentToken struct {
+	ID                   int64   `json:"id"`
+	Name                 string  `json:"name"`
+	Active               bool    `json:"active"`
+	HostsRegisteredCount int64   `json:"hosts_registered_count"`
+	LastUsedAt           *string `json:"last_used_at"`
+	CreatedAt            string  `json:"created_at"`
+	UpdatedAt            string  `json:"updated_at"`
+
+	// Create-only. The API serializes these two for POST /enrollment_tokens and
+	// nothing else: the index and revoke responses are metadata, so a read can
+	// never be replayed into a host enrollment. Both are empty on every response
+	// but the create one.
+	Token          string `json:"token"`
+	InstallCommand string `json:"install_command"`
+}
+
+// CreateEnrollmentTokenInput is the request body for creating an enrollment
+// token. The API accepts a name and nothing else — there is no expiry or
+// registration cap to set, and no update endpoint to change the name later.
+type CreateEnrollmentTokenInput struct {
+	Name string `json:"name"`
+}
+
 // APIError represents an error response from the API.
 type APIError struct {
 	StatusCode int

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -133,18 +135,194 @@ func parseError(resp *http.Response) error {
 	if err := json.Unmarshal(body, apiErr); err != nil {
 		apiErr.Message = string(body)
 	}
+	// A body keyed differently ({"message": ...}, {"detail": ...}) unmarshals
+	// without error and leaves both fields empty, which renders as a diagnostic
+	// with no reason at all. Fall back to the raw body.
+	if apiErr.Message == "" && len(apiErr.Errors) == 0 {
+		apiErr.Message = strings.TrimSpace(string(body))
+	}
 	return apiErr
 }
+
+// errMalformedBody marks a response body the client could not parse. It is a
+// permanent failure — the same bytes will not parse on a retry — as opposed to
+// a read that died in transit, which is worth another attempt.
+var errMalformedBody = errors.New("malformed response body")
 
 // decodeResponse reads and decodes a JSON response body.
 func decodeResponse(resp *http.Response, target interface{}) error {
 	defer resp.Body.Close()
-	return json.NewDecoder(resp.Body).Decode(target)
+	err := json.NewDecoder(resp.Body).Decode(target)
+	if err == nil {
+		return nil
+	}
+
+	// Only a syntactically bad body is permanent. An unexpected EOF or a reset
+	// mid-body is the transport failing, not the server sending garbage.
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) {
+		return fmt.Errorf("%w: %w", errMalformedBody, err)
+	}
+	return err
+}
+
+// AsyncDeletionTimeout bounds the wait for a 202-accepted deletion to complete.
+const AsyncDeletionTimeout = 5 * time.Minute
+
+// Poll pacing for waitForDeletion. Variables rather than constants so tests can
+// shrink them: at the production interval every poll test would sleep for real.
+var (
+	deletionPollInterval    = 500 * time.Millisecond
+	deletionPollMaxInterval = 5 * time.Second
+)
+
+// deletionDone turns the result of a "does it still exist?" GET into a poll
+// verdict: a 404 means the record is gone, anything else is an error for
+// waitForDeletion to classify.
+func deletionDone(err error) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		return true, nil
+	}
+	return false, err
+}
+
+// retryablePoll reports whether an error from a deletion poll is worth another
+// attempt. The DELETE was already accepted, so a proxy 502 or a dropped
+// connection mid-teardown should not turn a successful destroy into a failure.
+// A 4xx will not fix itself, so those fail immediately.
+func retryablePoll(err error) bool {
+	// A syntactically bad body will be just as bad next time. Everything else
+	// that is not an API error is the transport failing mid-flight — a reset, a
+	// truncated read, a DNS blip — and is worth another attempt.
+	if errors.Is(err, errMalformedBody) {
+		return false
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+
+	// 429 and 408 are the 4xx that fix themselves. doRequest already backs off on
+	// 429, but it
+	// gives up after five attempts and hands the 429 up: a fleet destroy is
+	// exactly the workload that trips the limiter, and the DELETE was accepted
+	// already, so failing here would abort an apply over a transient limit.
+	switch {
+	case apiErr.StatusCode >= 500:
+		return true
+	case apiErr.StatusCode == http.StatusTooManyRequests,
+		apiErr.StatusCode == http.StatusRequestTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitForDeletion polls gone until it reports the record has disappeared,
+// backing off between attempts. Deletions that answer 202 are asynchronous: the
+// record outlives the response, so returning early breaks a delete followed by
+// a recreate of the same host in one apply.
+func waitForDeletion(ctx context.Context, timeout time.Duration, gone func(context.Context) (bool, error)) error {
+	pollCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	interval := deletionPollInterval
+
+	// Kept so a poll that only ever saw transient failures reports why, rather
+	// than a bare timeout. Two of them: an http.Client timeout also satisfies
+	// errors.Is(err, context.DeadlineExceeded), so a deadline must never be
+	// allowed to overwrite a real API error worth reporting.
+	var lastErr, lastNonContextErr error
+
+	timedOut := func() error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// A real API error beats "context deadline exceeded" every time.
+		if reportable := lastNonContextErr; reportable != nil {
+			return fmt.Errorf("timed out after %s waiting for the deletion to complete; last error: %w", timeout, reportable)
+		}
+		if lastErr != nil {
+			return fmt.Errorf("timed out after %s waiting for the deletion to complete; last error: %w", timeout, lastErr)
+		}
+		return fmt.Errorf("timed out after %s waiting for the deletion to complete", timeout)
+	}
+
+	for {
+		done, err := gone(pollCtx)
+		// Recorded before the deadline check so the timeout message names it even
+		// when the very first poll outlives the deadline.
+		if err != nil && retryablePoll(err) {
+			lastErr = err
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				lastNonContextErr = err
+			}
+		}
+		switch {
+		// A successful "it is gone" wins even if the deadline expired on the
+		// same tick: the deletion did finish.
+		case err == nil && done:
+			return nil
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case pollCtx.Err() != nil:
+			return timedOut()
+		case err != nil && !retryablePoll(err):
+			return err
+		}
+
+		select {
+		case <-time.After(interval):
+		case <-pollCtx.Done():
+			return timedOut()
+		}
+
+		if interval *= 2; interval > deletionPollMaxInterval {
+			interval = deletionPollMaxInterval
+		}
+	}
 }
 
 // listResponse is a generic list response envelope.
 type listResponse struct {
 	Meta PaginationMeta `json:"meta"`
+}
+
+// maxListPages bounds every paginated walk, so a server that never stops
+// returning full pages degrades to an error rather than an unbounded request
+// stream inside a terraform plan.
+const maxListPages = 1000
+
+// morePages reports whether a walk should continue after a page that returned n
+// items. n is the page size as served, before any client-side filtering — a page
+// of entirely filtered-out records still means there is more to fetch.
+//
+// The empty-page check comes first deliberately: it is the only guard that
+// survives a change to the meta envelope. The last such change renamed every
+// field, the old struct decoded to zeros, `count+offset >= total` became
+// `0 >= 0`, and all eight list loops truncated at 100 rows while their unit
+// tests stayed green. Requiring TotalPages > 0 before trusting the counters
+// means an unrecognised meta now over-fetches by one page instead of silently
+// dropping data.
+func morePages(n int, meta PaginationMeta, page int) (bool, error) {
+	if page >= maxListPages {
+		return false, fmt.Errorf("pagination exceeded %d pages; the index meta looks inconsistent", maxListPages)
+	}
+	if meta.TotalPages > 0 {
+		// A recognised meta is authoritative, including across an empty middle
+		// page: stopping early would return a short list with no error, and wrong
+		// data is worse than an extra round trip.
+		return meta.CurrentPage < meta.TotalPages, nil
+	}
+	// Unrecognised envelope — every field decoded to zero. Walk until an empty
+	// page rather than trusting counters we clearly cannot read.
+	return n > 0, nil
 }
 
 // --- Instances ---
@@ -170,7 +348,11 @@ func (c *Client) ListInstances(ctx context.Context) ([]Instance, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Instances...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Instances), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -239,17 +421,28 @@ func (c *Client) UpdateInstance(ctx context.Context, id string, etag string, inp
 	return &result.Instance, nil
 }
 
-func (c *Client) DeleteInstance(ctx context.Context, id string) error {
+// DeleteInstance deletes an instance. It reports whether the API accepted the
+// deletion asynchronously (202), in which case the host still exists until the
+// backend finishes tearing it down — see WaitForInstanceDeletion.
+func (c *Client) DeleteInstance(ctx context.Context, id string) (accepted bool, err error) {
 	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/instances/"+id, nil, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// 202 Accepted (async) or 204 No Content
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
-		return parseError(resp)
+		return false, parseError(resp)
 	}
 	resp.Body.Close()
-	return nil
+	return resp.StatusCode == http.StatusAccepted, nil
+}
+
+// WaitForInstanceDeletion polls the instance until the API 404s it.
+func (c *Client) WaitForInstanceDeletion(ctx context.Context, id string, timeout time.Duration) error {
+	return waitForDeletion(ctx, timeout, func(ctx context.Context) (bool, error) {
+		_, _, err := c.GetInstance(ctx, id)
+		return deletionDone(err)
+	})
 }
 
 func (c *Client) EnableInstance(ctx context.Context, id string) error {
@@ -303,7 +496,11 @@ func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Tasks...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Tasks), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -384,24 +581,38 @@ func (c *Client) DeleteTask(ctx context.Context, id string) error {
 	return nil
 }
 
-func (c *Client) PauseTask(ctx context.Context, id string) error {
+func (c *Client) PauseTask(ctx context.Context, id string) (*Task, error) {
 	return c.taskAction(ctx, id, "pause")
 }
 
-func (c *Client) ResumeTask(ctx context.Context, id string) error {
+func (c *Client) ResumeTask(ctx context.Context, id string) (*Task, error) {
 	return c.taskAction(ctx, id, "resume")
 }
 
-func (c *Client) taskAction(ctx context.Context, id string, action string) error {
+// taskAction posts to a task action endpoint and returns the task the API renders
+// back. Resume recomputes expected_ping_at server-side, so the response body is the
+// only accurate view of the task afterwards.
+func (c *Client) taskAction(ctx context.Context, id string, action string) (*Task, error) {
 	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/tasks/%s/%s", id, action), nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return parseError(resp)
+		return nil, parseError(resp)
 	}
-	resp.Body.Close()
-	return nil
+
+	var result struct {
+		Task Task `json:"task"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	// A 200 that decodes to an empty or mismatched task would otherwise be written
+	// straight to state, blanking the resource ID.
+	if result.Task.ID != id {
+		return nil, fmt.Errorf("task %s returned an unexpected task id %q", action, result.Task.ID)
+	}
+	return &result.Task, nil
 }
 
 // --- Workflows ---
@@ -432,7 +643,11 @@ func (c *Client) ListWorkflows(ctx context.Context) ([]Workflow, error) {
 				all = append(all, w)
 			}
 		}
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Workflows), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -463,7 +678,11 @@ func (c *Client) ListWorkflowRuns(ctx context.Context, workflowID int64) ([]Work
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Runs...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Runs), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -602,11 +821,15 @@ func (c *Client) PublishWorkflowVersion(ctx context.Context, workflowID int64, v
 
 // --- Uptime Monitors ---
 
-func (c *Client) ListUptimeMonitors(ctx context.Context) ([]UptimeMonitor, error) {
+func (c *Client) ListUptimeMonitors(ctx context.Context, opts *ListUptimeMonitorsOptions) ([]UptimeMonitor, error) {
+	query := uptimeMonitorFilters(opts)
+	query.Set("per_page", "100")
+
 	var all []UptimeMonitor
 	page := 1
 	for {
-		path := fmt.Sprintf("/api/v1/uptime_monitors?page=%d&per_page=100", page)
+		query.Set("page", strconv.Itoa(page))
+		path := "/api/v1/uptime_monitors?" + query.Encode()
 		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
 		if err != nil {
 			return nil, err
@@ -623,7 +846,11 @@ func (c *Client) ListUptimeMonitors(ctx context.Context) ([]UptimeMonitor, error
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.UptimeMonitors...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.UptimeMonitors), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -632,7 +859,7 @@ func (c *Client) ListUptimeMonitors(ctx context.Context) ([]UptimeMonitor, error
 }
 
 func (c *Client) GetUptimeMonitor(ctx context.Context, id string) (*UptimeMonitor, string, error) {
-	resp, err := c.doRequest(ctx, "GET", "/api/v1/uptime_monitors/"+id, nil, nil)
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/uptime_monitors/"+url.PathEscape(id), nil, nil)
 	if err != nil {
 		return nil, "", err
 	}
@@ -675,7 +902,7 @@ func (c *Client) UpdateUptimeMonitor(ctx context.Context, id string, etag string
 		headers["If-Match"] = etag
 	}
 	body := map[string]interface{}{"uptime_monitor": input}
-	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/uptime_monitors/"+id, body, headers)
+	resp, err := c.doRequest(ctx, "PATCH", "/api/v1/uptime_monitors/"+url.PathEscape(id), body, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -693,7 +920,7 @@ func (c *Client) UpdateUptimeMonitor(ctx context.Context, id string, etag string
 }
 
 func (c *Client) DeleteUptimeMonitor(ctx context.Context, id string) error {
-	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/uptime_monitors/"+id, nil, nil)
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/uptime_monitors/"+url.PathEscape(id), nil, nil)
 	if err != nil {
 		return err
 	}
@@ -704,24 +931,111 @@ func (c *Client) DeleteUptimeMonitor(ctx context.Context, id string) error {
 	return nil
 }
 
-func (c *Client) PauseUptimeMonitor(ctx context.Context, id string) error {
+// PauseUptimeMonitor suspends checks for a monitor. It is idempotent: pausing an
+// already paused monitor succeeds and returns it unchanged.
+func (c *Client) PauseUptimeMonitor(ctx context.Context, id string) (*UptimeMonitor, error) {
 	return c.uptimeMonitorAction(ctx, id, "pause")
 }
 
-func (c *Client) ResumeUptimeMonitor(ctx context.Context, id string) error {
+// ResumeUptimeMonitor restarts checks for a paused monitor. It is idempotent.
+func (c *Client) ResumeUptimeMonitor(ctx context.Context, id string) (*UptimeMonitor, error) {
 	return c.uptimeMonitorAction(ctx, id, "resume")
 }
 
-func (c *Client) uptimeMonitorAction(ctx context.Context, id string, action string) error {
-	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/uptime_monitors/%s/%s", id, action), nil, nil)
+func (c *Client) uptimeMonitorAction(ctx context.Context, id string, action string) (*UptimeMonitor, error) {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/uptime_monitors/%s/%s", url.PathEscape(id), action), nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return parseError(resp)
+		return nil, parseError(resp)
 	}
-	resp.Body.Close()
-	return nil
+
+	var result struct {
+		UptimeMonitor UptimeMonitor `json:"uptime_monitor"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	// A 200 that decodes to an empty or mismatched monitor would otherwise be
+	// written straight to state, blanking the resource ID.
+	if result.UptimeMonitor.ID != id {
+		return nil, fmt.Errorf("uptime monitor %s returned an unexpected monitor id %q", action, result.UptimeMonitor.ID)
+	}
+	return &result.UptimeMonitor, nil
+}
+
+// GetUptimeMonitorStatus fetches the lightweight status payload for a monitor.
+func (c *Client) GetUptimeMonitorStatus(ctx context.Context, id string) (*UptimeMonitorStatus, error) {
+	resp, err := c.doRequest(ctx, "GET", "/api/v1/uptime_monitors/"+url.PathEscape(id)+"/status", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	var status UptimeMonitorStatus
+	if err := json.Unmarshal(unwrapEnvelope(body, "uptime_monitor_status", "uptime_monitor"), &status); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	// Unknown fields decode silently, so a shape we do not recognise would yield a
+	// zero-valued status that reads downstream as a healthy, unpaused monitor.
+	// Refuse it instead: a loud error beats a wrong status in Terraform state.
+	// Both fields empty means nothing was recognised; a null status alone is a
+	// legitimate payload and stays the API's to report.
+	if status.ID == "" && status.Status == "" {
+		return nil, fmt.Errorf("unrecognized status payload for uptime monitor %s", id)
+	}
+	if status.ID != "" && status.ID != id {
+		return nil, fmt.Errorf("status for uptime monitor %s returned an unexpected monitor id %q", id, status.ID)
+	}
+	return &status, nil
+}
+
+// unwrapEnvelope returns the object nested under the first of keys present in
+// body, or body itself when it is already the bare object. The status endpoint
+// is newer than the rest of the API and its wrapper key is not pinned by the
+// published spec, so accept either shape. A body that matches neither falls
+// through to the caller, which rejects it rather than decoding an empty value.
+func unwrapEnvelope(body []byte, keys ...string) []byte {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return body
+	}
+	for _, key := range keys {
+		if v, ok := envelope[key]; ok && len(v) > 0 && v[0] == '{' {
+			return v
+		}
+	}
+	return body
+}
+
+// uptimeMonitorFilters renders the index filter options as query parameters.
+func uptimeMonitorFilters(opts *ListUptimeMonitorsOptions) url.Values {
+	query := url.Values{}
+	if opts == nil {
+		return query
+	}
+	for key, value := range map[string]string{
+		"status":        opts.Status,
+		"protocol":      opts.Protocol,
+		"q":             opts.Query,
+		"updated_since": opts.UpdatedSince,
+		"order":         opts.Order,
+		"direction":     opts.Direction,
+	} {
+		if value != "" {
+			query.Set(key, value)
+		}
+	}
+	return query
 }
 
 // --- Probe Regions ---
@@ -746,22 +1060,42 @@ func (c *Client) ListProbeRegions(ctx context.Context) ([]ProbeRegion, error) {
 
 // --- Integrations ---
 
+// ListIntegrations walks the whole index. The endpoint became paginated on
+// 2026-09-01 at 25 per page; until it routed through morePages this was a
+// single un-paginated GET, so an organisation with more than 25 channels got a
+// silently truncated list — the same failure the meta rename caused everywhere
+// else, arriving separately because this loop never had a meta to misread.
 func (c *Client) ListIntegrations(ctx context.Context) ([]Integration, error) {
-	resp, err := c.doRequest(ctx, "GET", "/api/v1/integrations", nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, parseError(resp)
-	}
+	var all []Integration
+	page := 1
+	for {
+		path := fmt.Sprintf("/api/v1/integrations?page=%d&per_page=100", page)
+		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, parseError(resp)
+		}
 
-	var result struct {
-		Integrations []Integration `json:"integrations"`
+		var result struct {
+			Integrations []Integration  `json:"integrations"`
+			Meta         PaginationMeta `json:"meta"`
+		}
+		if err := decodeResponse(resp, &result); err != nil {
+			return nil, fmt.Errorf("decoding response: %w", err)
+		}
+		all = append(all, result.Integrations...)
+		more, err := morePages(len(result.Integrations), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
+			break
+		}
+		page++
 	}
-	if err := decodeResponse(resp, &result); err != nil {
-		return nil, fmt.Errorf("decoding response: %w", err)
-	}
-	return result.Integrations, nil
+	return all, nil
 }
 
 // --- Incidents ---
@@ -787,7 +1121,11 @@ func (c *Client) ListIncidents(ctx context.Context) ([]Incident, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.Incidents...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.Incidents), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -835,7 +1173,11 @@ func (c *Client) ListNetworkDevices(ctx context.Context) ([]NetworkDevice, error
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.NetworkDevices...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.NetworkDevices), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -901,41 +1243,55 @@ func (c *Client) UpdateNetworkDevice(ctx context.Context, id string, etag string
 	return &result.NetworkDevice, nil
 }
 
-func (c *Client) DeleteNetworkDevice(ctx context.Context, id string) error {
+// DeleteNetworkDevice deletes a network device. Like instances, the API tears
+// devices down asynchronously and answers 202 — see WaitForNetworkDeviceDeletion.
+func (c *Client) DeleteNetworkDevice(ctx context.Context, id string) (accepted bool, err error) {
 	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/network_devices/"+id, nil, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
-	// Delete returns 202 Accepted (async deletion)
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
-		return parseError(resp)
+		return false, parseError(resp)
 	}
 	resp.Body.Close()
-	return nil
+	return resp.StatusCode == http.StatusAccepted, nil
 }
 
-func (c *Client) EnterMaintenanceNetworkDevice(ctx context.Context, id string) error {
-	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/network_devices/%s/enter_maintenance", id), nil, nil)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return parseError(resp)
-	}
-	resp.Body.Close()
-	return nil
+// WaitForNetworkDeviceDeletion polls the device until the API 404s it.
+func (c *Client) WaitForNetworkDeviceDeletion(ctx context.Context, id string, timeout time.Duration) error {
+	return waitForDeletion(ctx, timeout, func(ctx context.Context) (bool, error) {
+		_, _, err := c.GetNetworkDevice(ctx, id)
+		return deletionDone(err)
+	})
 }
 
-func (c *Client) ExitMaintenanceNetworkDevice(ctx context.Context, id string) error {
-	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/network_devices/%s/exit_maintenance", id), nil, nil)
+// EnterMaintenanceNetworkDevice puts the device in maintenance mode and returns
+// the updated device, so callers don't need a follow-up GET.
+func (c *Client) EnterMaintenanceNetworkDevice(ctx context.Context, id string) (*NetworkDevice, error) {
+	return c.maintenanceNetworkDevice(ctx, id, "enter_maintenance")
+}
+
+// ExitMaintenanceNetworkDevice takes the device out of maintenance mode and
+// returns the updated device, so callers don't need a follow-up GET.
+func (c *Client) ExitMaintenanceNetworkDevice(ctx context.Context, id string) (*NetworkDevice, error) {
+	return c.maintenanceNetworkDevice(ctx, id, "exit_maintenance")
+}
+
+func (c *Client) maintenanceNetworkDevice(ctx context.Context, id, action string) (*NetworkDevice, error) {
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/api/v1/network_devices/%s/%s", id, action), nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return parseError(resp)
+		return nil, parseError(resp)
 	}
-	resp.Body.Close()
-	return nil
+	var result struct {
+		NetworkDevice NetworkDevice `json:"network_device"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.NetworkDevice, nil
 }
 
 // --- Status Pages ---
@@ -960,7 +1316,11 @@ func (c *Client) ListStatusPages(ctx context.Context) ([]StatusPage, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.StatusPages...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.StatusPages), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++
@@ -1038,6 +1398,99 @@ func (c *Client) DeleteStatusPage(ctx context.Context, id int64) error {
 	return nil
 }
 
+// CreateIntegration creates a notification channel.
+//
+// Required fields depend on input.Type:
+//
+//	webhook    URL (Name and Secret optional)
+//	pagerduty  Name + RoutingKey — proved with a live trigger/resolve round-trip
+//	pushover   Name + UserKey + AppToken
+//	email      Email — returns 202 with an EmailVerification and creates no channel
+//
+// slack, discord, teams and telegram are interactive OAuth/app installs with no
+// headless equivalent; the API rejects them with 422.
+func (c *Client) CreateIntegration(ctx context.Context, input CreateIntegrationInput) (*CreateIntegrationResult, error) {
+	body := map[string]interface{}{"integration": input}
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/integrations", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		Integration  *Integration         `json:"integration"`
+		Webhook      *WebhookVerification `json:"webhook"`
+		Verification *EmailVerification   `json:"verification"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &CreateIntegrationResult{
+		Integration:       result.Integration,
+		Webhook:           result.Webhook,
+		EmailVerification: result.Verification,
+	}, nil
+}
+
+func (c *Client) DeleteIntegration(ctx context.Context, id int64) error {
+	resp, err := c.doRequest(ctx, "DELETE", "/api/v1/integrations/"+strconv.FormatInt(id, 10), nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// VerifyWebhookIntegration asks the API to GET the webhook URL and check that
+// the response echoes the verification token in the X-Fivenines-Verification
+// header. Until it succeeds the webhook stays unverified and workflow
+// notification nodes refuse to deliver to it.
+func (c *Client) VerifyWebhookIntegration(ctx context.Context, id int64) (*Integration, error) {
+	path := fmt.Sprintf("/api/v1/integrations/%d/verify_webhook", id)
+	resp, err := c.doRequest(ctx, "POST", path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+
+	var result struct {
+		Integration Integration `json:"integration"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Integration, nil
+}
+
+// RegenerateWebhookToken issues a fresh 24 hour verification token and returns
+// it once. The token lives in metadata, which is never serialized on a read.
+func (c *Client) RegenerateWebhookToken(ctx context.Context, id int64) (*Integration, *WebhookVerification, error) {
+	path := fmt.Sprintf("/api/v1/integrations/%d/regenerate_webhook_token", id)
+	resp, err := c.doRequest(ctx, "POST", path, nil, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, parseError(resp)
+	}
+
+	var result struct {
+		Integration Integration          `json:"integration"`
+		Webhook     *WebhookVerification `json:"webhook"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.Integration, result.Webhook, nil
+}
+
 func (c *Client) GetIntegration(ctx context.Context, id int64) (*Integration, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v1/integrations/"+strconv.FormatInt(id, 10), nil, nil)
 	if err != nil {
@@ -1054,6 +1507,103 @@ func (c *Client) GetIntegration(ctx context.Context, id int64) (*Integration, er
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 	return &result.Integration, nil
+}
+
+// --- Status Page Maintenance Windows ---
+
+func maintenanceWindowPath(statusPageID int64) string {
+	return fmt.Sprintf("/api/v1/status_pages/%d/maintenance_windows", statusPageID)
+}
+
+func (c *Client) GetStatusPageMaintenanceWindow(ctx context.Context, statusPageID, id int64) (*StatusPageMaintenanceWindow, string, error) {
+	path := fmt.Sprintf("%s/%d", maintenanceWindowPath(statusPageID), id)
+	resp, err := c.doRequest(ctx, "GET", path, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", parseError(resp)
+	}
+	etag := sanitizeETag(resp.Header.Get("ETag"))
+	var result struct {
+		MaintenanceWindow StatusPageMaintenanceWindow `json:"maintenance_window"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, "", fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.MaintenanceWindow, etag, nil
+}
+
+func (c *Client) CreateStatusPageMaintenanceWindow(ctx context.Context, statusPageID int64, input CreateStatusPageMaintenanceWindowInput) (*StatusPageMaintenanceWindow, error) {
+	body := map[string]interface{}{"maintenance_window": input}
+	resp, err := c.doRequest(ctx, "POST", maintenanceWindowPath(statusPageID), body, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		MaintenanceWindow StatusPageMaintenanceWindow `json:"maintenance_window"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.MaintenanceWindow, nil
+}
+
+func (c *Client) UpdateStatusPageMaintenanceWindow(ctx context.Context, statusPageID, id int64, etag string, input UpdateStatusPageMaintenanceWindowInput) (*StatusPageMaintenanceWindow, error) {
+	headers := map[string]string{}
+	if etag != "" {
+		headers["If-Match"] = etag
+	}
+	path := fmt.Sprintf("%s/%d", maintenanceWindowPath(statusPageID), id)
+	body := map[string]interface{}{"maintenance_window": input}
+	resp, err := c.doRequest(ctx, "PATCH", path, body, headers)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, parseError(resp)
+	}
+	var result struct {
+		MaintenanceWindow StatusPageMaintenanceWindow `json:"maintenance_window"`
+	}
+	if err := decodeResponse(resp, &result); err != nil {
+		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	return &result.MaintenanceWindow, nil
+}
+
+// DeleteStatusPageMaintenanceWindow permanently removes the window, including
+// from the status page history. Use CancelStatusPageMaintenanceWindow to keep
+// the record.
+func (c *Client) DeleteStatusPageMaintenanceWindow(ctx context.Context, statusPageID, id int64) error {
+	path := fmt.Sprintf("%s/%d", maintenanceWindowPath(statusPageID), id)
+	resp, err := c.doRequest(ctx, "DELETE", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// CancelStatusPageMaintenanceWindow marks the window canceled while preserving
+// it in the status page history. The endpoint is idempotent.
+func (c *Client) CancelStatusPageMaintenanceWindow(ctx context.Context, statusPageID, id int64) error {
+	path := fmt.Sprintf("%s/%d/cancel", maintenanceWindowPath(statusPageID), id)
+	resp, err := c.doRequest(ctx, "PATCH", path, nil, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return parseError(resp)
+	}
+	resp.Body.Close()
+	return nil
 }
 
 // --- Host Groups ---
@@ -1078,7 +1628,11 @@ func (c *Client) ListHostGroups(ctx context.Context) ([]HostGroup, error) {
 			return nil, fmt.Errorf("decoding response: %w", err)
 		}
 		all = append(all, result.HostGroups...)
-		if result.Meta.Count+result.Meta.Offset >= result.Meta.Total {
+		more, err := morePages(len(result.HostGroups), result.Meta, page)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			break
 		}
 		page++

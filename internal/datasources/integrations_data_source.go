@@ -27,6 +27,7 @@ type integrationModel struct {
 	Enabled   types.Bool   `tfsdk:"enabled"`
 	Verified  types.Bool   `tfsdk:"verified"`
 	CreatedAt types.String `tfsdk:"created_at"`
+	UpdatedAt types.String `tfsdk:"updated_at"`
 }
 
 func NewIntegrationsDataSource() datasource.DataSource {
@@ -74,6 +75,10 @@ func (d *integrationsDataSource) Schema(_ context.Context, _ datasource.SchemaRe
 							Description: "Creation timestamp.",
 							Computed:    true,
 						},
+						"updated_at": schema.StringAttribute{
+							Description: "Last update timestamp.",
+							Computed:    true,
+						},
 					},
 				},
 			},
@@ -111,6 +116,7 @@ func (d *integrationsDataSource) Read(ctx context.Context, _ datasource.ReadRequ
 			Enabled:   types.BoolValue(i.Enabled),
 			Verified:  types.BoolValue(i.Verified),
 			CreatedAt: types.StringValue(i.CreatedAt),
+			UpdatedAt: types.StringValue(i.UpdatedAt),
 		})
 	}
 

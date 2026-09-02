@@ -116,7 +116,9 @@
   — it is invisible: the test never reflects over it, so it passes while the new
   struct has no policy at all
 - Both maintenance window inputs escaped it that way in #14 until they were added
-  by hand; the next resource will escape it the same way
+  by hand; `CreateIntegrationInput` escaped it the same way in #15 — the suite
+  stayed green with the struct entirely unclassified, and it was added by hand
+  again. That is twice in two resources, so the next one will escape too
 - Go cannot enumerate a package's types at runtime, so the fix is either a
   registry the inputs register into, or a small `go vet`-style check that greps
   `internal/client/models.go` for `Input struct` and fails on any name absent from
@@ -217,8 +219,11 @@
   until an empty page, so an unreadable envelope over-fetches by one page instead
   of silently dropping rows. Fixtures were rewritten to the real shape — the old
   ones encoded the old envelope, which is how this stayed green for months.
-  **Still open in #5: `ListIntegrations` is a single un-paginated GET, so
-  `fivenines_integrations` still returns at most 25 channels.**
+  ~~Still open in #5: `ListIntegrations` is a single un-paginated GET~~ — fixed in
+  #15, which routes it through the same `morePages` helper. The index went
+  25-per-page on 2026-09-01, so `fivenines_integrations` had been silently
+  returning at most 25 channels; it arrived as a separate bug because this was
+  the one loop with no meta to misread.
   Found by: Codex structured review + /ship red team, 2026-09-01
 
 - **Uptime monitor pause/resume discards the API response** — fixed in #9.
@@ -229,4 +234,9 @@
   `schedule`, interval ⇒ `interval_seconds`), uptime monitors in #9
   (`ValidateConfig` + the `protocolRequirements` table: https ⇒ `url`, tcp ⇒
   `hostname`+`port`, icmp ⇒ `hostname`, dns ⇒ `dns_record_type`), status pages in
-  #12 (`ValidateConfig` enforces items[].section ⇒ declared in `sections`)
+  #12 (`ValidateConfig` enforces items[].section ⇒ declared in `sections`), and
+  integrations in #15 (`ValidateConfig` + the `integrationRules` table: webhook ⇒
+  `url`, pagerduty ⇒ `name`+`routing_key`, pushover ⇒ `name`+`user_key`+
+  `app_token`, plus a rejection for the five types the API cannot create at all).
+  It matters more here than elsewhere: an apply that reached the API for a
+  `pagerduty` channel would already have fired a live test alert before failing

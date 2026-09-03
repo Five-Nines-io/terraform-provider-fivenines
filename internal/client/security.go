@@ -307,7 +307,16 @@ func (c *Client) listFindings(ctx context.Context, path string, filters map[stri
 		// page is what a build gate reads as PASSED for something nothing ever
 		// looked at. Discard whatever earlier pages held: a partial set reported
 		// as complete is the same lie in the other direction.
-		if body.Meta == nil {
+		//
+		// EITHER null is enough, not both. The API sends the pair, but a
+		// response carrying only one of them is malformed in a direction that
+		// matters: a null array beside a valid `meta` would otherwise decode to
+		// an empty list and read as an all-clear for a subject that just told us
+		// it had no answer. This cannot misfire on a real empty page — the
+		// server renders those as `[]`, never null — so the safe reading is
+		// free. A missing `vulnerabilities` key decodes to nil too, and is
+		// refused for the same reason.
+		if body.Meta == nil || body.Vulnerabilities == nil {
 			result.Vulnerabilities = nil
 			// Take the refusal's own subject, not the one page 1 described: an
 			// image whose scan moved mid-request comes back with its NEW state,

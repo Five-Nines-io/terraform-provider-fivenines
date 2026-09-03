@@ -199,6 +199,47 @@ func TestClient_ListInstanceVulnerabilities_NeverScanned(t *testing.T) {
 	}
 }
 
+// A HALF-null response is malformed, and the safe reading of it is the refusal.
+// A null array beside a valid `meta` would otherwise decode to an empty list
+// and read as an all-clear for a subject that just said it had no answer.
+func TestClient_ListVulnerabilities_NullArrayWithValidMetaIsRefused(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"vulnerabilities": nil,
+			"meta": map[string]int{
+				"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100,
+			},
+		})
+	})
+
+	list, err := c.ListVulnerabilities(context.Background(), VulnerabilityListOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if list.Vulnerabilities != nil {
+		t.Errorf("expected the refusal, got an empty list that reads as an all-clear")
+	}
+}
+
+// The same for an omitted key, which decodes to nil identically.
+func TestClient_ListVulnerabilities_MissingArrayIsRefused(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"meta": map[string]int{
+				"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100,
+			},
+		})
+	})
+
+	list, err := c.ListVulnerabilities(context.Background(), VulnerabilityListOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if list.Vulnerabilities != nil {
+		t.Errorf("expected the refusal for a missing array, got %v", list.Vulnerabilities)
+	}
+}
+
 // A scanned instance with findings pages normally and carries the host pair of
 // the scan block.
 func TestClient_ListInstanceVulnerabilities_Scanned(t *testing.T) {

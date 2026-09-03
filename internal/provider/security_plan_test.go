@@ -287,6 +287,42 @@ data "fivenines_vulnerabilities" "empty" {
 	})
 }
 
+// The scope arguments specifically: an empty one is not a widened query but a
+// malformed URL, /api/v1/instances//vulnerabilities.
+func TestVulnerabilitiesPlan_EmptyScopeIsRejected(t *testing.T) {
+	planTest(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the API must not be reached: the config is invalid")
+	})
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: providerConfig + `
+data "fivenines_vulnerabilities" "empty_scope" {
+  instance_id = ""
+}`,
+			ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length|at least 1`),
+		}},
+	})
+}
+
+func TestOrganizationDockerImagesPlan_EmptyFilterIsRejected(t *testing.T) {
+	planTest(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the API must not be reached: the config is invalid")
+	})
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: providerConfig + `
+data "fivenines_organization_docker_images" "empty" {
+  q = ""
+}`,
+			ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length|at least 1`),
+		}},
+	})
+}
+
 // --- The plan gate ---
 
 // A plan without security_details answers 403. It must surface as a diagnostic

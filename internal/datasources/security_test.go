@@ -193,6 +193,13 @@ func TestMapDockerImage_ScannedZeroIsARealAllClear(t *testing.T) {
 	if image.VulnerabilityCount.ValueInt64() != 0 {
 		t.Errorf("expected 0, got %d", image.VulnerabilityCount.ValueInt64())
 	}
+	// Both counts, so nulling only the critical one cannot slip through.
+	if image.CriticalVulnerabilityCount.IsNull() {
+		t.Error("expected the critical count's zero to survive as 0, not become null")
+	}
+	if image.CriticalVulnerabilityCount.ValueInt64() != 0 {
+		t.Errorf("expected critical 0, got %d", image.CriticalVulnerabilityCount.ValueInt64())
+	}
 }
 
 // A capped package list keeps the image `scanned` and makes its counts a floor.

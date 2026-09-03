@@ -128,7 +128,9 @@
 ### Offset pagination skips a row when an earlier one is deleted mid-walk
 - Every index walk (13 of them since #22 added `ListInventory`, the shared walk
   behind all twenty collector inventories, including the two that back a resource
-  Read: `walkAPITokens` and `walkEnrollmentTokens`) pages by `page`/`per_page`. Deleting
+  Read: `walkAPITokens` and `walkEnrollmentTokens`; #25 routed five more through
+  the shared `listRowPages`/`listAllPages` pair, and re-flagged this) pages by
+  `page`/`per_page`. Deleting
   a row sorted BEFORE the one being sought, between two page requests, re-slices
   the remaining rows and shifts the boundary row onto a page already read — so it
   is never served
@@ -146,6 +148,27 @@
   server-side cursor is the real fix. A cheaper partial one is to confirm a
   synthetic 404 with a second walk before removing a resource from state
 - Found by: /ship adversarial review (Codex), 2026-09-02
+
+### A malformed 200 envelope reads as an authoritative empty list
+- Both shared walkers treat a MISSING or `null` rows key as zero rows, and a
+  missing `meta` as the zero value: `listRowPages` and `listAllPages`
+  (`internal/client/inventory.go`) decode `envelope[key]` only `if ok`, so an
+  HTTP 200 carrying `null`, `{}`, `{"error":"temporarily unavailable"}`, or an
+  envelope whose key the server renamed, terminates successfully with `[]`
+- Every typed list walk has the same shape, so this is client-wide rather than a
+  #25 regression. The consequence is worst on the data sources a practitioner
+  feeds into `for_each`: an API or proxy failure presents as "everything was
+  deleted" rather than as an error
+- It is the same failure CLASS as the pagination-meta rename recorded above —
+  an envelope the client no longer recognises decoding to a confident zero —
+  which is why `morePages` already refuses to trust an unrecognised meta. The
+  rows key has no equivalent guard
+- Fix: require the expected collection key to be present AND a non-null array
+  before accepting a page, and treat its absence as a decode error rather than
+  as an empty page. `#25` deliberately left this alone: the guard belongs to
+  every walk in the client, not to one feature branch, and changing termination
+  semantics under 13 existing indexes deserves its own diff
+- Found by: /ship adversarial review (Codex), 2026-09-03
 
 ### morePages trusts that the server honours `page`
 - The unreadable-envelope fallback walks until an empty page. If an index ever

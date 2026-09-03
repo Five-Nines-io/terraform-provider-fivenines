@@ -152,8 +152,18 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 		datasources.NewSSLStatusDataSource,
 		datasources.NewIncidentStatsDataSource,
 		datasources.NewCveStatsDataSource,
+		datasources.NewInstanceCapabilityStatusDataSource,
+		datasources.NewStatusPageSubscribersDataSource,
+		datasources.NewCephClustersDataSource,
+		datasources.NewCephClusterDataSource,
+		datasources.NewProxmoxClustersDataSource,
+		datasources.NewProxmoxClusterDataSource,
 	}
 	// The twenty per-instance collector inventories are declared as a table
 	// rather than twenty near-identical files -- see internal/datasources/inventory.go.
-	return append(ds, datasources.InventoryDataSources()...)
+	ds = append(ds, datasources.InventoryDataSources()...)
+	// The cluster-scoped and organization-wide Proxmox inventories serve the
+	// same rows on different routes, and share those field tables -- see
+	// internal/datasources/proxmox_inventory_tables.go.
+	return append(ds, datasources.ProxmoxInventoryDataSources()...)
 }

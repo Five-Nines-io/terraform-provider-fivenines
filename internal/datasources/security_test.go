@@ -145,14 +145,22 @@ func TestDockerImages_StateRoundTrip(t *testing.T) {
 // --- mapDockerImage ---
 
 // The honesty contract: a non-scanned image must never be presented as
-// "0 vulnerabilities". The API nulls the counts; the mapping keeps them null.
+// "0 vulnerabilities".
+//
+// The fixture carries counts of ZERO rather than nils, which is the case that
+// matters. Nil in, null out only proves the mapper does not invent a number;
+// the columns are NOT NULL with a default of 0, so the failure mode worth
+// pinning is a literal 0 arriving on a non-countable image and being published
+// as a clean bill of health.
 func TestMapDockerImage_NotScannedHasNoCounts(t *testing.T) {
 	image := mapDockerImage(client.DockerImage{
-		ID:             "image-uuid",
-		State:          "unscannable",
-		StateReason:    secPtr("extraction failed"),
-		StateErrorType: secPtr("api_error"),
-		Countable:      false,
+		ID:                         "image-uuid",
+		State:                      "unscannable",
+		StateReason:                secPtr("extraction failed"),
+		StateErrorType:             secPtr("api_error"),
+		Countable:                  false,
+		VulnerabilityCount:         secPtr(int64(0)),
+		CriticalVulnerabilityCount: secPtr(int64(0)),
 	})
 
 	if !image.VulnerabilityCount.IsNull() {
@@ -166,6 +174,24 @@ func TestMapDockerImage_NotScannedHasNoCounts(t *testing.T) {
 	}
 	if image.StateErrorType.ValueString() != "api_error" {
 		t.Errorf("expected state_error_type api_error, got %q", image.StateErrorType.ValueString())
+	}
+}
+
+// The complement, so the guard above cannot be satisfied by nulling everything:
+// on a SCANNED image a zero is a real all-clear and must survive as a zero.
+func TestMapDockerImage_ScannedZeroIsARealAllClear(t *testing.T) {
+	image := mapDockerImage(client.DockerImage{
+		State:                      "scanned",
+		Countable:                  true,
+		VulnerabilityCount:         secPtr(int64(0)),
+		CriticalVulnerabilityCount: secPtr(int64(0)),
+	})
+
+	if image.VulnerabilityCount.IsNull() {
+		t.Error("expected a scanned image's zero to survive as 0, not become null")
+	}
+	if image.VulnerabilityCount.ValueInt64() != 0 {
+		t.Errorf("expected 0, got %d", image.VulnerabilityCount.ValueInt64())
 	}
 }
 

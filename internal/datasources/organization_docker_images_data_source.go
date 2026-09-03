@@ -92,6 +92,12 @@ func (d *orgDockerImagesDataSource) Schema(_ context.Context, _ datasource.Schem
 			"ecosystem": schema.StringAttribute{
 				Description: "Only return images whose packages were matched against this OSV ecosystem, e.g. `Debian:12`.",
 				Optional:    true,
+				Validators: []validator.String{
+					// An empty string would be dropped by the filter helpers and
+					// silently widen the query — on a security index, the answer
+					// to a wider question still looks like an answer.
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"packages_truncated": schema.BoolAttribute{
 				Description: "When true, only return the images whose package list the agent capped - the ones whose counts are a floor rather than a total.",
@@ -100,6 +106,12 @@ func (d *orgDockerImagesDataSource) Schema(_ context.Context, _ datasource.Schem
 			"q": schema.StringAttribute{
 				Description: "Case-insensitive substring match on the tags, digests, distro and ecosystem.",
 				Optional:    true,
+				Validators: []validator.String{
+					// An empty string would be dropped by the filter helpers and
+					// silently widen the query — on a security index, the answer
+					// to a wider question still looks like an answer.
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"updated_since": schema.StringAttribute{
 				Description: "Only images whose `updated_at` is at or after this ISO 8601 timestamp (inclusive). An image row is a stable upsert keyed by its digest, so unlike the findings indexes its id does not move — but there are still no tombstones: an image nobody has run for 30 days is reaped, and a sync built on this cursor alone will not see it go.",
@@ -300,6 +312,24 @@ func (d *orgDockerImagesDataSource) Read(ctx context.Context, req datasource.Rea
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
+// countableInt64 is the honesty contract enforced locally rather than trusted.
+//
+// The API already nulls these counts on a non-scanned image, so this is belt
+// and braces — but it is the ONE invariant whose failure is silent and whose
+// cost is an all-clear on an image nobody scanned. The underlying columns are
+// NOT NULL with a default of 0, so any path that ever serves the raw column (a
+// serializer regression, a cache, an older deployment behind a proxy) hands us
+// a literal 0 that this provider would otherwise publish as a clean bill of
+// health. `countable` travels in the same payload, so refusing costs nothing.
+//
+// The server double-gates this rule for the same reason, in the same shape.
+func countableInt64(countable bool, count *int64) types.Int64 {
+	if !countable {
+		return types.Int64Null()
+	}
+	return optionalInt64(count)
+}
+
 // mapDockerImage carries the honesty contract into state: the counts stay null
 // on anything the API did not report as scanned, so a `pending` image can never
 // be read as "0 vulnerabilities".
@@ -318,8 +348,8 @@ func mapDockerImage(img client.DockerImage) dockerImageModel {
 		StateReason:                optionalString(img.StateReason),
 		StateErrorType:             optionalString(img.StateErrorType),
 		Countable:                  types.BoolValue(img.Countable),
-		VulnerabilityCount:         optionalInt64(img.VulnerabilityCount),
-		CriticalVulnerabilityCount: optionalInt64(img.CriticalVulnerabilityCount),
+		VulnerabilityCount:         countableInt64(img.Countable, img.VulnerabilityCount),
+		CriticalVulnerabilityCount: countableInt64(img.Countable, img.CriticalVulnerabilityCount),
 		PackagesTruncated:          types.BoolValue(img.PackagesTruncated),
 		FindingCountIsFloor:        types.BoolValue(img.FindingCountIsFloor),
 		LastSeenAt:                 optionalString(img.LastSeenAt),

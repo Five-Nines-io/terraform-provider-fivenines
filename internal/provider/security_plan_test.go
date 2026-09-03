@@ -267,6 +267,26 @@ data "fivenines_vulnerabilities" "typo" {
 	})
 }
 
+// An empty string filter is dropped by the shared filter helpers, which on a
+// security index would silently widen the question — and an empty `instance_id`
+// would build /api/v1/instances//vulnerabilities. Both fail at plan time.
+func TestVulnerabilitiesPlan_EmptyFilterIsRejected(t *testing.T) {
+	planTest(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the API must not be reached: the config is invalid")
+	})
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{{
+			Config: providerConfig + `
+data "fivenines_vulnerabilities" "empty" {
+  package_name = ""
+}`,
+			ExpectError: regexp.MustCompile(`(?s)Invalid Attribute Value Length|at least 1`),
+		}},
+	})
+}
+
 // --- The plan gate ---
 
 // A plan without security_details answers 403. It must surface as a diagnostic

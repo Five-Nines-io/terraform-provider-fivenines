@@ -98,6 +98,8 @@ func (d *vulnerabilitiesDataSource) Schema(_ context.Context, _ datasource.Schem
 				Optional:    true,
 				Validators: []validator.String{
 					stringvalidator.ConflictsWith(path.MatchRoot("docker_image_id")),
+					// An empty string would build /api/v1/instances//vulnerabilities.
+					stringvalidator.LengthAtLeast(1),
 				},
 			},
 			"docker_image_id": schema.StringAttribute{
@@ -107,6 +109,8 @@ func (d *vulnerabilitiesDataSource) Schema(_ context.Context, _ datasource.Schem
 				Optional: true,
 				Validators: []validator.String{
 					stringvalidator.ConflictsWith(path.MatchRoot("instance_id")),
+					// An empty string would build /api/v1/docker_images//vulnerabilities.
+					stringvalidator.LengthAtLeast(1),
 				},
 			},
 			"severity": schema.ListAttribute{
@@ -140,10 +144,22 @@ func (d *vulnerabilitiesDataSource) Schema(_ context.Context, _ datasource.Schem
 			"package_name": schema.StringAttribute{
 				Description: "Exact package name. Deliberately not a substring match: a gate scoped to `openssl` must not silently widen to `openssl-dev`. Use `q` to look a package up.",
 				Optional:    true,
+				Validators: []validator.String{
+					// An empty string would be dropped by the filter helpers and
+					// silently widen the query — on a security index, the answer
+					// to a wider question still looks like an answer.
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"vulnerability_id": schema.StringAttribute{
 				Description: "Exact OSV advisory ID (`UBUNTU-CVE-2024-2511`, `DSA-1234-1`) - \"where else in my fleet is this advisory\". Not a CVE ID: an advisory can alias several, which each row publishes in `cve_ids`.",
 				Optional:    true,
+				Validators: []validator.String{
+					// An empty string would be dropped by the filter helpers and
+					// silently widen the query — on a security index, the answer
+					// to a wider question still looks like an answer.
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"ecosystem": schema.StringAttribute{
 				Description: "Only return findings whose packages were matched against this OSV ecosystem, e.g. `Ubuntu:22.04`. Organization-wide queries only - the scoped ones already fix their subject's ecosystem.",
@@ -153,11 +169,18 @@ func (d *vulnerabilitiesDataSource) Schema(_ context.Context, _ datasource.Schem
 						path.MatchRoot("instance_id"),
 						path.MatchRoot("docker_image_id"),
 					),
+					stringvalidator.LengthAtLeast(1),
 				},
 			},
 			"q": schema.StringAttribute{
 				Description: "Case-insensitive substring match on the package name.",
 				Optional:    true,
+				Validators: []validator.String{
+					// An empty string would be dropped by the filter helpers and
+					// silently widen the query — on a security index, the answer
+					// to a wider question still looks like an answer.
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"updated_since": schema.StringAttribute{
 				Description: "Only findings whose `updated_at` is at or after this ISO 8601 timestamp (inclusive). Note the shape of this data: a scan rewrites a subject's findings WHOLESALE whenever the set changes, so every row of that subject moves at once and a row id is not stable across scans. There are no tombstones either — a finding a patch removed is deleted, and a sync built on this cursor alone will not see it go.",

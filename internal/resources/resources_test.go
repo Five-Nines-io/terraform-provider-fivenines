@@ -14,7 +14,9 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
+	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -28,15 +30,30 @@ func TestMapInstanceToState(t *testing.T) {
 	inst := &client.Instance{
 		ID:          "uuid-1",
 		DisplayName: "web-1",
+		Description: ptr("primary web tier"),
 		Hostname:    ptr("web-1.local"),
+		HostGroupID: ptr(int64(7)),
 		Enabled:     true,
 		CPUCount:    ptr(int64(4)),
 		MemorySize:  ptr(int64(8589934592)),
 		CreatedAt:   "2026-01-01T00:00:00Z",
 		UpdatedAt:   "2026-01-01T00:00:00Z",
+
+		RedisEnabled:     ptr(true),
+		RedisPort:        ptr(int64(6390)),
+		TSDBVerifySSL:    ptr(true),
+		CaddyAdminAPIURL: ptr("http://localhost:2019"),
+
+		RedisPasswordSet:      true,
+		ProxmoxTokenSecretSet: false,
 	}
 
 	state := &instanceModel{}
+	// The write-only credentials live only in the configuration; the API
+	// cannot echo them, so a read keeps one exactly while its _set boolean
+	// reports it stored — and clears one the API reports gone.
+	state.RedisPassword = types.StringValue("s3cret")
+	state.ProxmoxTokenSecret = types.StringValue("cleared-in-dashboard")
 	mapInstanceToState(inst, state)
 
 	if state.ID.ValueString() != "uuid-1" {
@@ -44,6 +61,12 @@ func TestMapInstanceToState(t *testing.T) {
 	}
 	if state.DisplayName.ValueString() != "web-1" {
 		t.Errorf("expected display_name web-1, got %s", state.DisplayName.ValueString())
+	}
+	if state.Description.ValueString() != "primary web tier" {
+		t.Errorf("expected description to map, got %v", state.Description)
+	}
+	if state.HostGroupID.ValueInt64() != 7 {
+		t.Errorf("expected host_group_id 7, got %v", state.HostGroupID)
 	}
 	if !state.Enabled.ValueBool() {
 		t.Error("expected enabled true")
@@ -64,6 +87,417 @@ func TestMapInstanceToState(t *testing.T) {
 	}
 	if !state.KernelVersion.IsNull() {
 		t.Errorf("expected kernel_version to be null, got %q", state.KernelVersion.ValueString())
+	}
+
+	// Collector settings map as stored, and a toggle the API reports null for
+	// (a host predating that collector's column) stays null, not false.
+	if !state.RedisEnabled.ValueBool() || state.RedisPort.ValueInt64() != 6390 {
+		t.Errorf("expected redis settings to map, got %v/%v", state.RedisEnabled, state.RedisPort)
+	}
+	if !state.TSDBVerifySSL.ValueBool() {
+		t.Error("expected tsdb_verify_ssl true")
+	}
+	if state.CaddyAdminAPIURL.ValueString() != "http://localhost:2019" {
+		t.Errorf("expected caddy_admin_api_url to map, got %v", state.CaddyAdminAPIURL)
+	}
+	if !state.ZFSEnabled.IsNull() {
+		t.Errorf("expected zfs_enabled to stay null, got %v", state.ZFSEnabled)
+	}
+
+	// The _set booleans carry the only readable truth about the credentials;
+	// the credentials themselves are never overwritten by a read.
+	if !state.RedisPasswordSet.ValueBool() {
+		t.Error("expected redis_password_set true")
+	}
+	if state.ProxmoxTokenSecretSet.ValueBool() {
+		t.Error("expected proxmox_token_secret_set false")
+	}
+	if state.RedisPassword.ValueString() != "s3cret" {
+		t.Errorf("expected the configured redis_password to survive a read, got %v", state.RedisPassword)
+	}
+	if !state.MySQLPassword.IsNull() {
+		t.Errorf("expected an unconfigured secret to stay null, got %v", state.MySQLPassword)
+	}
+	// proxmox_token_secret_set is false: the server holds no secret, so the
+	// stale configured value must clear — that null is what makes the next
+	// plan re-send the credential instead of reporting "No changes".
+	if !state.ProxmoxTokenSecret.IsNull() {
+		t.Errorf("expected a secret the API reports unstored to clear, got %v", state.ProxmoxTokenSecret)
+	}
+}
+
+// The provider's half of the blank-means-keep contract: a secret the plan
+// holds no value for is OMITTED from the request body — never sent as "" (the
+// server would keep the stored value while state claims empty) and never as
+// null. host_group_id is the deliberate exception: Optional-only, so a null
+// plan value marshals as an explicit null that removes the host from its
+// group.
+func TestInstanceSettingsFromPlan_OmitsWhatItDoesNotManage(t *testing.T) {
+	plan := &instanceModel{
+		DisplayName:   types.StringValue("web-1"),
+		RedisPassword: types.StringValue("s3cret"),
+		DockerEnabled: types.BoolValue(true),
+		// A fresh plan holds unknown for every unresolved Computed setting;
+		// those must be omitted too, not sent as zero values.
+		CephEnabled: types.BoolUnknown(),
+		RedisPort:   types.Int64Unknown(),
+	}
+
+	raw, err := json.Marshal(client.UpdateInstanceInput{
+		DisplayName:           stringPtr(plan.DisplayName),
+		InstanceSettingsInput: instanceSettingsFromPlan(plan),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := string(body["redis_password"]); got != `"s3cret"` {
+		t.Errorf("expected the configured secret on the wire, got %s", got)
+	}
+	if got, present := body["postgresql_password"]; present {
+		t.Errorf("an unmanaged secret must be omitted, got %s", got)
+	}
+	if got := string(body["docker_enabled"]); got != "true" {
+		t.Errorf("expected docker_enabled true, got %s", got)
+	}
+	for _, key := range []string{"ceph_enabled", "redis_port", "cluster_name", "logs_enabled"} {
+		if got, present := body[key]; present {
+			t.Errorf("expected unset %s to be omitted so the server keeps its value, got %s", key, got)
+		}
+	}
+	if got, present := body["host_group_id"]; !present || string(got) != "null" {
+		t.Errorf("host_group_id must be an explicit null when unset, got %s (present=%t)", got, present)
+	}
+}
+
+// instanceSecretAttrs is the canonical list of the ten write-only
+// credentials; attribute names and wire names coincide for this resource.
+var instanceSecretAttrs = client.InstanceSecretKeys
+
+// instanceModelFieldsByTag indexes instanceModel's fields by tfsdk tag, which
+// for this resource is also the wire name of every settings field.
+func instanceModelFieldsByTag(t *testing.T) map[string]int {
+	t.Helper()
+	modelType := reflect.TypeOf(instanceModel{})
+	fields := make(map[string]int, modelType.NumField())
+	for i := 0; i < modelType.NumField(); i++ {
+		tag := modelType.Field(i).Tag.Get("tfsdk")
+		if tag == "" {
+			t.Fatalf("instanceModel.%s carries no tfsdk tag", modelType.Field(i).Name)
+		}
+		fields[tag] = i
+	}
+	return fields
+}
+
+// One probe per field: set exactly one attribute on the plan, build the input,
+// and require the body to carry exactly that key (plus the ever-present
+// host_group_id null) with the probe's value. Sampling cannot see a crossed
+// copy — plan.RedisPort feeding memcached_port survives every check that does
+// not isolate the field — and across 79 hand-written copy lines, crossed and
+// missing lines are the realistic failure.
+func TestInstanceSettingsFromPlan_EveryFieldReachesItsOwnKey(t *testing.T) {
+	modelFields := instanceModelFieldsByTag(t)
+
+	inputType := reflect.TypeOf(client.InstanceSettingsInput{})
+	for i := 0; i < inputType.NumField(); i++ {
+		field := inputType.Field(i)
+		key, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+
+		idx, ok := modelFields[key]
+		if !ok {
+			t.Errorf("InstanceSettingsInput.%s (json %q) has no instanceModel attribute of that name", field.Name, key)
+			continue
+		}
+
+		plan := instanceModel{}
+		fv := reflect.ValueOf(&plan).Elem().Field(idx)
+		var want string
+		switch fv.Interface().(type) {
+		case types.String:
+			fv.Set(reflect.ValueOf(types.StringValue("probe-" + key)))
+			want = `"probe-` + key + `"`
+		case types.Bool:
+			fv.Set(reflect.ValueOf(types.BoolValue(true)))
+			want = "true"
+		case types.Int64:
+			fv.Set(reflect.ValueOf(types.Int64Value(4242)))
+			want = "4242"
+		default:
+			t.Fatalf("unhandled model type %T for %s", fv.Interface(), key)
+		}
+
+		raw, err := json.Marshal(client.UpdateInstanceInput{InstanceSettingsInput: instanceSettingsFromPlan(&plan)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+
+		if got := string(body[key]); got != want {
+			t.Errorf("%s: expected %s on the wire, got %s", key, want, got)
+		}
+		delete(body, key)
+		delete(body, "host_group_id") // always present, null when unset
+		for stray := range body {
+			t.Errorf("%s: probe leaked into %q — a crossed copy in instanceSettingsFromPlan", key, stray)
+		}
+	}
+}
+
+// The read-side mirror: one probe per API field must land in exactly its own
+// attribute and move nothing else — with every write-only credential seeded in
+// state throughout, because the API cannot echo one back: a read keeps the
+// configured value exactly while the paired `_set` boolean reports it stored,
+// and clears it to null when the API reports none (see storedSecret).
+func TestMapInstanceToState_EveryFieldLandsInItsOwnAttribute(t *testing.T) {
+	modelFields := instanceModelFieldsByTag(t)
+	modelType := reflect.TypeOf(instanceModel{})
+
+	secretAttr := make(map[string]bool, len(instanceSecretAttrs))
+	for _, name := range instanceSecretAttrs {
+		secretAttr[name] = true
+	}
+
+	// A state as Read receives it: the configured credentials present, since
+	// the API cannot echo them back.
+	seed := func() *instanceModel {
+		m := &instanceModel{}
+		mv := reflect.ValueOf(m).Elem()
+		for _, name := range instanceSecretAttrs {
+			mv.Field(modelFields[name]).Set(reflect.ValueOf(types.StringValue("configured-" + name)))
+		}
+		return m
+	}
+
+	// An empty Instance reports every _set boolean false — no secret stored —
+	// so a read must clear the configured credentials rather than leave state
+	// claiming values the server does not hold.
+	baseline := seed()
+	mapInstanceToState(&client.Instance{}, baseline)
+	baseValue := reflect.ValueOf(*baseline)
+	for _, name := range instanceSecretAttrs {
+		got := baseValue.Field(modelFields[name]).Interface().(types.String)
+		if !got.IsNull() {
+			t.Fatalf("mapInstanceToState must clear %s when its _set boolean reports no stored secret, got %v", name, got)
+		}
+	}
+
+	// The converse: while the API reports one stored, the configured value
+	// survives the read exactly as written.
+	kept := seed()
+	mapInstanceToState(&client.Instance{
+		RedisPasswordSet: true, PostgreSQLPasswordSet: true, MySQLPasswordSet: true,
+		RabbitMQPasswordSet: true, HAProxyPasswordSet: true, ProxmoxTokenSecretSet: true,
+		TSDBAuthHeaderValueSet: true, TSDBBasicAuthPasswordSet: true,
+		VLLMAuthHeaderValueSet: true, SGLangAuthHeaderValueSet: true,
+	}, kept)
+	keptValue := reflect.ValueOf(*kept)
+	for _, name := range instanceSecretAttrs {
+		got := keptValue.Field(modelFields[name]).Interface().(types.String)
+		if got.ValueString() != "configured-"+name {
+			t.Fatalf("mapInstanceToState must keep %s while its _set boolean reports a stored secret, got %v", name, got)
+		}
+	}
+
+	instType := reflect.TypeOf(client.Instance{})
+	for i := 0; i < instType.NumField(); i++ {
+		field := instType.Field(i)
+		key, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if _, ok := modelFields[key]; !ok {
+			t.Errorf("Instance.%s (json %q) has no instanceModel attribute of that name", field.Name, key)
+			continue
+		}
+
+		inst := client.Instance{}
+		fv := reflect.ValueOf(&inst).Elem().Field(i)
+		var want attr.Value
+		switch fv.Interface().(type) {
+		case *string:
+			fv.Set(reflect.ValueOf(ptr("probe-" + key)))
+			want = types.StringValue("probe-" + key)
+		case string:
+			fv.SetString("probe-" + key)
+			want = types.StringValue("probe-" + key)
+		case *bool:
+			fv.Set(reflect.ValueOf(ptr(true)))
+			want = types.BoolValue(true)
+		case bool:
+			fv.SetBool(true)
+			want = types.BoolValue(true)
+		case *int64:
+			fv.Set(reflect.ValueOf(ptr(int64(4242))))
+			want = types.Int64Value(4242)
+		default:
+			t.Fatalf("unhandled Instance field type %T for %s", fv.Interface(), key)
+		}
+
+		state := seed()
+		mapInstanceToState(&inst, state)
+
+		sv := reflect.ValueOf(*state)
+		for j := 0; j < modelType.NumField(); j++ {
+			tag := modelType.Field(j).Tag.Get("tfsdk")
+			got := sv.Field(j).Interface().(attr.Value)
+			if tag == key {
+				if !got.Equal(want) {
+					t.Errorf("%s: expected the probe to land as %s, got %s", key, want, got)
+				}
+				continue
+			}
+			// A true `_set` probe legitimately moves one more attribute: its
+			// paired credential survives instead of being cleared.
+			if paired := strings.TrimSuffix(key, "_set"); paired != key && tag == paired && secretAttr[paired] {
+				if want := types.StringValue("configured-" + paired); !got.Equal(want) {
+					t.Errorf("%s: expected the paired %s to survive the read, got %s", key, paired, got)
+				}
+				continue
+			}
+			if base := baseValue.Field(j).Interface().(attr.Value); !got.Equal(base) {
+				t.Errorf("%s: probe leaked into %q — a crossed assignment in mapInstanceToState (got %s, baseline %s)", key, tag, got, base)
+			}
+		}
+	}
+}
+
+// --- instance schema ---
+
+// The ten credentials must be Sensitive, Optional-only and blank-rejecting,
+// each paired with a Computed-only `_set` presence boolean — and nothing else
+// in the schema may look like a credential without being registered as one,
+// or it ships un-Sensitive and un-guarded.
+func TestInstanceSchema_SecretsAreSensitiveAndRejectBlank(t *testing.T) {
+	ctx := context.Background()
+	s := instanceSchemaForTest(t)
+
+	secretSet := make(map[string]bool, len(instanceSecretAttrs))
+	for _, name := range instanceSecretAttrs {
+		secretSet[name] = true
+
+		a, ok := s.Attributes[name].(rschema.StringAttribute)
+		if !ok {
+			t.Errorf("%s: expected a StringAttribute, got %T", name, s.Attributes[name])
+			continue
+		}
+		if !a.Sensitive {
+			t.Errorf("%s must be Sensitive — it is a credential", name)
+		}
+		if a.Computed {
+			t.Errorf("%s must not be Computed: the API never returns it, so it would stay unknown forever", name)
+		}
+		if !a.Optional {
+			t.Errorf("%s must be Optional", name)
+		}
+		if len(a.Validators) == 0 {
+			t.Errorf("%s must reject the empty string: the API reads \"\" as \"keep\", which would "+
+				"leave state claiming \"\" while the server still holds a credential", name)
+		} else {
+			// The server drops a secret via Rails `blank?`, so whitespace-only
+			// counts as blank too — including the Unicode spaces (NBSP,
+			// vertical tab) that Go's ASCII-only \s does not cover. Every
+			// spelling must die at plan time.
+			for _, blank := range []string{"", "  \t", " ", "\v  "} {
+				resp := &validator.StringResponse{}
+				a.Validators[0].ValidateString(ctx, validator.StringRequest{
+					Path:        path.Root(name),
+					ConfigValue: types.StringValue(blank),
+				}, resp)
+				if !resp.Diagnostics.HasError() {
+					t.Errorf("%s: expected the blank %q to be rejected at plan time", name, blank)
+				}
+			}
+		}
+
+		presence, ok := s.Attributes[name+"_set"].(rschema.BoolAttribute)
+		if !ok {
+			t.Errorf("%s_set: expected a BoolAttribute, got %T", name, s.Attributes[name+"_set"])
+			continue
+		}
+		if !presence.Computed || presence.Optional {
+			t.Errorf("%s_set must be Computed-only — it is the API's answer, not the practitioner's", name)
+		}
+	}
+
+	for name := range s.Attributes {
+		if strings.HasSuffix(name, "_password") || strings.HasSuffix(name, "_secret") ||
+			strings.HasSuffix(name, "_auth_header_value") {
+			if !secretSet[name] {
+				t.Errorf("%s looks like a credential but is not in instanceSecretAttrs — register it there "+
+					"(and in the API's blank-means-keep list) or rename it", name)
+			}
+		}
+	}
+}
+
+// Every settings attribute is Optional+Computed with NO provider-side default
+// — the server's defaults are not uniform, and a provider default would fight
+// them on every host. host_group_id is the deliberate Optional-only exception
+// that makes clearing possible.
+func TestInstanceSchema_SettingsFollowTheServerNotProviderDefaults(t *testing.T) {
+	s := instanceSchemaForTest(t)
+
+	hg, ok := s.Attributes["host_group_id"].(rschema.Int64Attribute)
+	if !ok || !hg.Optional || hg.Computed {
+		t.Error("host_group_id must be Optional-only: as Optional+Computed a dropped reference would " +
+			"stick to the prior group instead of clearing the membership")
+	}
+
+	secretSet := make(map[string]bool, len(instanceSecretAttrs))
+	for _, name := range instanceSecretAttrs {
+		secretSet[name] = true
+	}
+
+	// Writable on the wire ⇒ configurable in the schema, and settings must be
+	// Optional+Computed so an unmanaged one follows the server.
+	inputKeys := make(map[string]bool)
+	inputType := reflect.TypeOf(client.InstanceSettingsInput{})
+	for i := 0; i < inputType.NumField(); i++ {
+		key, _, _ := strings.Cut(inputType.Field(i).Tag.Get("json"), ",")
+		inputKeys[key] = true
+		if key == "host_group_id" || secretSet[key] {
+			continue
+		}
+		a, present := s.Attributes[key]
+		if !present {
+			t.Errorf("%s is writable in InstanceSettingsInput but missing from the schema", key)
+			continue
+		}
+		if !a.IsOptional() || !a.IsComputed() {
+			t.Errorf("%s is a server-defaulted setting, so it must be Optional+Computed; got optional=%t computed=%t",
+				key, a.IsOptional(), a.IsComputed())
+		}
+	}
+
+	for name, a := range s.Attributes {
+		// Configurable in the schema ⇒ actually sent: an Optional attribute
+		// outside the input would accept configuration and silently drop it.
+		if a.IsOptional() && !inputKeys[name] &&
+			name != "display_name" && name != "enabled" && name != "maintenance_mode" {
+			t.Errorf("%s is Optional in the schema but absent from InstanceSettingsInput — configuring it would do nothing", name)
+		}
+
+		if name == "enabled" || name == "maintenance_mode" {
+			continue // deliberate provider defaults, pre-dating the settings
+		}
+		var hasDefault bool
+		switch at := a.(type) {
+		case rschema.BoolAttribute:
+			hasDefault = at.Default != nil
+		case rschema.StringAttribute:
+			hasDefault = at.Default != nil
+		case rschema.Int64Attribute:
+			hasDefault = at.Default != nil
+		}
+		if hasDefault {
+			t.Errorf("%s carries a provider-side default; the server owns these defaults, so a provider "+
+				"default would fight the API on every host that differs", name)
+		}
 	}
 }
 
@@ -1232,5 +1666,38 @@ func TestAPITokenDelete_TreatsMissingTokenAsGone(t *testing.T) {
 
 	if resp.Diagnostics.HasError() {
 		t.Fatalf("a 404 on revoke is success, got %v", resp.Diagnostics.Errors())
+	}
+}
+
+// The trimmed validator mirrors Ruby String#strip — ASCII whitespace plus
+// vertical tab and NUL, the two Go's \s misses. A padded value would apply,
+// read back stripped, and fail as an inconsistent result; internal
+// whitespace is untouched by the server and passes.
+func TestInstanceTrimmedValidator(t *testing.T) {
+	ctx := context.Background()
+	s := instanceSchemaForTest(t)
+	a, ok := s.Attributes["tsdb_url"].(rschema.StringAttribute)
+	if !ok || len(a.Validators) == 0 {
+		t.Fatal("tsdb_url must carry the trimmed validator — the server strips it on assignment")
+	}
+
+	probe := func(value string) bool {
+		resp := &validator.StringResponse{}
+		a.Validators[0].ValidateString(ctx, validator.StringRequest{
+			Path:        path.Root("tsdb_url"),
+			ConfigValue: types.StringValue(value),
+		}, resp)
+		return resp.Diagnostics.HasError()
+	}
+
+	for _, ok := range []string{"", "http://x", "http://x/a b", "a\nb"} {
+		if probe(ok) {
+			t.Errorf("expected %q to pass — the server would store it unchanged", ok)
+		}
+	}
+	for _, padded := range []string{" http://x", "http://x ", "\vhttp://x", "http://x\x00", "\thttp://x\n"} {
+		if !probe(padded) {
+			t.Errorf("expected %q to be rejected — the server strips it and the read-back would differ", padded)
+		}
 	}
 }

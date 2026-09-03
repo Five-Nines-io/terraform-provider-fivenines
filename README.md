@@ -6,7 +6,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 
 | Resource | Description |
 |----------|-------------|
-| `fivenines_instance` | Server/host instances |
+| `fivenines_instance` | Server/host instances, and every collector setting on them |
 | `fivenines_task` | Cron & heartbeat monitors |
 | `fivenines_uptime_monitor` | HTTP/HTTPS/TCP/ICMP/DNS uptime checks |
 | `fivenines_workflow` | Automation workflows with version management |
@@ -407,6 +407,7 @@ What ends up there:
 |-----------|--------------------|
 | `fivenines_task.ping_key` / `ping_url` | Server-generated; the API returns the key on every read, and `ping_url` embeds it. This is what you feed to the job that pings the task, so it has to be readable as an output. |
 | `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
+| `fivenines_instance.redis_password`, `postgresql_password`, `mysql_password`, `rabbitmq_password`, `haproxy_password`, `proxmox_token_secret`, `tsdb_auth_header_value`, `tsdb_basic_auth_password`, `vllm_auth_header_value`, `sglang_auth_header_value` | Write-only — the API never returns a collector credential, so state holds the value you configured. The paired `_set` booleans report whether the server holds one. |
 | `fivenines_integration.url`, `secret`, `routing_key`, `user_key`, `app_token` | Write-only — the API never serializes an integration's metadata, so state holds the value you configured. |
 | `fivenines_integration.webhook_signing_secret`, `webhook_verification_token` | Returned once, by the create call, and never readable again. State is the **only** copy: lose it and the signing key has to be rotated by replacing the channel. |
 | `fivenines_api_token.token` | Returned once, by the create call. The server keeps only a SHA-256 digest, so state is the **only** copy — and unlike the rows above, it is a key to the API itself. Anyone who can read the state file can act as that token, up to its scopes. An imported token has no value here at all. |
@@ -513,6 +514,15 @@ view. `username_set` and `password_set` report that a credential exists. Like th
 SNMP secrets on `fivenines_network_device`, they are write-only and preserve on
 omission — setting one rotates it, dropping it from the configuration leaves the
 stored value alone. Clear a credential in the dashboard.
+
+An instance imports its whole monitoring configuration, but not its ten collector
+credentials: `redis_password`, `postgresql_password`, `mysql_password`,
+`rabbitmq_password`, `haproxy_password`, `proxmox_token_secret`,
+`tsdb_auth_header_value`, `tsdb_basic_auth_password`, `vllm_auth_header_value` and
+`sglang_auth_header_value` are write-only on exactly those terms, each paired with a
+`<name>_set` boolean reporting whether the server holds one. Collector settings you
+do not put in the configuration keep their server-side values, so adopting an
+instance does not flatten choices made in the dashboard.
 
 ## Development
 

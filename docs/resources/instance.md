@@ -5,6 +5,7 @@ subcategory: ""
 description: |-
   Manages a FiveNines instance (monitored server).
   Destroying an instance waits for the deletion to finish. The API answers 202 and tears the host down asynchronously, so the provider polls until it is gone (up to five minutes) before releasing state, which is what makes replacing a host in a single apply safe.
+  The collector settings (*_enabled toggles and their endpoints) have server-owned defaults: an attribute left out of the configuration keeps whatever the host already has, including choices made in the dashboard — set it explicitly to manage it. Credentials (*_password, proxmox_token_secret, *_auth_header_value) are write-only: the API reports only a computed <name>_set boolean, never the value. Like every Terraform sensitive value they are still stored in state in cleartext — write-only describes the API, so protect the state file as you would the credentials. Linux-only collectors (ZFS, Proxmox, systemd, HAProxy, …) are dropped by the API on a confirmed Windows host, so setting one there fails the apply — with one undetectable corner: rotating a Linux-only credential the host already stores is refused while the old value stays, and the presence-only _set boolean cannot tell the two apart.
 ---
 
 # fivenines_instance (Resource)
@@ -13,13 +14,40 @@ Manages a FiveNines instance (monitored server).
 
 Destroying an instance waits for the deletion to finish. The API answers 202 and tears the host down asynchronously, so the provider polls until it is gone (up to five minutes) before releasing state, which is what makes replacing a host in a single apply safe.
 
+The collector settings (`*_enabled` toggles and their endpoints) have server-owned defaults: an attribute left out of the configuration keeps whatever the host already has, including choices made in the dashboard — set it explicitly to manage it. Credentials (`*_password`, `proxmox_token_secret`, `*_auth_header_value`) are write-only: the API reports only a computed `<name>_set` boolean, never the value. Like every Terraform sensitive value they are still stored in state in cleartext — write-only describes the API, so protect the state file as you would the credentials. Linux-only collectors (ZFS, Proxmox, systemd, HAProxy, …) are dropped by the API on a confirmed Windows host, so setting one there fails the apply — with one undetectable corner: rotating a Linux-only credential the host already stores is refused while the old value stays, and the presence-only `_set` boolean cannot tell the two apart.
+
 ## Example Usage
 
 ```terraform
+# A minimal instance: register the host, then install the agent (see
+# fivenines_enrollment_token for scripted installs).
 resource "fivenines_instance" "web_server" {
-  display_name     = "Web Server (Production)"
-  enabled          = true
-  maintenance_mode = false
+  display_name = "Web Server (Production)"
+  description  = "Primary web tier"
+
+  host_group_id = fivenines_host_group.production.id
+}
+
+# The full monitoring configuration is writable too. Collector settings not
+# listed here keep their server-side values — including choices made in the
+# dashboard — so manage the ones you care about and leave the rest alone.
+resource "fivenines_instance" "db_server" {
+  display_name = "PostgreSQL Primary"
+  cluster_name = "eu-west-1"
+
+  smart_storage_health_enabled = true
+  systemd_enabled              = true
+
+  postgresql_enabled  = true
+  postgresql_host     = "127.0.0.1"
+  postgresql_port     = 5432
+  postgresql_user     = "monitoring"
+  postgresql_database = "app"
+
+  # Write-only: the API never returns a credential, so `postgresql_password_set`
+  # is what reports that one is stored. Dropping this attribute later leaves the
+  # stored value alone — clear one from the dashboard.
+  postgresql_password = var.postgresql_monitoring_password
 }
 ```
 
@@ -32,8 +60,87 @@ resource "fivenines_instance" "web_server" {
 
 ### Optional
 
+- `apache_enabled` (Boolean) Whether Apache monitoring is enabled.
+- `apache_status_page_url` (String) URL of the Apache mod_status page (the `?auto` form).
+- `caddy_admin_api_url` (String) URL of the Caddy admin API.
+- `caddy_enabled` (Boolean) Whether Caddy monitoring is enabled.
+- `ceph_enabled` (Boolean) Whether Ceph monitoring is enabled.
+- `cluster_name` (String) Cluster this host reports under (e.g. `eu-west-1`).
+- `description` (String) Free-form description of the host.
+- `docker_enabled` (Boolean) Whether Docker container monitoring is enabled.
+- `docker_socket_url` (String) Docker socket URL (e.g. `unix://var/run/docker.sock`).
 - `enabled` (Boolean) Whether the instance is enabled for monitoring.
+- `fail2ban_enabled` (Boolean) Whether Fail2ban jail monitoring is enabled.
+- `haproxy_enabled` (Boolean) Whether HAProxy monitoring is enabled.
+- `haproxy_password` (String, Sensitive) Password for the HAProxy stats endpoint. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `haproxy_stats_socket` (String) Path of the HAProxy admin socket.
+- `haproxy_stats_url` (String) URL of the HAProxy stats endpoint (the `;csv` form).
+- `haproxy_username` (String) Username for the HAProxy stats endpoint.
+- `host_group_id` (Number) ID of the host group this instance belongs to (see `fivenines_host_group`). Must be a group in your organization. Removing it from the configuration removes the instance from its group — and the API deletes a group its last host leaves, so ungrouping the final member also destroys the group itself.
+- `ipv6_enabled` (Boolean) Whether IPv6 monitoring is enabled.
+- `logs_enabled` (Boolean) Whether log collection is enabled.
+- `logs_units_csv` (String) Comma-separated systemd units to collect logs from (e.g. `nginx.service, ssh.service`).
 - `maintenance_mode` (Boolean) Whether the instance is in maintenance mode.
+- `memcached_enabled` (Boolean) Whether Memcached monitoring is enabled.
+- `memcached_host` (String) Memcached host.
+- `memcached_port` (Number) Memcached port (usually 11211).
+- `mysql_database` (String) MySQL database to connect to.
+- `mysql_enabled` (Boolean) Whether MySQL/MariaDB monitoring is enabled.
+- `mysql_host` (String) MySQL host.
+- `mysql_password` (String, Sensitive) MySQL password. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `mysql_port` (Number) MySQL port (usually 3306).
+- `mysql_socket` (String) MySQL Unix socket path (e.g. `/var/run/mysqld/mysqld.sock`).
+- `mysql_user` (String) MySQL user.
+- `nginx_enabled` (Boolean) Whether nginx monitoring is enabled.
+- `nginx_status_page_url` (String) URL of the nginx stub_status page.
+- `nvidia_gpu_enabled` (Boolean) Whether NVIDIA GPU monitoring is enabled.
+- `php_fpm_enabled` (Boolean) Whether PHP-FPM monitoring is enabled.
+- `php_fpm_status_page_url` (String) URL of the PHP-FPM status page.
+- `postgresql_database` (String) PostgreSQL database to connect to.
+- `postgresql_enabled` (Boolean) Whether PostgreSQL monitoring is enabled.
+- `postgresql_host` (String) PostgreSQL host.
+- `postgresql_password` (String, Sensitive) PostgreSQL password. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `postgresql_port` (Number) PostgreSQL port (usually 5432).
+- `postgresql_user` (String) PostgreSQL user.
+- `proxmox_enabled` (Boolean) Whether Proxmox VE monitoring is enabled.
+- `proxmox_host` (String) Proxmox API host.
+- `proxmox_port` (Number) Proxmox API port (usually 8006).
+- `proxmox_token_id` (String) Proxmox API token ID (e.g. `monitoring@pve!fivenines`).
+- `proxmox_token_secret` (String, Sensitive) Proxmox API token secret. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `proxmox_verify_ssl` (Boolean) Whether to verify the Proxmox API TLS certificate.
+- `qemu_enabled` (Boolean) Whether QEMU/libvirt VM monitoring is enabled.
+- `qemu_uri` (String) Libvirt connection URI (e.g. `qemu:///system`).
+- `rabbitmq_enabled` (Boolean) Whether RabbitMQ monitoring is enabled.
+- `rabbitmq_management_url` (String) URL of the RabbitMQ management API.
+- `rabbitmq_password` (String, Sensitive) RabbitMQ management password. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `rabbitmq_username` (String) RabbitMQ management username.
+- `rabbitmq_vhost_filter` (String) Only monitor vhosts matching this filter.
+- `raid_storage_health_enabled` (Boolean) Whether RAID array monitoring is enabled.
+- `redis_enabled` (Boolean) Whether Redis monitoring is enabled.
+- `redis_password` (String, Sensitive) Redis password. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `redis_port` (Number) Redis port (usually 6379).
+- `sglang_auth_header_name` (String) Name of the auth header sent to SGLang.
+- `sglang_auth_header_value` (String, Sensitive) Value of the auth header sent to SGLang. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `sglang_enabled` (Boolean) Whether SGLang monitoring is enabled.
+- `sglang_metrics_url` (String) Full metrics URL of the SGLang server.
+- `sglang_verify_ssl` (Boolean) Whether to verify SGLang's TLS certificate.
+- `smart_storage_health_enabled` (Boolean) Whether S.M.A.R.T. disk health monitoring is enabled.
+- `systemd_enabled` (Boolean) Whether systemd unit monitoring is enabled.
+- `tailscale_enabled` (Boolean) Whether Tailscale monitoring is enabled.
+- `tsdb_auth_header_name` (String) Name of the auth header sent to the TSDB.
+- `tsdb_auth_header_value` (String, Sensitive) Value of the auth header sent to the TSDB. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `tsdb_basic_auth_password` (String, Sensitive) Basic auth password for the TSDB. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `tsdb_basic_auth_username` (String) Basic auth username for the TSDB.
+- `tsdb_enabled` (Boolean) Whether Prometheus/VictoriaMetrics (TSDB) meta-monitoring is enabled.
+- `tsdb_url` (String) Base URL of the Prometheus / VictoriaMetrics server — the agent appends `/metrics`.
+- `tsdb_verify_ssl` (Boolean) Whether to verify the TSDB's TLS certificate.
+- `vllm_auth_header_name` (String) Name of the auth header sent to vLLM.
+- `vllm_auth_header_value` (String, Sensitive) Value of the auth header sent to vLLM. Write-only — the API never returns it; the paired `_set` attribute reports whether one is stored. Setting it rotates the stored value; dropping it from the configuration leaves that value alone rather than wiping a credential Terraform cannot read back. Clear one from the dashboard.
+- `vllm_enabled` (Boolean) Whether vLLM monitoring is enabled.
+- `vllm_metrics_url` (String) Full metrics URL, not a base — vLLM moves the path with `--root-path`.
+- `vllm_verify_ssl` (Boolean) Whether to verify vLLM's TLS certificate.
+- `wireguard_enabled` (Boolean) Whether WireGuard peer monitoring is enabled.
+- `zfs_enabled` (Boolean) Whether ZFS pool monitoring is enabled.
 
 ### Read-Only
 
@@ -43,6 +150,7 @@ resource "fivenines_instance" "web_server" {
 - `cpu_model` (String) CPU model.
 - `created_at` (String) Creation timestamp.
 - `first_sync_at` (String) First agent sync time.
+- `haproxy_password_set` (Boolean) Whether an HAProxy password is stored. The value itself is never returned.
 - `hostname` (String) Hostname reported by the agent.
 - `id` (String) Unique identifier (UUID).
 - `ipv4` (String) IPv4 address.
@@ -51,7 +159,16 @@ resource "fivenines_instance" "web_server" {
 - `last_request_at` (String) Last API request time from the agent.
 - `last_sync_at` (String) Last time the agent synced.
 - `memory_size` (Number) Memory size in bytes.
+- `mysql_password_set` (Boolean) Whether a MySQL password is stored. The value itself is never returned.
 - `operating_system_name` (String) Operating system name.
-- `source` (String) Agent type (e.g., fivenines-agent).
-- `status` (String) Current status of the instance.
+- `postgresql_password_set` (Boolean) Whether a PostgreSQL password is stored. The value itself is never returned.
+- `proxmox_token_secret_set` (Boolean) Whether a Proxmox token secret is stored. The value itself is never returned.
+- `rabbitmq_password_set` (Boolean) Whether a RabbitMQ password is stored. The value itself is never returned.
+- `redis_password_set` (Boolean) Whether a Redis password is stored. The value itself is never returned.
+- `sglang_auth_header_value_set` (Boolean) Whether an SGLang auth header value is stored. The value itself is never returned.
+- `source` (String) How the instance reports: `agent` (the FiveNines agent) or `prometheus_pull`.
+- `status` (String) Current status: `waiting`, `online`, `offline`, `warning`, `maintenance` or `disabled`. `waiting` means the agent has never checked in.
+- `tsdb_auth_header_value_set` (Boolean) Whether a TSDB auth header value is stored. The value itself is never returned.
+- `tsdb_basic_auth_password_set` (Boolean) Whether a TSDB basic auth password is stored. The value itself is never returned.
 - `updated_at` (String) Last update timestamp.
+- `vllm_auth_header_value_set` (Boolean) Whether a vLLM auth header value is stored. The value itself is never returned.

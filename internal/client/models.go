@@ -25,11 +25,17 @@ type PaginationMeta struct {
 // Instance represents a monitored server (Host).
 //
 // Fields the API documents as nullable are pointers so a null round-trips to
-// types.StringNull()/types.Int64Null() instead of collapsing to "" or 0.
+// types.StringNull()/types.Int64Null() instead of collapsing to "" or 0. The
+// collector settings are pointers even where the swagger says non-nullable:
+// most of those columns carry a database default but no NOT NULL, so a host
+// predating a collector's migration really can report null for its toggle.
 type Instance struct {
 	ID                  string  `json:"id"` // UUID
 	DisplayName         string  `json:"display_name"`
+	Description         *string `json:"description"`
 	Hostname            *string `json:"hostname"`
+	HostGroupID         *int64  `json:"host_group_id"`
+	ClusterName         *string `json:"cluster_name"`
 	Enabled             bool    `json:"enabled"`
 	MaintenanceMode     bool    `json:"maintenance_mode"`
 	OperatingSystemName *string `json:"operating_system_name"`
@@ -48,6 +54,226 @@ type Instance struct {
 	LastRequestAt       *string `json:"last_request_at"`
 	CreatedAt           string  `json:"created_at"`
 	UpdatedAt           string  `json:"updated_at"`
+
+	// Collector settings — the writable surface of InstanceInput, read back.
+
+	// Storage / virtualization
+	SmartStorageHealthEnabled *bool   `json:"smart_storage_health_enabled"`
+	RaidStorageHealthEnabled  *bool   `json:"raid_storage_health_enabled"`
+	ZFSEnabled                *bool   `json:"zfs_enabled"`
+	CephEnabled               *bool   `json:"ceph_enabled"`
+	QemuEnabled               *bool   `json:"qemu_enabled"`
+	QemuURI                   *string `json:"qemu_uri"`
+	ProxmoxEnabled            *bool   `json:"proxmox_enabled"`
+	ProxmoxHost               *string `json:"proxmox_host"`
+	ProxmoxPort               *int64  `json:"proxmox_port"`
+	ProxmoxTokenID            *string `json:"proxmox_token_id"`
+	ProxmoxVerifySSL          *bool   `json:"proxmox_verify_ssl"`
+
+	// Containers
+	DockerEnabled   *bool   `json:"docker_enabled"`
+	DockerSocketURL *string `json:"docker_socket_url"`
+
+	// Caches
+	RedisEnabled     *bool   `json:"redis_enabled"`
+	RedisPort        *int64  `json:"redis_port"`
+	MemcachedEnabled *bool   `json:"memcached_enabled"`
+	MemcachedHost    *string `json:"memcached_host"`
+	MemcachedPort    *int64  `json:"memcached_port"`
+
+	// Databases
+	PostgreSQLEnabled  *bool   `json:"postgresql_enabled"`
+	PostgreSQLHost     *string `json:"postgresql_host"`
+	PostgreSQLPort     *int64  `json:"postgresql_port"`
+	PostgreSQLUser     *string `json:"postgresql_user"`
+	PostgreSQLDatabase *string `json:"postgresql_database"`
+	MySQLEnabled       *bool   `json:"mysql_enabled"`
+	MySQLHost          *string `json:"mysql_host"`
+	MySQLPort          *int64  `json:"mysql_port"`
+	MySQLUser          *string `json:"mysql_user"`
+	MySQLDatabase      *string `json:"mysql_database"`
+	MySQLSocket        *string `json:"mysql_socket"`
+
+	// Web / application servers
+	NginxEnabled        *bool   `json:"nginx_enabled"`
+	NginxStatusPageURL  *string `json:"nginx_status_page_url"`
+	ApacheEnabled       *bool   `json:"apache_enabled"`
+	ApacheStatusPageURL *string `json:"apache_status_page_url"`
+	CaddyEnabled        *bool   `json:"caddy_enabled"`
+	CaddyAdminAPIURL    *string `json:"caddy_admin_api_url"`
+	PHPFPMEnabled       *bool   `json:"php_fpm_enabled"`
+	PHPFPMStatusPageURL *string `json:"php_fpm_status_page_url"`
+	HAProxyEnabled      *bool   `json:"haproxy_enabled"`
+	HAProxyStatsURL     *string `json:"haproxy_stats_url"`
+	HAProxyStatsSocket  *string `json:"haproxy_stats_socket"`
+	HAProxyUsername     *string `json:"haproxy_username"`
+
+	// Messaging
+	RabbitMQEnabled       *bool   `json:"rabbitmq_enabled"`
+	RabbitMQManagementURL *string `json:"rabbitmq_management_url"`
+	RabbitMQUsername      *string `json:"rabbitmq_username"`
+	RabbitMQVhostFilter   *string `json:"rabbitmq_vhost_filter"`
+
+	// Observability meta-monitoring + AI inference serving
+	TSDBEnabled           *bool   `json:"tsdb_enabled"`
+	TSDBURL               *string `json:"tsdb_url"`
+	TSDBAuthHeaderName    *string `json:"tsdb_auth_header_name"`
+	TSDBBasicAuthUsername *string `json:"tsdb_basic_auth_username"`
+	TSDBVerifySSL         *bool   `json:"tsdb_verify_ssl"`
+	VLLMEnabled           *bool   `json:"vllm_enabled"`
+	VLLMMetricsURL        *string `json:"vllm_metrics_url"`
+	VLLMAuthHeaderName    *string `json:"vllm_auth_header_name"`
+	VLLMVerifySSL         *bool   `json:"vllm_verify_ssl"`
+	SGLangEnabled         *bool   `json:"sglang_enabled"`
+	SGLangMetricsURL      *string `json:"sglang_metrics_url"`
+	SGLangAuthHeaderName  *string `json:"sglang_auth_header_name"`
+	SGLangVerifySSL       *bool   `json:"sglang_verify_ssl"`
+
+	// VPN / host-level collectors
+	WireguardEnabled *bool   `json:"wireguard_enabled"`
+	TailscaleEnabled *bool   `json:"tailscale_enabled"`
+	SystemdEnabled   *bool   `json:"systemd_enabled"`
+	Fail2banEnabled  *bool   `json:"fail2ban_enabled"`
+	NvidiaGPUEnabled *bool   `json:"nvidia_gpu_enabled"`
+	IPv6Enabled      *bool   `json:"ipv6_enabled"`
+	LogsEnabled      *bool   `json:"logs_enabled"`
+	LogsUnitsCSV     *string `json:"logs_units_csv"`
+
+	// Secret presence. The credentials themselves are write-only — the API
+	// reports only whether one is stored, never the value.
+	RedisPasswordSet         bool `json:"redis_password_set"`
+	PostgreSQLPasswordSet    bool `json:"postgresql_password_set"`
+	MySQLPasswordSet         bool `json:"mysql_password_set"`
+	RabbitMQPasswordSet      bool `json:"rabbitmq_password_set"`
+	HAProxyPasswordSet       bool `json:"haproxy_password_set"`
+	ProxmoxTokenSecretSet    bool `json:"proxmox_token_secret_set"`
+	TSDBAuthHeaderValueSet   bool `json:"tsdb_auth_header_value_set"`
+	TSDBBasicAuthPasswordSet bool `json:"tsdb_basic_auth_password_set"`
+	VLLMAuthHeaderValueSet   bool `json:"vllm_auth_header_value_set"`
+	SGLangAuthHeaderValueSet bool `json:"sglang_auth_header_value_set"`
+}
+
+// InstanceSettingsInput carries every host setting the API accepts on both
+// create and update — the shared half of InstanceInput. Embedded (anonymous)
+// in the create and update inputs so its fields marshal flat.
+//
+// Every field is omitted when nil so an unset attribute leaves the stored
+// value alone, with one exception: host_group_id is Optional-only in the
+// schema, the provider owns it end to end, and a nil marshals as an explicit
+// null that removes the host from its group (the task.host_id convention).
+//
+// The ten secret fields are write-only: the API never returns them and treats
+// a blank value as "keep the stored secret", so the provider never sends ""
+// — a nil omits the key entirely and a non-empty value rotates the secret.
+type InstanceSettingsInput struct {
+	Description *string `json:"description,omitempty"`
+	HostGroupID *int64  `json:"host_group_id"`
+	ClusterName *string `json:"cluster_name,omitempty"`
+
+	// Storage / virtualization
+	SmartStorageHealthEnabled *bool   `json:"smart_storage_health_enabled,omitempty"`
+	RaidStorageHealthEnabled  *bool   `json:"raid_storage_health_enabled,omitempty"`
+	ZFSEnabled                *bool   `json:"zfs_enabled,omitempty"`
+	CephEnabled               *bool   `json:"ceph_enabled,omitempty"`
+	QemuEnabled               *bool   `json:"qemu_enabled,omitempty"`
+	QemuURI                   *string `json:"qemu_uri,omitempty"`
+	ProxmoxEnabled            *bool   `json:"proxmox_enabled,omitempty"`
+	ProxmoxHost               *string `json:"proxmox_host,omitempty"`
+	ProxmoxPort               *int64  `json:"proxmox_port,omitempty"`
+	ProxmoxTokenID            *string `json:"proxmox_token_id,omitempty"`
+	ProxmoxTokenSecret        *string `json:"proxmox_token_secret,omitempty"`
+	ProxmoxVerifySSL          *bool   `json:"proxmox_verify_ssl,omitempty"`
+
+	// Containers
+	DockerEnabled   *bool   `json:"docker_enabled,omitempty"`
+	DockerSocketURL *string `json:"docker_socket_url,omitempty"`
+
+	// Caches
+	RedisEnabled     *bool   `json:"redis_enabled,omitempty"`
+	RedisPort        *int64  `json:"redis_port,omitempty"`
+	RedisPassword    *string `json:"redis_password,omitempty"`
+	MemcachedEnabled *bool   `json:"memcached_enabled,omitempty"`
+	MemcachedHost    *string `json:"memcached_host,omitempty"`
+	MemcachedPort    *int64  `json:"memcached_port,omitempty"`
+
+	// Databases
+	PostgreSQLEnabled  *bool   `json:"postgresql_enabled,omitempty"`
+	PostgreSQLHost     *string `json:"postgresql_host,omitempty"`
+	PostgreSQLPort     *int64  `json:"postgresql_port,omitempty"`
+	PostgreSQLUser     *string `json:"postgresql_user,omitempty"`
+	PostgreSQLPassword *string `json:"postgresql_password,omitempty"`
+	PostgreSQLDatabase *string `json:"postgresql_database,omitempty"`
+	MySQLEnabled       *bool   `json:"mysql_enabled,omitempty"`
+	MySQLHost          *string `json:"mysql_host,omitempty"`
+	MySQLPort          *int64  `json:"mysql_port,omitempty"`
+	MySQLUser          *string `json:"mysql_user,omitempty"`
+	MySQLPassword      *string `json:"mysql_password,omitempty"`
+	MySQLDatabase      *string `json:"mysql_database,omitempty"`
+	MySQLSocket        *string `json:"mysql_socket,omitempty"`
+
+	// Web / application servers
+	NginxEnabled        *bool   `json:"nginx_enabled,omitempty"`
+	NginxStatusPageURL  *string `json:"nginx_status_page_url,omitempty"`
+	ApacheEnabled       *bool   `json:"apache_enabled,omitempty"`
+	ApacheStatusPageURL *string `json:"apache_status_page_url,omitempty"`
+	CaddyEnabled        *bool   `json:"caddy_enabled,omitempty"`
+	CaddyAdminAPIURL    *string `json:"caddy_admin_api_url,omitempty"`
+	PHPFPMEnabled       *bool   `json:"php_fpm_enabled,omitempty"`
+	PHPFPMStatusPageURL *string `json:"php_fpm_status_page_url,omitempty"`
+	HAProxyEnabled      *bool   `json:"haproxy_enabled,omitempty"`
+	HAProxyStatsURL     *string `json:"haproxy_stats_url,omitempty"`
+	HAProxyStatsSocket  *string `json:"haproxy_stats_socket,omitempty"`
+	HAProxyUsername     *string `json:"haproxy_username,omitempty"`
+	HAProxyPassword     *string `json:"haproxy_password,omitempty"`
+
+	// Messaging
+	RabbitMQEnabled       *bool   `json:"rabbitmq_enabled,omitempty"`
+	RabbitMQManagementURL *string `json:"rabbitmq_management_url,omitempty"`
+	RabbitMQUsername      *string `json:"rabbitmq_username,omitempty"`
+	RabbitMQPassword      *string `json:"rabbitmq_password,omitempty"`
+	RabbitMQVhostFilter   *string `json:"rabbitmq_vhost_filter,omitempty"`
+
+	// Observability meta-monitoring + AI inference serving
+	TSDBEnabled           *bool   `json:"tsdb_enabled,omitempty"`
+	TSDBURL               *string `json:"tsdb_url,omitempty"`
+	TSDBAuthHeaderName    *string `json:"tsdb_auth_header_name,omitempty"`
+	TSDBAuthHeaderValue   *string `json:"tsdb_auth_header_value,omitempty"`
+	TSDBBasicAuthUsername *string `json:"tsdb_basic_auth_username,omitempty"`
+	TSDBBasicAuthPassword *string `json:"tsdb_basic_auth_password,omitempty"`
+	TSDBVerifySSL         *bool   `json:"tsdb_verify_ssl,omitempty"`
+	VLLMEnabled           *bool   `json:"vllm_enabled,omitempty"`
+	VLLMMetricsURL        *string `json:"vllm_metrics_url,omitempty"`
+	VLLMAuthHeaderName    *string `json:"vllm_auth_header_name,omitempty"`
+	VLLMAuthHeaderValue   *string `json:"vllm_auth_header_value,omitempty"`
+	VLLMVerifySSL         *bool   `json:"vllm_verify_ssl,omitempty"`
+	SGLangEnabled         *bool   `json:"sglang_enabled,omitempty"`
+	SGLangMetricsURL      *string `json:"sglang_metrics_url,omitempty"`
+	SGLangAuthHeaderName  *string `json:"sglang_auth_header_name,omitempty"`
+	SGLangAuthHeaderValue *string `json:"sglang_auth_header_value,omitempty"`
+	SGLangVerifySSL       *bool   `json:"sglang_verify_ssl,omitempty"`
+
+	// VPN / host-level collectors
+	WireguardEnabled *bool   `json:"wireguard_enabled,omitempty"`
+	TailscaleEnabled *bool   `json:"tailscale_enabled,omitempty"`
+	SystemdEnabled   *bool   `json:"systemd_enabled,omitempty"`
+	Fail2banEnabled  *bool   `json:"fail2ban_enabled,omitempty"`
+	NvidiaGPUEnabled *bool   `json:"nvidia_gpu_enabled,omitempty"`
+	IPv6Enabled      *bool   `json:"ipv6_enabled,omitempty"`
+	LogsEnabled      *bool   `json:"logs_enabled,omitempty"`
+	LogsUnitsCSV     *string `json:"logs_units_csv,omitempty"`
+}
+
+// InstanceSecretKeys is the provider-side mirror of the server's
+// Host::BLANK_MEANS_KEEP_SECRET_PARAM_KEYS: the ten write-only credentials on
+// InstanceSettingsInput. The API never returns any of them — only a paired
+// `<key>_set` boolean — and reads a blank as "keep the stored secret". Every
+// test that needs the secret list derives it from here, so an eleventh
+// credential is added in exactly one place.
+var InstanceSecretKeys = []string{
+	"proxmox_token_secret", "redis_password", "postgresql_password",
+	"mysql_password", "haproxy_password", "rabbitmq_password",
+	"tsdb_auth_header_value", "tsdb_basic_auth_password",
+	"vllm_auth_header_value", "sglang_auth_header_value",
 }
 
 // CreateInstanceInput is the request body for creating an instance.
@@ -55,6 +281,7 @@ type CreateInstanceInput struct {
 	DisplayName     string `json:"display_name"`
 	Enabled         *bool  `json:"enabled,omitempty"`
 	MaintenanceMode *bool  `json:"maintenance_mode,omitempty"`
+	InstanceSettingsInput
 }
 
 // UpdateInstanceInput is the request body for updating an instance.
@@ -62,6 +289,7 @@ type UpdateInstanceInput struct {
 	DisplayName     *string `json:"display_name,omitempty"`
 	Enabled         *bool   `json:"enabled,omitempty"`
 	MaintenanceMode *bool   `json:"maintenance_mode,omitempty"`
+	InstanceSettingsInput
 }
 
 // Task represents a cron/heartbeat monitor.

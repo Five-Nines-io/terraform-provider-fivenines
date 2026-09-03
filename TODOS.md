@@ -19,12 +19,15 @@
   - ~~`dns_expected_records`~~: fixed in #9 — the update input field is `*[]string`,
     so an explicit `[]` is sent and `mapToState` keeps the pinned empty list rather
     than flipping it to null. The pattern to copy for the rest
-  - Instance secrets: blank-means-keep + `_set` booleans (#7) — still open, and the
-    only remaining half of this item. The wire half is already solved by the #31 tag
-    convention (a write-only secret is `,omitempty`, so omission preserves — see the
-    three SNMP credentials); what #7 adds is the `_set` booleans that make an
-    unreadable secret's presence visible in state. `fivenines_mqtt_broker` (#18) is
-    the worked example of that pairing
+  - ~~Instance secrets: blank-means-keep + `_set` booleans~~: fixed in #7 — the last
+    half of this item. The wire half was already the #31 tag convention (a write-only
+    secret is `,omitempty`, so omission preserves — see the three SNMP credentials);
+    #7 adds the ten `_set` booleans, following `fivenines_mqtt_broker` (#18). Beyond
+    that pairing, `storedSecret` clears a credential from state when its `_set` reads
+    false, so a secret cleared in the dashboard plans a re-send instead of reporting
+    "No changes" forever — the reconciliation the `_set` contract exists for. The
+    validators reject a blank (Rails `blank?` semantics, Unicode included), since
+    blank-means-keep would otherwise record a credential the server discarded
 - ~~Reads normalize API null to `""`~~: fixed in #29 — the nullable fields on
   `Instance`, `Task`, `Workflow`, `NetworkDevice` and `StatusPage` are pointers and
   map to `types.StringNull()`/`types.Int64Null()`. Attributes carrying a schema

@@ -172,6 +172,76 @@ func intPtr(v types.Int64) *int {
 	return &i
 }
 
+// splitCSVUnits mirrors the API's parse of a comma-separated unit list —
+// split on commas, strip, drop blanks, dedupe keeping first occurrence — so
+// two spellings compare equal exactly when the server would store the same
+// list for both.
+func splitCSVUnits(s string) []string {
+	seen := map[string]bool{}
+	var units []string
+	for _, part := range strings.Split(s, ",") {
+		unit := strings.TrimSpace(part)
+		if unit == "" || seen[unit] {
+			continue
+		}
+		seen[unit] = true
+		units = append(units, unit)
+	}
+	return units
+}
+
+// csvOrKeep keeps the configured spelling of a comma-separated list when it
+// names the same units the API re-rendered. The server parses what it is
+// sent but serializes canonically ("a.service,b.service" comes back as
+// "a.service, b.service"), so storing the server's rendering verbatim fails
+// the apply — the planned config value and the applied one differ — for any
+// spelling but the canonical one. A genuinely different list, or a value on
+// a host the configuration does not manage, still reports the server.
+func csvOrKeep(apiValue *string, current types.String) types.String {
+	if current.IsUnknown() || current.IsNull() {
+		return optionalString(apiValue)
+	}
+	// The serializer renders the empty list as "", but a null is compared as
+	// the same empty list rather than short-circuiting: a configuration
+	// spelling the empty list as "" or " , " must not read back as null.
+	rendered := ""
+	if apiValue != nil {
+		rendered = *apiValue
+	}
+	if slicesEqual(splitCSVUnits(current.ValueString()), splitCSVUnits(rendered)) {
+		return current
+	}
+	return optionalString(apiValue)
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// storedSecret reconciles a write-only credential with the API's only
+// readable signal about it, the paired `<name>_set` boolean. While a secret
+// is stored, the configured value stays in state as written (the API cannot
+// echo it). When the API reports none stored — cleared in the dashboard, or
+// refused server-side (a blank, or a Linux-only credential on a Windows
+// host) — keeping the configured value would leave `terraform plan` claiming
+// "No changes" against a host that has no credential, so the attribute goes
+// null: a managed secret then diffs and is re-sent, and a refused one fails
+// the apply loudly instead of recording a value the server never kept.
+func storedSecret(current types.String, set bool) types.String {
+	if !set || current.IsUnknown() {
+		return types.StringNull()
+	}
+	return current
+}
+
 // optionalNonEmptyStringOrKeep is optionalNonEmptyString for attributes whose
 // prior value distinguishes "" from null. The API uses the two interchangeably,
 // so a body configured as "" comes back as null and vice versa; reporting the

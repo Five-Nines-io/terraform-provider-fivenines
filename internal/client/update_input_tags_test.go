@@ -214,6 +214,59 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		input  interface{}
 		policy map[string]string
 	}{
+		// Embedded anonymous in CreateInstanceInput and UpdateInstanceInput, so
+		// its fields marshal flat into both bodies — and, being untagged, the
+		// embed itself is invisible to the field loop below, which is why it
+		// carries its own row (and why that loop refuses an unclassified embed).
+		input: InstanceSettingsInput{},
+		policy: map[string]string{
+			// Optional-only: the provider owns the group membership end to end,
+			// and dropping it from the configuration has to remove the host from
+			// its group, which only an explicit null can do.
+			"host_group_id": clears,
+
+			// Everything below preserves on nil. The settings are
+			// Optional+Computed with server-owned defaults, so omission is what
+			// keeps an unmanaged value (including dashboard choices) alone.
+			"description": preserves, "cluster_name": preserves,
+			"smart_storage_health_enabled": preserves, "raid_storage_health_enabled": preserves,
+			"zfs_enabled": preserves, "ceph_enabled": preserves,
+			"qemu_enabled": preserves, "qemu_uri": preserves,
+			"proxmox_enabled": preserves, "proxmox_host": preserves,
+			"proxmox_port": preserves, "proxmox_token_id": preserves,
+			"proxmox_verify_ssl": preserves,
+			"docker_enabled":     preserves, "docker_socket_url": preserves,
+			"redis_enabled": preserves, "redis_port": preserves,
+			"memcached_enabled": preserves, "memcached_host": preserves, "memcached_port": preserves,
+			"postgresql_enabled": preserves, "postgresql_host": preserves,
+			"postgresql_port": preserves, "postgresql_user": preserves,
+			"postgresql_database": preserves,
+			"mysql_enabled":       preserves, "mysql_host": preserves, "mysql_port": preserves,
+			"mysql_user": preserves, "mysql_database": preserves, "mysql_socket": preserves,
+			"nginx_enabled": preserves, "nginx_status_page_url": preserves,
+			"apache_enabled": preserves, "apache_status_page_url": preserves,
+			"caddy_enabled": preserves, "caddy_admin_api_url": preserves,
+			"php_fpm_enabled": preserves, "php_fpm_status_page_url": preserves,
+			"haproxy_enabled": preserves, "haproxy_stats_url": preserves,
+			"haproxy_stats_socket": preserves, "haproxy_username": preserves,
+			"rabbitmq_enabled": preserves, "rabbitmq_management_url": preserves,
+			"rabbitmq_username": preserves, "rabbitmq_vhost_filter": preserves,
+			"tsdb_enabled": preserves, "tsdb_url": preserves,
+			"tsdb_auth_header_name": preserves, "tsdb_basic_auth_username": preserves,
+			"tsdb_verify_ssl": preserves,
+			"vllm_enabled":    preserves, "vllm_metrics_url": preserves,
+			"vllm_auth_header_name": preserves, "vllm_verify_ssl": preserves,
+			"sglang_enabled": preserves, "sglang_metrics_url": preserves,
+			"sglang_auth_header_name": preserves, "sglang_verify_ssl": preserves,
+			"wireguard_enabled": preserves, "tailscale_enabled": preserves,
+			"systemd_enabled": preserves, "fail2ban_enabled": preserves,
+			"nvidia_gpu_enabled": preserves, "ipv6_enabled": preserves,
+			"logs_enabled": preserves, "logs_units_csv": preserves,
+		},
+	}, struct {
+		input  interface{}
+		policy map[string]string
+	}{
 		input: CreateTaskInput{},
 		policy: map[string]string{
 			"name": always, "schedule_type": always, "schedule": dropsZero,
@@ -526,6 +579,31 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		},
 	})
 
+	// An anonymous embedded struct carries no json tag of its own, so the field
+	// loop below cannot see it — but its fields still marshal flat into the
+	// body, policies and all. InstanceSettingsInput rides into both instance
+	// inputs that way. Requiring every embed to be classified under its own
+	// name keeps this table complete rather than silently partial.
+	classified := make(map[reflect.Type]bool, len(specs))
+	// The ten write-only credentials classify from the canonical list rather
+	// than ten more literal rows. They are blank-means-keep server-side: an
+	// explicit null or "" would wipe (or worse, silently fail to wipe) a
+	// stored secret on an unrelated update, and the API never echoes one
+	// back, so every one preserves. A secret added to InstanceSecretKeys is
+	// covered by construction; one stale in the list still fails the walk
+	// below as an unused policy entry.
+	for _, spec := range specs {
+		if _, ok := spec.input.(InstanceSettingsInput); ok {
+			for _, key := range InstanceSecretKeys {
+				spec.policy[key] = preserves
+			}
+		}
+	}
+
+	for _, spec := range specs {
+		classified[reflect.TypeOf(spec.input)] = true
+	}
+
 	for _, spec := range specs {
 		typ := reflect.TypeOf(spec.input)
 		t.Run(typ.Name(), func(t *testing.T) {
@@ -535,6 +613,10 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 				field := typ.Field(i)
 				tag := field.Tag.Get("json")
 				if tag == "" || tag == "-" {
+					if field.Anonymous && !classified[field.Type] {
+						t.Errorf("%s embeds %s, whose fields marshal flat but escape this table — "+
+							"classify %s in its own spec", typ.Name(), field.Type.Name(), field.Type.Name())
+					}
 					continue
 				}
 				name, opts, _ := strings.Cut(tag, ",")

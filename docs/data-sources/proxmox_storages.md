@@ -55,7 +55,7 @@ output "zfs_backed_storages" {
 ### Optional
 
 - `active` (Boolean) Filter by the per-node `active` column. Note this is a different question from `stale`: `active` says the storage is enabled and reachable on that node, `stale` says the row itself is old.
-- `q` (String) Case-insensitive substring match on the storage name or pool.
+- `q` (String) Case-insensitive substring match on the storage name, its backing pool, or its storage type -- three columns, so a term like `zfspool` matches every row of that type.
 - `stale` (Boolean) Freshness filter over a fixed 10-minute window. Omit for both.
 - `storage_type` (String) Filter by the Proxmox storage driver, e.g. `zfspool`.
 - `updated_since` (String) Return only rows whose `updated_at` is at or after this ISO 8601 timestamp. Inclusive, so a row updated in the same instant as the cursor comes back rather than falling through the gap. The ingester touches `updated_at` on every agent tick, so this is a freshness filter rather than a change feed, and there are no tombstones: a row the agent stops reporting is deleted.

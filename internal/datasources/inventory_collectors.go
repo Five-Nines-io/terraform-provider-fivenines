@@ -597,7 +597,7 @@ var inventoryCollectors = []inventoryCollector{
 			{name: "storage_type", kind: fieldString, desc: "Filter by the Proxmox storage driver, e.g. `zfspool`."},
 			{name: "active", kind: fieldBool, desc: "Filter by the per-node `active` column. Note this is a different question from `stale`: `active` says the storage is enabled and reachable on that node, `stale` says the row itself is old."},
 			{name: "stale", kind: fieldBool, desc: "Freshness filter over a fixed 10-minute window. Omit for both."},
-			{name: "q", kind: fieldString, desc: "Case-insensitive substring match on the storage name or pool."},
+			{name: "q", kind: fieldString, desc: "Case-insensitive substring match on the storage name, its backing pool, or its storage type -- three columns, so a term like `zfspool` matches every row of that type."},
 		},
 		fields: []inventoryField{
 			{"id", fieldString, "Row identifier."},

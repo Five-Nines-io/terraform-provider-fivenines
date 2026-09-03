@@ -329,16 +329,7 @@ func (d *vulnerabilitiesDataSource) Schema(_ context.Context, _ datasource.Schem
 }
 
 func (d *vulnerabilitiesDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	c, ok := req.ProviderData.(*client.Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected DataSource Configure Type",
-			"Expected *client.Client, got unexpected type.")
-		return
-	}
-	d.client = c
+	d.client = configureClient(req, resp)
 }
 
 func (d *vulnerabilitiesDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {

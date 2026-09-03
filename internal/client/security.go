@@ -2,8 +2,6 @@ package client
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -355,15 +353,5 @@ func (c *Client) getSecurityPage(ctx context.Context, path string, filters map[s
 		}
 	}
 
-	resp, err := c.doRequest(ctx, "GET", path+"?"+query.Encode(), nil, nil)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return parseError(resp)
-	}
-	if err := decodeResponse(resp, target); err != nil {
-		return fmt.Errorf("decoding response: %w", err)
-	}
-	return nil
+	return c.getJSON(ctx, path+"?"+query.Encode(), target)
 }

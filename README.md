@@ -39,8 +39,10 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_incidents` | Incidents, filterable by status, subject, active window and update time |
 | `fivenines_uptime_monitors` | Uptime monitors, filterable by status, protocol, search text and update time |
 | `fivenines_uptime_monitor_status` | Lightweight current status of a single uptime monitor |
+| `fivenines_instance_capability_status` | What one agent can actually collect, as opposed to what is switched on |
 | `fivenines_dashboard_templates` | The dashboard gallery, with an availability verdict per template |
 | `fivenines_host_groups` | Host groups, filterable by name, for looking up a group ID |
+| `fivenines_status_page_subscribers` | A status page's email subscribers (PII: needs the `status_pages: update` permission) |
 | `fivenines_organization` | Organization identity, effective plan and seat accounting |
 | `fivenines_organization_members` | Member roster with per-person two-factor state |
 | `fivenines_organization_security` | Two-factor policy and enrollment counters (read-only by design) |
@@ -111,6 +113,50 @@ checked, a null `vulnerability_count` means never scanned, a null
 `oom_kill_count` means cgroup v1 cannot see it. Rows the dashboard hides —
 QEMU tombstones, stale Proxmox rows, loopback sockets — are returned and
 flagged rather than filtered out.
+
+### Ceph and Proxmox cluster inventory
+
+Clusters are organization-owned, not host-owned: one cluster has one set of
+nodes, guests and storages however many hosts report it, because only the
+elected authoritative reporter writes them. The per-instance data sources above
+reach a cluster *through a host you already know*; these enumerate the fleet.
+
+| Data Source | Description |
+|-------------|-------------|
+| `fivenines_ceph_clusters` | Ceph clusters with health derived from their reporter set |
+| `fivenines_ceph_cluster` | One cluster by fsid, plus the per-host reporter breakdown |
+| `fivenines_proxmox_clusters` | Proxmox VE clusters with the quorum verdict and rollups |
+| `fivenines_proxmox_cluster` | One cluster by id, plus the per-host reporter breakdown |
+| `fivenines_proxmox_cluster_nodes` | One cluster's nodes, and which the cluster cannot see |
+| `fivenines_proxmox_cluster_guests` | One cluster's VMs and containers |
+| `fivenines_proxmox_cluster_storages` | One cluster's storages, keyed per node |
+| `fivenines_organization_proxmox_guests` | Every guest in the fleet, across every cluster |
+
+**The verdict always travels with its provenance, and you need all of it.**
+Both `health` and `quorate` are recomputed at read from the *fresh* reporters —
+never a stored winner, because a complete-but-old "healthy" scrape would
+otherwise beat a fresh "it is down" one forever. So neither field alone can say
+whether anyone is watching:
+
+```hcl
+data "fivenines_proxmox_clusters" "all" {}
+
+# quorate is THREE-VALUED and the null is load-bearing: it means UNKNOWN, never
+# "lost". A consumer that treats null as false pages on a monitoring outage.
+output "lost_quorum" {
+  value = [
+    for c in data.fivenines_proxmox_clusters.all.proxmox_clusters :
+    c.name if c.quorate == false
+  ]
+}
+```
+
+A Ceph cluster's `health` is `null` until it is promoted past the anti-phantom
+gate — a single-reporter cluster is usually a stale `ceph.conf` on a cloned
+image, so the product refuses to vouch for it and so does the provider. Neither
+list offers a server-side `health` or `quorate` filter: the verdict is a fold
+over the reporter set, and a second implementation of it in SQL is how such a
+filter starts disagreeing with the field each row publishes.
 
 ## Quick Start
 
@@ -535,10 +581,12 @@ make docs       # regenerate registry documentation
 ```
 
 `make docs` regenerates `docs/` from the Go schema descriptions and `examples/`.
-Never hand-edit `docs/` — CI regenerates it and fails on any diff. From a checkout
-not named `terraform-provider-fivenines` (a git worktree, for example) run
-`tfplugindocs generate --provider-name fivenines --rendered-provider-name terraform-provider-fivenines`
-instead; the bare command infers the wrong provider name, deletes `docs/`, and fails.
+Never hand-edit `docs/` — CI regenerates it and fails on any diff. Use the make
+target rather than calling `tfplugindocs generate` yourself: the target pins
+`--provider-name fivenines --rendered-provider-name terraform-provider-fivenines`,
+and without those flags tfplugindocs infers the provider name from the directory
+name, so from a checkout not named `terraform-provider-fivenines` (a git worktree,
+for example) the bare command deletes `docs/` and then fails mid-render.
 
 ### Acceptance tests
 

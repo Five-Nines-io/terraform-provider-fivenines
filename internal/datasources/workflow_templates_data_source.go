@@ -77,16 +77,7 @@ func (d *workflowTemplatesDataSource) Schema(_ context.Context, _ datasource.Sch
 }
 
 func (d *workflowTemplatesDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	c, ok := req.ProviderData.(*client.Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected Data Source Configure Type",
-			"Expected *client.Client, got unexpected type.")
-		return
-	}
-	d.client = c
+	d.client = configureClient(req, resp)
 }
 
 func (d *workflowTemplatesDataSource) Read(ctx context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {

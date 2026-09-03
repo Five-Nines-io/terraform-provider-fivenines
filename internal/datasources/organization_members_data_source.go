@@ -85,16 +85,7 @@ func (d *organizationMembersDataSource) Schema(_ context.Context, _ datasource.S
 }
 
 func (d *organizationMembersDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	c, ok := req.ProviderData.(*client.Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected DataSource Configure Type",
-			"Expected *client.Client, got unexpected type.")
-		return
-	}
-	d.client = c
+	d.client = configureClient(req, resp)
 }
 
 func (d *organizationMembersDataSource) Read(ctx context.Context, _ datasource.ReadRequest, resp *datasource.ReadResponse) {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
+	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
@@ -103,4 +104,26 @@ func filterBool(v types.Bool) *bool {
 	}
 	b := v.ValueBool()
 	return &b
+}
+
+// configureClient is the Configure body every data source in this package
+// shares: nil provider data is the pre-configuration call the framework always
+// makes and must stay a quiet no-op, and anything that is not a *client.Client
+// is a provider bug.
+//
+// It returns the client rather than assigning it, because each data source owns
+// a differently-typed receiver. Callers must keep the assignment -- dropping it
+// still compiles and still raises no diagnostic, and the nil only surfaces as a
+// panic on the first Read.
+func configureClient(req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) *client.Client {
+	if req.ProviderData == nil {
+		return nil
+	}
+	c, ok := req.ProviderData.(*client.Client)
+	if !ok {
+		resp.Diagnostics.AddError("Unexpected DataSource Configure Type",
+			"Expected *client.Client, got unexpected type.")
+		return nil
+	}
+	return c
 }

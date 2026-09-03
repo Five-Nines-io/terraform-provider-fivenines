@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-framework/types/basetypes"
 )
@@ -123,16 +124,7 @@ func (d *inventoryDataSource) Schema(_ context.Context, _ datasource.SchemaReque
 }
 
 func (d *inventoryDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
-	}
-	c, ok := req.ProviderData.(*client.Client)
-	if !ok {
-		resp.Diagnostics.AddError("Unexpected DataSource Configure Type",
-			"Expected *client.Client, got unexpected type.")
-		return
-	}
-	d.client = c
+	d.client = configureClient(req, resp)
 }
 
 func (d *inventoryDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
@@ -142,29 +134,7 @@ func (d *inventoryDataSource) Read(ctx context.Context, req datasource.ReadReque
 		return
 	}
 
-	// Each filter is read once: its config value is echoed straight back into
-	// state, and an unset one is left out of the query rather than sent as a
-	// zero value. That distinction matters on qemu_vms, where omitting
-	// `vanished` is what returns the tombstones.
-	filters := make(map[string]string)
-	configured := make(map[string]attr.Value, len(d.collector.filters))
-	for _, f := range d.collector.filters {
-		if f.kind == fieldBool {
-			var v types.Bool
-			resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root(f.name), &v)...)
-			configured[f.name] = v
-			if !v.IsNull() && !v.IsUnknown() {
-				filters[f.name] = strconv.FormatBool(v.ValueBool())
-			}
-			continue
-		}
-		var v types.String
-		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root(f.name), &v)...)
-		configured[f.name] = v
-		if !v.IsNull() && !v.IsUnknown() && v.ValueString() != "" {
-			filters[f.name] = v.ValueString()
-		}
-	}
+	filters, configured := readInventoryFilters(ctx, req.Config, d.collector.filters, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -184,31 +154,7 @@ func (d *inventoryDataSource) Read(ctx context.Context, req datasource.ReadReque
 		return
 	}
 
-	rowType := d.rowObjectType()
-	elems := make([]attr.Value, 0, len(rows))
-	for i, row := range rows {
-		attrs := make(map[string]attr.Value, len(d.collector.fields))
-		for _, f := range d.collector.fields {
-			v, err := fieldValue(f, row[f.name])
-			if err != nil {
-				resp.Diagnostics.AddError(
-					"Unexpected value in "+d.collector.name+" response",
-					fmt.Sprintf("Row %d, field %q: %s", i, f.name, err),
-				)
-				return
-			}
-			attrs[f.name] = v
-		}
-		obj, diags := types.ObjectValue(rowType.AttrTypes, attrs)
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		elems = append(elems, obj)
-	}
-
-	rowList, diags := types.ListValue(rowType, elems)
-	resp.Diagnostics.Append(diags...)
+	rowList := inventoryRowList(d.collector.fields, rows, d.collector.name, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -243,14 +189,6 @@ func (d *inventoryDataSource) Read(ctx context.Context, req datasource.ReadReque
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, state)...)
-}
-
-func (d *inventoryDataSource) rowObjectType() types.ObjectType {
-	attrTypes := make(map[string]attr.Type, len(d.collector.fields))
-	for _, f := range d.collector.fields {
-		attrTypes[f.name] = f.attrType()
-	}
-	return types.ObjectType{AttrTypes: attrTypes}
 }
 
 func (f inventoryField) attrType() attr.Type {
@@ -448,4 +386,92 @@ func collectorValue(s *client.CollectorStatus) (types.Object, diag.Diagnostics) 
 		"blocked_reason":     optionalString(s.BlockedReason),
 		"last_reported_at":   optionalString(s.LastReportedAt),
 	})
+}
+
+// --- Shared by inventoryDataSource and proxmoxInventoryDataSource ---
+//
+// The per-instance collector inventories and the Proxmox cluster children serve
+// the same rows through different routes, so their Reads differ only in how the
+// parent is addressed and which client call fetches the rows. Everything
+// between -- reading the filters, mapping rows onto the field table, building
+// the row object type -- is keyed on the field and filter tables rather than on
+// the data source, and lives here once.
+
+// readInventoryFilters reads each declared filter from the config, returning
+// both the query values to send and the raw config values to echo back into
+// state.
+//
+// An unset filter is left OUT of the query rather than sent as a zero value:
+// the API answers 400 to an unknown or empty parameter instead of ignoring it,
+// and the distinction carries meaning of its own -- on qemu_vms, omitting
+// `vanished` is what returns the tombstones.
+func readInventoryFilters(ctx context.Context, config tfsdk.Config, declared []inventoryFilter, diags *diag.Diagnostics) (map[string]string, map[string]attr.Value) {
+	filters := make(map[string]string)
+	configured := make(map[string]attr.Value, len(declared))
+
+	for _, f := range declared {
+		if f.kind == fieldBool {
+			var v types.Bool
+			diags.Append(config.GetAttribute(ctx, path.Root(f.name), &v)...)
+			configured[f.name] = v
+			if !v.IsNull() && !v.IsUnknown() {
+				filters[f.name] = strconv.FormatBool(v.ValueBool())
+			}
+			continue
+		}
+		var v types.String
+		diags.Append(config.GetAttribute(ctx, path.Root(f.name), &v)...)
+		configured[f.name] = v
+		if !v.IsNull() && !v.IsUnknown() && v.ValueString() != "" {
+			filters[f.name] = v.ValueString()
+		}
+	}
+	return filters, configured
+}
+
+// inventoryRowObjectType is the Terraform object type one row of a field table
+// maps onto.
+func inventoryRowObjectType(fields []inventoryField) types.ObjectType {
+	attrTypes := make(map[string]attr.Type, len(fields))
+	for _, f := range fields {
+		attrTypes[f.name] = f.attrType()
+	}
+	return types.ObjectType{AttrTypes: attrTypes}
+}
+
+// inventoryRowList maps decoded JSON rows onto the field table. A column the
+// response omitted, or sent as null, becomes a typed Terraform null rather than
+// a zero -- the honesty contract these endpoints are built on. `name` names the
+// collection in the diagnostic raised for a value whose JSON type is wrong.
+func inventoryRowList(fields []inventoryField, rows []map[string]interface{}, name string, diags *diag.Diagnostics) types.List {
+	rowType := inventoryRowObjectType(fields)
+	elems := make([]attr.Value, 0, len(rows))
+
+	for i, row := range rows {
+		rowAttrs := make(map[string]attr.Value, len(fields))
+		for _, f := range fields {
+			v, err := fieldValue(f, row[f.name])
+			if err != nil {
+				diags.AddError(
+					"Unexpected value in "+name+" response",
+					fmt.Sprintf("Row %d, field %q: %s", i, f.name, err),
+				)
+				return types.ListNull(rowType)
+			}
+			rowAttrs[f.name] = v
+		}
+		obj, d := types.ObjectValue(rowType.AttrTypes, rowAttrs)
+		diags.Append(d...)
+		if diags.HasError() {
+			return types.ListNull(rowType)
+		}
+		elems = append(elems, obj)
+	}
+
+	list, d := types.ListValue(rowType, elems)
+	diags.Append(d...)
+	if diags.HasError() {
+		return types.ListNull(rowType)
+	}
+	return list
 }

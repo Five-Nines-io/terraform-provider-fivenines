@@ -47,6 +47,17 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_organization_saml` | SAML SSO posture and IdP certificate expiry (read-only by design) |
 | `fivenines_vulnerabilities` | CVE findings org-wide, or scoped to one instance or container image |
 | `fivenines_organization_docker_images` | Org-wide container image inventory, scan posture and blast radius |
+| `fivenines_uptime` | Availability over a window — the SLA number |
+| `fivenines_ssl_status` | Days until each monitored TLS certificate expires |
+| `fivenines_metric_query` | Any metric in the catalogue, for instances, monitors and network devices |
+| `fivenines_incident_stats` | Organization-wide incident count, MTTR and MTTA |
+| `fivenines_cve_stats` | Organization-wide vulnerability counts |
+
+The five metrics data sources are re-read on every `terraform plan`, so their
+values change between runs by design. Keep windows relative
+(`timeadd(timestamp(), "-720h")`) and treat the results as ephemeral: they are
+meant for `output`, `locals` and `precondition` / `check` gates, not for
+resource arguments, which would take a permanent diff.
 
 ### Per-instance collector inventories
 

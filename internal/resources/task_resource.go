@@ -110,8 +110,11 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Default:     stringdefault.StaticString("UTC"),
 			},
 			"host_id": schema.StringAttribute{
-				Description: "Optional host ID to associate this task with.",
+				Description: "Optional host ID to associate this task with. Omit it to detach; an empty string is not a host id.",
 				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.LengthAtLeast(1),
+				},
 			},
 			"status": schema.StringAttribute{
 				Description: "Current status.",
@@ -122,13 +125,14 @@ func (r *taskResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Computed:    true,
 			},
 			"ping_key": schema.StringAttribute{
-				Description: "Ping key for sending heartbeats.",
+				Description: "Ping key for sending heartbeats. Server-generated, and stored in Terraform state — treat the state file as a secret. The key only authenticates heartbeats for this one task; replace the task to issue a new one.",
 				Computed:    true,
 				Sensitive:   true,
 			},
 			"ping_url": schema.StringAttribute{
-				Description: "URL to send heartbeat pings to.",
+				Description: "URL to send heartbeat pings to. Embeds ping_key, so it carries the same secret and the same state-file caveat.",
 				Computed:    true,
+				Sensitive:   true,
 			},
 			"expected_ping_at": schema.StringAttribute{
 				Description: "Next expected ping time.",
@@ -273,7 +277,7 @@ func (r *taskResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
 	task, _, err := r.client.GetTask(ctx, state.ID.ValueString())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -300,31 +304,18 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 
 	id := state.ID.ValueString()
 
-	name := plan.Name.ValueString()
-	scheduleType := plan.ScheduleType.ValueString()
+	// schedule/interval_seconds are Optional+Computed since #8 — the API keeps
+	// the counterpart it already stored when you switch schedule_type — so they
+	// are omitted rather than cleared when the plan has no value. host_id is
+	// Optional-only and provider-owned: dropping it has to clear it server-side.
 	input := client.UpdateTaskInput{
-		Name:         &name,
-		ScheduleType: &scheduleType,
-	}
-	if !plan.Schedule.IsNull() && !plan.Schedule.IsUnknown() {
-		v := plan.Schedule.ValueString()
-		input.Schedule = &v
-	}
-	if !plan.IntervalSeconds.IsNull() && !plan.IntervalSeconds.IsUnknown() {
-		v := plan.IntervalSeconds.ValueInt64()
-		input.IntervalSeconds = &v
-	}
-	if !plan.GracePeriodMinutes.IsNull() && !plan.GracePeriodMinutes.IsUnknown() {
-		v := int(plan.GracePeriodMinutes.ValueInt64())
-		input.GracePeriodMinutes = &v
-	}
-	if !plan.TimeZone.IsNull() && !plan.TimeZone.IsUnknown() {
-		v := plan.TimeZone.ValueString()
-		input.TimeZone = &v
-	}
-	if !plan.HostID.IsNull() && !plan.HostID.IsUnknown() {
-		v := plan.HostID.ValueString()
-		input.HostID = &v
+		Name:               stringPtr(plan.Name),
+		ScheduleType:       stringPtr(plan.ScheduleType),
+		Schedule:           stringPtr(plan.Schedule),
+		IntervalSeconds:    int64Ptr(plan.IntervalSeconds),
+		GracePeriodMinutes: intPtr(plan.GracePeriodMinutes),
+		TimeZone:           stringPtr(plan.TimeZone),
+		HostID:             stringPtr(plan.HostID),
 	}
 
 	var task *client.Task
@@ -347,9 +338,9 @@ func (r *taskResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	}
 
 	// Handle pause/resume state change
-	if !plan.Paused.IsNull() {
+	if !plan.Paused.IsNull() && !plan.Paused.IsUnknown() {
 		wantPaused := plan.Paused.ValueBool()
-		isPaused := task.Status == "paused"
+		isPaused := task.Status == client.StatusPaused
 		if wantPaused && !isPaused {
 			paused, err := r.client.PauseTask(ctx, id)
 			if err != nil {
@@ -382,7 +373,7 @@ func (r *taskResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 
 	err := r.client.DeleteTask(ctx, state.ID.ValueString())
 	if err != nil {
-		if apiErr, ok := err.(*client.APIError); ok && apiErr.StatusCode == 404 {
+		if client.IsNotFound(err) {
 			return
 		}
 		resp.Diagnostics.AddError("Error deleting task", err.Error())
@@ -397,20 +388,14 @@ func mapTaskToState(t *client.Task, state *taskModel) {
 	state.ID = types.StringValue(t.ID)
 	state.Name = types.StringValue(t.Name)
 	state.ScheduleType = types.StringValue(t.ScheduleType)
-	state.Paused = types.BoolValue(t.Status == "paused")
-	if t.Schedule != "" {
-		state.Schedule = types.StringValue(t.Schedule)
-	} else {
-		state.Schedule = types.StringNull()
-	}
-	if t.IntervalSeconds != nil {
-		state.IntervalSeconds = types.Int64Value(*t.IntervalSeconds)
-	} else {
-		state.IntervalSeconds = types.Int64Null()
-	}
+	state.Paused = types.BoolValue(t.Status == client.StatusPaused)
+	// The API answers null for the schedule of an interval task, and has been
+	// seen to answer "" — both mean "no cron expression".
+	state.Schedule = optionalNonEmptyString(t.Schedule)
+	state.IntervalSeconds = optionalInt64(t.IntervalSeconds)
 	state.GracePeriodMinutes = types.Int64Value(int64(t.GracePeriodMinutes))
-	state.TimeZone = types.StringValue(t.TimeZone)
-	state.HostID = optionalString(t.HostID)
+	state.TimeZone = stringOrKeep(t.TimeZone, state.TimeZone)
+	state.HostID = optionalNonEmptyString(t.HostID)
 	state.Status = types.StringValue(t.Status)
 	state.MonitoringStatus = types.StringValue(t.MonitoringStatus)
 	state.PingKey = types.StringValue(t.PingKey)

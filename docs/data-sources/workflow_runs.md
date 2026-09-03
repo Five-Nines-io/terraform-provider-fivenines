@@ -3,18 +3,25 @@
 page_title: "fivenines_workflow_runs Data Source - terraform-provider-fivenines"
 subcategory: ""
 description: |-
-  Lists execution runs for a FiveNines workflow.
+  Lists execution runs for a FiveNines workflow. Runs are returned as headers only — use the fivenines_workflow_run data source for per-step detail.
 ---
 
 # fivenines_workflow_runs (Data Source)
 
-Lists execution runs for a FiveNines workflow.
+Lists execution runs for a FiveNines workflow. Runs are returned as headers only — use the `fivenines_workflow_run` data source for per-step detail.
 
 ## Example Usage
 
 ```terraform
 data "fivenines_workflow_runs" "alert_runs" {
   workflow_id = fivenines_workflow.alert.id
+}
+
+# Failed runs, most recently finished first.
+data "fivenines_workflow_runs" "failures" {
+  workflow_id = fivenines_workflow.alert.id
+  status      = "failed"
+  order       = "completed_at"
 }
 
 output "latest_run_status" {
@@ -29,6 +36,13 @@ output "latest_run_status" {
 
 - `workflow_id` (Number) Workflow ID to list runs for.
 
+### Optional
+
+- `direction` (String) Sort direction, `asc` or `desc`. Defaults to `desc`.
+- `order` (String) Sort column: `created_at`, `updated_at`, `started_at` or `completed_at`. Defaults to `created_at`.
+- `status` (String) Only runs with this status. One of `running`, `completed`, `failed`, `cancelled`.
+- `updated_since` (String) Only runs whose `updated_at` is at or after this ISO 8601 timestamp (inclusive).
+
 ### Read-Only
 
 - `runs` (Attributes List) List of workflow runs. (see [below for nested schema](#nestedatt--runs))
@@ -40,7 +54,11 @@ Read-Only:
 
 - `completed_at` (String) When the run completed.
 - `created_at` (String) When the run was created.
+- `duration_seconds` (Number) Run duration in whole seconds. For a run still running this is the elapsed time so far, not a final duration.
 - `id` (Number) Run ID.
-- `resource_key` (String) Resource key that triggered the run.
+- `resource_key` (String) The subject this run is for on a fan-out workflow (one run per host, guest, pool, ...). Null on a workflow that dispatches once.
 - `started_at` (String) When the run started.
-- `status` (String) Run status (pending, running, completed, failed).
+- `status` (String) Run status (running, completed, failed, cancelled).
+- `updated_at` (String) Last update timestamp. A run is written when it starts and again when it finishes, so a completion surfaces on it.
+- `workflow_id` (Number) Workflow this run belongs to.
+- `workflow_version_id` (Number) The workflow version that was executed — not necessarily the currently published one.

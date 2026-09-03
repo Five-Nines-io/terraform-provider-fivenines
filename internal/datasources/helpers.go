@@ -1,8 +1,8 @@
 package datasources
 
 import (
-	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
-	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"encoding/json"
+
 	"github.com/hashicorp/terraform-plugin-framework/types"
 )
 
@@ -27,37 +27,42 @@ func optionalFloat64(f *float64) types.Float64 {
 	return types.Float64Value(*f)
 }
 
-func optionalBool(b *bool) types.Bool {
-	if b == nil {
-		return types.BoolNull()
+// jsonString renders an arbitrary API object as a JSON string. Terraform has no
+// dynamic object type to map these onto, so they are surfaced for jsondecode().
+func jsonString(v map[string]interface{}) types.String {
+	if v == nil {
+		return types.StringNull()
 	}
-	return types.BoolValue(*b)
+	encoded, err := json.Marshal(v)
+	if err != nil {
+		return types.StringNull()
+	}
+	return types.StringValue(string(encoded))
 }
 
-// stringList always returns a non-nil slice, so an empty API array reads as an
-// empty list rather than as null.
-func stringList(values []string) []types.String {
-	out := make([]types.String, len(values))
-	for i, v := range values {
-		out[i] = types.StringValue(v)
+// The filter* helpers turn configured arguments into client filter values. An
+// unset argument must stay out of the query entirely: the API rejects unknown
+// and malformed query parameters with a 400 rather than ignoring them.
+
+func filterString(v types.String) string {
+	if v.IsNull() || v.IsUnknown() {
+		return ""
 	}
-	return out
+	return v.ValueString()
 }
 
-// addSecurityError reports an error from one of the plan-gated security
-// endpoints. The 403 gets its own diagnostic: it means the plan does not
-// include `security_details`, and reading it as "no findings" is exactly the
-// mistake these endpoints refuse an empty list to prevent.
-func addSecurityError(diags *diag.Diagnostics, summary string, err error) {
-	if client.IsForbidden(err) {
-		diags.AddError(
-			"Security data requires a plan with security_details",
-			"FiveNines refused the request with 403 Forbidden. Vulnerability and container-image "+
-				"details (CVEs, scores, fix versions) require the Pro plan or above.\n\n"+
-				"This is deliberately an error rather than an empty result: an empty list here would "+
-				"read as an all-clear.\n\nAPI response: "+err.Error(),
-		)
-		return
+func filterInt64(v types.Int64) *int64 {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
 	}
-	diags.AddError(summary, err.Error())
+	i := v.ValueInt64()
+	return &i
+}
+
+func filterBool(v types.Bool) *bool {
+	if v.IsNull() || v.IsUnknown() {
+		return nil
+	}
+	b := v.ValueBool()
+	return &b
 }

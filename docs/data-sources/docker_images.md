@@ -3,88 +3,58 @@
 page_title: "fivenines_docker_images Data Source - terraform-provider-fivenines"
 subcategory: ""
 description: |-
-  Lists the organization's container images with their scan verdicts. Images are organization-scoped: one image running on 50 hosts is one row and one scan, and running_host_count is its blast radius.
-  Images that could not be scanned are listed, never filtered out - hiding them would make the list read as a complete picture of your image risk when it is not. They carry a null vulnerability_count, never 0: read state before the counts.
-  Requires a plan that includes security_details (Pro or above); a plan without it gets an error, not an empty list.
+  The container images this instance runs, with their scan verdict -- the security posture of what is actually deployed here.
+  THE HONESTY CONTRACT: vulnerability_count and critical_vulnerability_count are null unless state is scanned, and countable says which it is. A null is "not scanned", never "clean" -- the underlying columns are NOT NULL with a default of 0, so publishing them verbatim would report a clean bill of health for an image nobody has ever scanned. packages_truncated / finding_count_is_floor mark a scan whose package list the agent capped: the findings are real but the count is a FLOOR, so render "12+" rather than "12".
+  This data is organization-scoped underneath. Findings are a property of the IMAGE, so fifty hosts running one digest is one row and one scan; this data source returns the slice this instance runs. id therefore identifies an image in your organization, not a per-host row.
+  There is no stale field here, unlike the sibling collectors. Their stale is a 10-minute agent-sync window; this collector's only freshness column is last_seen_at against a 30-day reaper, which is a different question by two orders of magnitude.
 ---
 
 # fivenines_docker_images (Data Source)
 
-Lists the organization's container images with their scan verdicts. Images are organization-scoped: one image running on 50 hosts is one row and one scan, and `running_host_count` is its blast radius.
+The container images this instance runs, with their scan verdict -- the security posture of what is actually deployed here.
 
-Images that could not be scanned are listed, never filtered out - hiding them would make the list read as a complete picture of your image risk when it is not. They carry a null `vulnerability_count`, never `0`: read `state` before the counts.
+THE HONESTY CONTRACT: `vulnerability_count` and `critical_vulnerability_count` are **null unless `state` is `scanned`**, and `countable` says which it is. A null is "not scanned", never "clean" -- the underlying columns are NOT NULL with a default of 0, so publishing them verbatim would report a clean bill of health for an image nobody has ever scanned. `packages_truncated` / `finding_count_is_floor` mark a scan whose package list the agent capped: the findings are real but the count is a FLOOR, so render "12+" rather than "12".
 
-Requires a plan that includes `security_details` (Pro or above); a plan without it gets an error, not an empty list.
+This data is organization-scoped underneath. Findings are a property of the IMAGE, so fifty hosts running one digest is one row and one scan; this data source returns the slice this instance runs. `id` therefore identifies an image in your organization, not a per-host row.
+
+There is no `stale` field here, unlike the sibling collectors. Their `stale` is a 10-minute agent-sync window; this collector's only freshness column is `last_seen_at` against a 30-day reaper, which is a different question by two orders of magnitude.
 
 ## Example Usage
 
 ```terraform
-# The organization's whole container image inventory.
-data "fivenines_docker_images" "all" {}
+data "fivenines_docker_images" "all" {
+  instance_id = fivenines_instance.web.id
+}
 
+# vulnerability_count is null unless state is "scanned". A null is
+# "not scanned", never "clean", so split the two sets before comparing --
+# Terraform errors on a null operand rather than treating it as 0.
 locals {
-  # Read `state` before the counts. A pending, unsupported or unscannable image
-  # carries a null count, never 0, so filtering on state first is what keeps
-  # "nobody looked" out of the same bucket as "nothing found".
   scanned_images = [
-    for img in data.fivenines_docker_images.all.images : img if img.state == "scanned"
+    for i in data.fivenines_docker_images.all.docker_images : i if i.countable
   ]
-
-  images_with_criticals = [
-    for img in local.scanned_images : img if img.critical_vulnerability_count > 0
+  unscanned_images = [
+    for i in data.fivenines_docker_images.all.docker_images : i if !i.countable
   ]
 }
 
-# Fail the plan when a scanned image carries Critical findings, or when part of
-# the inventory has not been scanned at all - an unscanned image is not a clean
-# one, and posture is the deliberately unfiltered answer to "is this list the
-# whole picture".
-resource "terraform_data" "image_gate" {
-  input = length(local.images_with_criticals)
-
-  lifecycle {
-    precondition {
-      condition = length(local.images_with_criticals) == 0
-      error_message = format("Images with Critical CVEs: %s.", join(", ", [
-        for img in local.images_with_criticals :
-        "${img.display_name} (${img.critical_vulnerability_count}${img.finding_count_is_floor ? "+" : ""})"
-      ]))
-    }
-
-    precondition {
-      condition     = data.fivenines_docker_images.all.posture.pending == 0
-      error_message = "${data.fivenines_docker_images.all.posture.pending} images have not been scanned yet, so the check above does not cover them."
-    }
-  }
-}
-
-# Look an image up by tag or digest.
-data "fivenines_docker_images" "nginx" {
-  q = "nginx"
-}
-
-# The images that could not be scanned, with the reason and the blast radius.
-output "unscannable_images" {
-  value = {
-    for img in data.fivenines_docker_images.all.images :
-    img.display_name => {
-      reason = img.state_reason
-      # Only api_error is transient; the rest are permanent for an immutable
-      # digest, so retrying them is wasted work.
-      error_type  = img.state_error_type
-      retry_worth = img.state_error_type == "api_error"
-      hosts       = img.running_host_count
-    }
-    if img.state == "unscannable"
-  }
-}
-
-# The agent capped these package lists, so their counts are a floor.
-output "images_with_partial_counts" {
+output "images_with_critical_cves" {
   value = [
-    for img in local.scanned_images :
-    "${img.display_name}: ${img.vulnerability_count}+ findings"
-    if img.finding_count_is_floor
+    for i in local.scanned_images :
+    i.display_name if i.critical_vulnerability_count > 0
+  ]
+}
+
+# The images nobody has ever scanned -- the ones a naive "0 CVEs" read hides.
+output "unscanned_images" {
+  value = [for i in local.unscanned_images : i.display_name]
+}
+
+# A capped package list makes the counts a floor: render "12+", not "12".
+output "images_with_floor_counts" {
+  value = [
+    for i in data.fivenines_docker_images.all.docker_images :
+    i.display_name if i.finding_count_is_floor
   ]
 }
 ```
@@ -92,54 +62,59 @@ output "images_with_partial_counts" {
 <!-- schema generated by tfplugindocs -->
 ## Schema
 
+### Required
+
+- `instance_id` (String) The instance (host) UUID the rows belong to.
+
 ### Optional
 
-- `ecosystem` (String) Only return images whose packages were matched against this OSV ecosystem, e.g. `Debian:12`.
-- `packages_truncated` (Boolean) When true, only return the images whose package list the agent capped - the ones whose counts are a floor rather than a total.
-- `q` (String) Case-insensitive substring match on the tags, digests, distro and ecosystem.
-- `state` (String) Only return images in this scan state (pending, scanned, unsupported, unscannable).
+- `q` (String) Case-insensitive substring match on any of the image's tags or its digest.
+- `state` (String) Filter by scan verdict. `scanned` is the only state whose counts mean anything; the other three are the states the null-count contract exists for. One of: `pending`, `scanned`, `unsupported`, `unscannable`.
+- `updated_since` (String) Return only rows whose `updated_at` is at or after this ISO 8601 timestamp. Inclusive, so a row updated in the same instant as the cursor comes back rather than falling through the gap. Unlike the host-scoped collectors, this one IS a usable change feed: an image row is only rewritten when something about it actually changes, because `last_seen_at` is refresh-throttled rather than restamped on every agent tick. There are still no tombstones -- an image the reaper drops after 30 days simply stops appearing.
 
 ### Read-Only
 
-- `images` (Attributes List) The matching container images. (see [below for nested schema](#nestedatt--images))
-- `posture` (Attributes) Image counts per scan state across the whole organization. Deliberately not narrowed by the filters above: it is the answer to "is this list the complete picture", which a filtered count could not be. (see [below for nested schema](#nestedatt--posture))
+- `collector` (Attributes) Why the row list looks the way it does. Read this before treating an empty list as a clean bill of health: `[]` alone cannot distinguish "this host genuinely runs none" from "the collector is switched off" (which deletes the rows) or "this agent is too old to report them". (see [below for nested schema](#nestedatt--collector))
+- `docker_images` (Attributes List) The rows the collector reported. (see [below for nested schema](#nestedatt--docker_images))
 
-<a id="nestedatt--images"></a>
-### Nested Schema for `images`
+<a id="nestedatt--collector"></a>
+### Nested Schema for `collector`
 
 Read-Only:
 
-- `countable` (Boolean) Whether the counts below mean anything at all. False for every non-scanned state.
-- `created_at` (String) Creation timestamp.
-- `critical_vulnerability_count` (Number) Critical findings. Null unless `state` is `scanned`.
-- `display_name` (String) A tag if the image carries one, else the short digest. A label, not an ID.
+- `blocked_reason` (String) The agent's own explanation, where it sent one. Null otherwise.
+- `enabled` (Boolean) Whether the operator has this collector switched on for the instance. Switching it off deletes the rows, so `false` fully explains an empty list.
+- `last_reported_at` (String) The instance's last agent check-in -- not this collector's. It separates "this collector went quiet" (rows stale, instance reporting) from "the whole agent went quiet" (both). Per-row freshness is each row's `last_synced_at`.
+- `name` (String) The collector these rows come from.
+- `pending` (Boolean) Enabled, and the agent knows the feature, but the capability is not satisfied yet (missing binary, missing permission). The rows are legitimately absent and may appear on a later tick.
+- `supported` (Boolean) Whether this agent can collect these rows -- its own capability verdict where it reports one, its version otherwise. `false` alongside `enabled` means the instance was asked for something it cannot deliver. Read it as "the agent has not said it cannot": the config-driven collectors (haproxy, rabbitmq, php_fpm, wireguard) have no version floor, so an agent predating one still reports `true` with an empty list.
+- `unavailable_reason` (String) Why `supported` is false: `host_lacks_feature` (the agent probed and reported it cannot) or `agent_outdated` (the agent predates the release that collects these rows). Null when supported.
+
+
+<a id="nestedatt--docker_images"></a>
+### Nested Schema for `docker_images`
+
+Read-Only:
+
+- `countable` (Boolean) Whether the counts below mean anything at all. False for any non-scanned state.
+- `created_at` (String) When this row was first recorded. This is when the agent first happened to report it, not anything an operator would recognize.
+- `critical_vulnerability_count` (Number) NULL unless state is `scanned`.
+- `display_name` (String) A tag if the image carries one, else the short digest. A label, not an id.
 - `distro` (String) The OS the agent detected inside the image.
 - `ecosystem` (String) The advisory ecosystem the packages were matched against.
-- `finding_count_is_floor` (Boolean) The counts are a FLOOR rather than a total (a scanned image whose package list was capped). Render "12+" rather than "12", and do not treat the count as complete in a gate.
-- `id` (String) The FiveNines image row ID (UUID) - what `fivenines_vulnerabilities.docker_image_id` takes.
-- `image_id` (String) The `sha256:` config digest - the durable, content-addressed identity the scan is keyed on.
+- `finding_count_is_floor` (Boolean) The counts are a FLOOR rather than a total (a scanned image whose package list was capped). Render "12+" rather than "12".
+- `id` (String) Organization-scoped image row.
+- `image_id` (String) The sha256: config digest -- the durable, content-addressed identity.
 - `inventory_received_at` (String) When the agent last uploaded this image's package list.
 - `last_scanned_at` (String) When the package list was last matched against the advisory data.
-- `last_seen_at` (String) Last time a container running this image was reported in this organization. Rows unseen for 30 days are reaped.
-- `organization_id` (Number) Owning organization.
+- `last_seen_at` (String) Last time a /collect tick reported a container running this image in this organization. The reaper drops rows unseen for 30 days. This is the freshness field for this collector -- there is no `stale` flag.
+- `organization_id` (Number) The organization that owns the image row. Findings are a property of the IMAGE, so fifty hosts running one digest share one row and one scan.
 - `packages_truncated` (Boolean) The agent capped the package list it uploaded.
-- `repo_digests` (List of String) Registry digests - what an operator pastes into `docker pull`.
-- `running_host_count` (Number) Instances currently running a container off this image - the blast radius. Counts a host with a stopped container too: the image is still deployed there.
-- `short_digest` (String) First 12 characters of the digest.
-- `state` (String) The scan verdict, and the field to read BEFORE the counts: `pending` (discovered, inventory not received), `scanned` (matched against the advisory data), `unsupported` (no mappable distro or package manager - permanent for this digest), `unscannable` (extraction failed).
-- `state_error_type` (String) The machine-readable code beside `state_reason`. Only `api_error` is transient - the rest are permanent for an immutable digest, so do not retry them.
+- `repo_digests` (List of String) Registry digests -- what an operator pastes into `docker pull`.
+- `short_digest` (String) First 12 characters of the digest, without the sha256: prefix.
+- `state` (String) The scan verdict, and the field to read BEFORE the counts. Note that `pending` is terminal without the container-image-scanning entitlement (Pro and above): discovery is not plan-gated, so a plan without it collects image rows that are never scanned. `pending` = discovered, inventory not received yet; `scanned` = matched against the advisory data; `unsupported` = no mappable distro or package manager (scratch, distroless), permanent for this digest; `unscannable` = extraction failed.
+- `state_error_type` (String) The machine-readable code beside state_reason. Only `api_error` is transient -- the rest are permanent for an immutable digest, so do not retry them.
 - `state_reason` (String) The human explanation behind a non-scanned state.
 - `tags` (List of String) Every tag on the image. May be empty.
-- `updated_at` (String) Last update timestamp.
-- `vulnerability_count` (Number) Null unless `state` is `scanned`. A null is "not scanned", never "zero vulnerabilities" - only on a scanned image does `0` mean clean.
-
-
-<a id="nestedatt--posture"></a>
-### Nested Schema for `posture`
-
-Read-Only:
-
-- `pending` (Number) Discovered on a collect tick, package inventory not received yet. Terminal without the container-image-scanning entitlement.
-- `scanned` (Number) Inventory received and matched against the advisory data - the only state whose counts mean anything.
-- `unscannable` (Number) Extraction failed. `state_error_type` says whether that is worth retrying.
-- `unsupported` (Number) No mappable distro or package manager (scratch, distroless). Permanent for this digest.
+- `updated_at` (String) When this row was last written. The ingester touches it on every agent tick, so it is a freshness stamp rather than a change feed.
+- `vulnerability_count` (Number) NULL unless state is `scanned`. A null is "not scanned", never "zero vulnerabilities" -- see the honesty contract above.

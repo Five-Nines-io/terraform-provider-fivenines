@@ -110,6 +110,16 @@
   404 at apply rather than a plan-time error. The cheap assertion is available and
   unusually strong here: every row carries `host_id`, so the provider could check
   the rows it got back actually belong to the instance it asked about
+- The #25 cluster and status data sources inherit it rather than repeat it: the
+  three `fivenines_proxmox_cluster_*` inventories and
+  `fivenines_organization_proxmox_guests` read the #22 collector filter tables
+  verbatim, so `q`/`updated_since` arrive unvalidated for the same reason. The two
+  cluster indexes and `fivenines_status_page_subscribers` do validate their
+  enumerated arguments (`order`, `direction`, `status`) with `OneOf`, and their
+  boolean filters (`stale`, `promoted`, `standalone`) cannot malform — but
+  `q`/`updated_since` are unchecked there too, and `cluster_id` is a bare Required
+  string, so a malformed uuid is an apply-time 404 rather than a plan-time error.
+  That is the `instance_id` gap above, on four more data sources
 
 ### monitors is an ordered List with a server-defined default order
 - `order`/`direction` are optional, so default ordering is whatever the API
@@ -123,6 +133,11 @@
   expose `order`/`direction`, so their order is entirely the server's default. The
   rows are agent-reported state rather than configuration, so `for_each` over them
   is already the wrong tool — but nothing in the schema says so
+- Everything #25 added is a `ListNestedAttribute` too. `fivenines_ceph_clusters`,
+  `fivenines_proxmox_clusters` and `fivenines_status_page_subscribers` at least
+  expose `order`/`direction`; the three `fivenines_proxmox_cluster_*` inventories,
+  `fivenines_organization_proxmox_guests` and the nested `reporters` blocks do not,
+  so their order is entirely the server's default — the #22 shape again
 - Fix: a Set, or make `order` mandatory
 
 ### Offset pagination skips a row when an earlier one is deleted mid-walk
@@ -459,6 +474,15 @@
   both back unbounded, append-only histories, so "the last 10 failed runs" walks
   every run the workflow has ever had on every plan. Their server-side filters
   narrow the walk but do not bound it
+- The five index walks #25 added inherit it by construction, since `listAllPages`
+  and `listRowPages` walk to the last page: `fivenines_ceph_clusters`,
+  `fivenines_proxmox_clusters`, the three `fivenines_proxmox_cluster_*` child
+  inventories (one call site), `fivenines_organization_proxmox_guests` and
+  `fivenines_status_page_subscribers`. `fivenines_organization_proxmox_guests` is
+  the one that matters: it scales with the whole fleet rather than with one
+  cluster, so "the 10 most recently updated guests" walks every guest in the
+  organization on every plan. Its `proxmox_cluster_id` filter narrows the walk
+  server-side, exactly as the #21 filters do, but does not bound it either
 - Fix: optional `limit`, threaded into the ListXOptions struct, stopping the walk
   once `len(all) >= limit` and sizing per_page as `min(100, limit)`
 

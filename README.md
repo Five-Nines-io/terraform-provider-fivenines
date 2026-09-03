@@ -581,10 +581,12 @@ make docs       # regenerate registry documentation
 ```
 
 `make docs` regenerates `docs/` from the Go schema descriptions and `examples/`.
-Never hand-edit `docs/` — CI regenerates it and fails on any diff. From a checkout
-not named `terraform-provider-fivenines` (a git worktree, for example) run
-`tfplugindocs generate --provider-name fivenines --rendered-provider-name terraform-provider-fivenines`
-instead; the bare command infers the wrong provider name, deletes `docs/`, and fails.
+Never hand-edit `docs/` — CI regenerates it and fails on any diff. Use the make
+target rather than calling `tfplugindocs generate` yourself: the target pins
+`--provider-name fivenines --rendered-provider-name terraform-provider-fivenines`,
+and without those flags tfplugindocs infers the provider name from the directory
+name, so from a checkout not named `terraform-provider-fivenines` (a git worktree,
+for example) the bare command deletes `docs/` and then fails mid-render.
 
 ### Acceptance tests
 

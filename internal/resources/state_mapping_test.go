@@ -527,3 +527,61 @@ func TestItemsUpdate_WriteDecision(t *testing.T) {
 		})
 	}
 }
+
+// --- csvOrKeep / storedSecret ---
+
+// The server parses logs_units_csv but re-renders it ", "-joined, so any
+// non-canonical spelling read back verbatim would fail the apply as an
+// inconsistent result. Equivalent spellings keep the configured form;
+// genuinely different lists report the server.
+func TestCSVOrKeep(t *testing.T) {
+	canonical := "nginx.service, ssh.service"
+	tests := []struct {
+		name    string
+		api     *string
+		current types.String
+		want    types.String
+	}{
+		{"natural spelling kept against the canonical rendering",
+			&canonical, types.StringValue("nginx.service,ssh.service"), types.StringValue("nginx.service,ssh.service")},
+		{"duplicates and blank segments still name the same list",
+			&canonical, types.StringValue("nginx.service,, ssh.service, nginx.service"), types.StringValue("nginx.service,, ssh.service, nginx.service")},
+		{"a different list reports the server",
+			&canonical, types.StringValue("nginx.service"), types.StringValue(canonical)},
+		{"a dashboard-set value lands on an unmanaging config",
+			&canonical, types.StringNull(), types.StringValue(canonical)},
+		{"unknown on create resolves to the server value",
+			&canonical, types.StringUnknown(), types.StringValue(canonical)},
+		{"null from the API stays null", nil, types.StringNull(), types.StringNull()},
+		{"a configured empty-list spelling survives a null rendering",
+			nil, types.StringValue(" , "), types.StringValue(" , ")},
+		{"the canonical empty rendering keeps a configured empty spelling",
+			ptr(""), types.StringValue(" , "), types.StringValue(" , ")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := csvOrKeep(tt.api, tt.current); !got.Equal(tt.want) {
+				t.Errorf("csvOrKeep() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A write-only credential follows the API's only readable signal about it:
+// kept exactly while `_set` reports it stored, cleared when it does not —
+// that null is what turns a dashboard-cleared (or server-refused) secret
+// into a visible diff instead of a permanent silent "No changes".
+func TestStoredSecret(t *testing.T) {
+	if got := storedSecret(types.StringValue("s3cret"), true); got.ValueString() != "s3cret" {
+		t.Errorf("a stored secret must keep the configured value, got %v", got)
+	}
+	if got := storedSecret(types.StringValue("s3cret"), false); !got.IsNull() {
+		t.Errorf("a secret the API reports unstored must clear, got %v", got)
+	}
+	if got := storedSecret(types.StringNull(), true); !got.IsNull() {
+		t.Errorf("a secret managed outside Terraform stays null, got %v", got)
+	}
+	if got := storedSecret(types.StringUnknown(), true); !got.IsNull() {
+		t.Errorf("an unknown must not be echoed into state, got %v", got)
+	}
+}

@@ -2978,3 +2978,72 @@ func (c *Client) GetOrganizationSAML(ctx context.Context) (*SAMLConfiguration, e
 	}
 	return &result.SAML, nil
 }
+
+// --- Metrics ---
+
+// The /api/v1/metrics/* endpoints are reads that use POST because the query
+// object does not fit in a query string. They return 200 with a result envelope.
+
+// QueryMetrics reads metric values for instances, uptime monitors and network
+// devices from POST /api/v1/metrics/query.
+func (c *Client) QueryMetrics(ctx context.Context, input MetricsQueryRequest) (*MetricsResult, error) {
+	var result MetricsResult
+	if err := c.postMetrics(ctx, "query", input, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// MetricsUptime reads availability over a window - the SLA number - from
+// POST /api/v1/metrics/uptime.
+func (c *Client) MetricsUptime(ctx context.Context, input MetricsUptimeRequest) (*MetricsUptimeResult, error) {
+	var result MetricsUptimeResult
+	if err := c.postMetrics(ctx, "uptime", input, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// MetricsMonitorSSL reads days until each monitor certificate expires from
+// POST /api/v1/metrics/monitor_ssl.
+func (c *Client) MetricsMonitorSSL(ctx context.Context, input MetricsMonitorSSLRequest) (*MetricsResult, error) {
+	var result MetricsResult
+	if err := c.postMetrics(ctx, "monitor_ssl", input, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// MetricsIncidentStats reads organization-wide incident count / MTTR / MTTA from
+// POST /api/v1/metrics/incident_stats.
+func (c *Client) MetricsIncidentStats(ctx context.Context, input MetricsIncidentStatsRequest) (*MetricsResult, error) {
+	var result MetricsResult
+	if err := c.postMetrics(ctx, "incident_stats", input, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// MetricsCveStats reads organization-wide vulnerability counts from
+// POST /api/v1/metrics/cve_stats.
+func (c *Client) MetricsCveStats(ctx context.Context, input MetricsCveStatsRequest) (*MetricsResult, error) {
+	var result MetricsResult
+	if err := c.postMetrics(ctx, "cve_stats", input, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (c *Client) postMetrics(ctx context.Context, endpoint string, body interface{}, target interface{}) error {
+	resp, err := c.doRequest(ctx, "POST", "/api/v1/metrics/"+endpoint, body, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return parseError(resp)
+	}
+	if err := decodeResponse(resp, target); err != nil {
+		return fmt.Errorf("decoding response: %w", err)
+	}
+	return nil
+}

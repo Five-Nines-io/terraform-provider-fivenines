@@ -3454,3 +3454,325 @@ func TestClient_GetWorkflowRun_404(t *testing.T) {
 		t.Fatalf("expected 404 APIError, got %v", err)
 	}
 }
+
+// --- Metrics ---
+
+func TestClient_QueryMetrics(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotMethod = r.URL.Path, r.Method
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"type": "aggregated",
+				"items": []map[string]interface{}{
+					{"name": "web-01", "host_id": "host-uuid", "monitor_id": nil, "value": 42.5, "formatted": "42.5%"},
+				},
+			},
+		})
+	})
+
+	limit := int64(10)
+	result, err := c.QueryMetrics(context.Background(), MetricsQueryRequest{
+		Hosts: []string{"host-uuid"},
+		Query: MetricsQuerySpec{
+			Resource:    "cpu_usage",
+			Format:      "aggregated",
+			Aggregation: "avg",
+			Limit:       &limit,
+			Filters:     map[string][]string{"device": {"sda"}},
+		},
+		TimeRange: MetricsTimeRange{From: "2026-06-15T13:00:00Z"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotMethod != "POST" || gotPath != "/api/v1/metrics/query" {
+		t.Errorf("expected POST /api/v1/metrics/query, got %s %s", gotMethod, gotPath)
+	}
+	query := gotBody["query"].(map[string]interface{})
+	if query["resource"] != "cpu_usage" || query["format"] != "aggregated" || query["aggregation"] != "avg" {
+		t.Errorf("unexpected query object: %v", query)
+	}
+	if query["limit"] != float64(10) {
+		t.Errorf("expected limit 10, got %v", query["limit"])
+	}
+	if _, ok := query["merge_labels"]; ok {
+		t.Error("expected unset merge_labels to be omitted from the request body")
+	}
+	if gotBody["time_range"].(map[string]interface{})["from"] != "2026-06-15T13:00:00Z" {
+		t.Errorf("unexpected time_range: %v", gotBody["time_range"])
+	}
+
+	if len(result.Result.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(result.Result.Items))
+	}
+	if got := result.Result.Items[0].EntityID(); got != "host-uuid" {
+		t.Errorf("expected entity id host-uuid, got %q", got)
+	}
+	if *result.Result.Items[0].Value != 42.5 {
+		t.Errorf("expected value 42.5, got %v", *result.Result.Items[0].Value)
+	}
+}
+
+// The API declares time_range required on /metrics/query, so the key must be
+// present even when the caller sets no window and the endpoint default applies.
+func TestClient_QueryMetrics_AlwaysSendsTimeRange(t *testing.T) {
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{"result": map[string]interface{}{"type": "aggregated"}})
+	})
+
+	c.QueryMetrics(context.Background(), MetricsQueryRequest{
+		Hosts: []string{"host-uuid"},
+		Query: MetricsQuerySpec{Resource: "cpu_usage", Format: "aggregated", Aggregation: "avg"},
+	})
+
+	if _, ok := gotBody["time_range"]; !ok {
+		t.Error("expected time_range key to be sent even when empty")
+	}
+}
+
+func TestClient_QueryMetrics_TimeSeries(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"type": "time_series",
+				"series": []map[string]interface{}{
+					{"name": "web-01", "host_id": "host-uuid", "data": [][]float64{{1781000000, 12.5}, {1781000060, 13}}},
+				},
+			},
+		})
+	})
+
+	result, err := c.QueryMetrics(context.Background(), MetricsQueryRequest{
+		Hosts: []string{"host-uuid"},
+		Query: MetricsQuerySpec{Resource: "cpu_usage", Format: "time_series", Aggregation: "avg"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(result.Result.Series) != 1 {
+		t.Fatalf("expected 1 series, got %d", len(result.Result.Series))
+	}
+	data := result.Result.Series[0].Data
+	if len(data) != 2 || data[0][0] != 1781000000 || data[0][1] != 12.5 {
+		t.Errorf("unexpected data points: %v", data)
+	}
+}
+
+func TestClient_MetricsUptime(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"type": "uptime",
+				"items": []map[string]interface{}{
+					{"monitor_id": "monitor-uuid", "name": "API", "value": 99.98, "formatted": "99.98%"},
+				},
+				"series": []map[string]interface{}{
+					{"monitor_id": "monitor-uuid", "name": "API", "blocks": []map[string]interface{}{
+						{"from": 1781000000, "to": 1781003600, "status": "up", "uptime": 100.0},
+					}},
+				},
+			},
+		})
+	})
+
+	collapse := true
+	result, err := c.MetricsUptime(context.Background(), MetricsUptimeRequest{
+		Monitors:      []string{"monitor-uuid"},
+		CollapseScope: &collapse,
+		Aggregation:   "min",
+		TimeRange:     &MetricsTimeRange{From: "2026-08-01T00:00:00Z", To: "2026-09-01T00:00:00Z"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotPath != "/api/v1/metrics/uptime" {
+		t.Errorf("expected /api/v1/metrics/uptime, got %s", gotPath)
+	}
+	if gotBody["collapse_scope"] != true || gotBody["aggregation"] != "min" {
+		t.Errorf("unexpected body: %v", gotBody)
+	}
+	if _, ok := gotBody["hosts"]; ok {
+		t.Error("expected empty hosts to be omitted from the request body")
+	}
+
+	// Monitor targets report monitor_id, not host_id.
+	if got := result.Result.Items[0].EntityID(); got != "monitor-uuid" {
+		t.Errorf("expected entity id monitor-uuid, got %q", got)
+	}
+	if got := result.Result.Series[0].EntityID(); got != "monitor-uuid" {
+		t.Errorf("expected series entity id monitor-uuid, got %q", got)
+	}
+	block := result.Result.Series[0].Blocks[0]
+	if block.From != 1781000000 || block.Status != "up" || block.Uptime != 100.0 {
+		t.Errorf("unexpected block: %+v", block)
+	}
+}
+
+// Task targets report task_id, and a collapsed result reports no id at all.
+func TestClient_MetricsUptime_TaskAndCollapsedIDs(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"type": "uptime",
+				"items": []map[string]interface{}{
+					{"task_id": "task-uuid", "name": "Backup", "value": 100.0, "formatted": "100%"},
+					{"name": "Uptime (min)", "value": 99.5, "formatted": "99.5%"},
+				},
+			},
+		})
+	})
+
+	result, err := c.MetricsUptime(context.Background(), MetricsUptimeRequest{Tasks: []string{"task-uuid"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := result.Result.Items[0].EntityID(); got != "task-uuid" {
+		t.Errorf("expected entity id task-uuid, got %q", got)
+	}
+	if got := result.Result.Items[1].EntityID(); got != "" {
+		t.Errorf("expected collapsed item to carry no entity id, got %q", got)
+	}
+}
+
+func TestClient_MetricsMonitorSSL(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"type": "aggregated",
+				"items": []map[string]interface{}{
+					{"monitor_id": "monitor-uuid", "name": "API", "value": -2.5, "formatted": "Expired"},
+				},
+			},
+		})
+	})
+
+	result, err := c.MetricsMonitorSSL(context.Background(), MetricsMonitorSSLRequest{
+		Monitors: []string{"monitor-uuid"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotPath != "/api/v1/metrics/monitor_ssl" {
+		t.Errorf("expected /api/v1/metrics/monitor_ssl, got %s", gotPath)
+	}
+	if _, ok := gotBody["collapse_scope"]; ok {
+		t.Error("expected unset collapse_scope to be omitted from the request body")
+	}
+	if *result.Result.Items[0].Value != -2.5 || result.Result.Items[0].Formatted != "Expired" {
+		t.Errorf("unexpected expired item: %+v", result.Result.Items[0])
+	}
+}
+
+func TestClient_MetricsIncidentStats(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"type": "time_series",
+				"unit": "duration",
+				"series": []map[string]interface{}{
+					{"name": "MTTR", "data": [][]float64{{1781000000, 8100}}},
+				},
+			},
+		})
+	})
+
+	result, err := c.MetricsIncidentStats(context.Background(), MetricsIncidentStatsRequest{
+		Metric:    "incident_mttr",
+		Format:    "time_series",
+		TimeRange: &MetricsTimeRange{From: "2026-08-01T00:00:00Z"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotPath != "/api/v1/metrics/incident_stats" {
+		t.Errorf("expected /api/v1/metrics/incident_stats, got %s", gotPath)
+	}
+	if gotBody["metric"] != "incident_mttr" {
+		t.Errorf("unexpected metric: %v", gotBody["metric"])
+	}
+	if _, ok := gotBody["group_by"]; ok {
+		t.Error("expected unset group_by to be omitted from the request body")
+	}
+	if result.Result.Unit != "duration" {
+		t.Errorf("expected unit duration, got %q", result.Result.Unit)
+	}
+	if result.Result.Series[0].Data[0][1] != 8100 {
+		t.Errorf("unexpected MTTR point: %v", result.Result.Series[0].Data)
+	}
+}
+
+func TestClient_MetricsCveStats(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]interface{}
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"type": "aggregated",
+				"items": []map[string]interface{}{
+					{"name": "Critical", "value": 3, "formatted": "3"},
+					{"name": "High", "value": 11, "formatted": "11"},
+				},
+			},
+		})
+	})
+
+	result, err := c.MetricsCveStats(context.Background(), MetricsCveStatsRequest{
+		Metric:  "cve_actionable_count",
+		GroupBy: "severity",
+		Hosts:   []string{"host-uuid"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if gotPath != "/api/v1/metrics/cve_stats" {
+		t.Errorf("expected /api/v1/metrics/cve_stats, got %s", gotPath)
+	}
+	if gotBody["group_by"] != "severity" {
+		t.Errorf("unexpected group_by: %v", gotBody["group_by"])
+	}
+	if len(result.Result.Items) != 2 || *result.Result.Items[0].Value != 3 {
+		t.Errorf("unexpected items: %+v", result.Result.Items)
+	}
+}
+
+func TestClient_Metrics_APIError(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Too many targets: 51 (max 50 per query)"})
+	})
+
+	_, err := c.MetricsUptime(context.Background(), MetricsUptimeRequest{Hosts: []string{"host-uuid"}})
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected *APIError, got %T (%v)", err, err)
+	}
+	if apiErr.StatusCode != 422 || apiErr.Message != "Too many targets: 51 (max 50 per query)" {
+		t.Errorf("unexpected error: %+v", apiErr)
+	}
+}

@@ -147,6 +147,11 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 		datasources.NewUptimeMonitorStatusDataSource,
 		datasources.NewDashboardTemplatesDataSource,
 		datasources.NewHostGroupsDataSource,
+		datasources.NewMetricQueryDataSource,
+		datasources.NewUptimeDataSource,
+		datasources.NewSSLStatusDataSource,
+		datasources.NewIncidentStatsDataSource,
+		datasources.NewCveStatsDataSource,
 	}
 	// The twenty per-instance collector inventories are declared as a table
 	// rather than twenty near-identical files -- see internal/datasources/inventory.go.

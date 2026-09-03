@@ -1377,3 +1377,168 @@ type SAMLConfiguration struct {
 	Domains                 []string `json:"domains"`
 	UpdatedAt               *string  `json:"updated_at"`
 }
+
+// --- Metrics ---
+
+// MetricsTimeRange is the ISO 8601 window the /api/v1/metrics/* endpoints take.
+// Both bounds are optional: each endpoint applies its own default, clamps "to"
+// to the current time and caps the span.
+type MetricsTimeRange struct {
+	From string `json:"from,omitempty"`
+	To   string `json:"to,omitempty"`
+}
+
+// MetricsQuerySpec is the "query" object of a metrics query request.
+type MetricsQuerySpec struct {
+	Resource       string              `json:"resource"`
+	Format         string              `json:"format"`
+	Aggregation    string              `json:"aggregation"`
+	GroupBy        string              `json:"group_by,omitempty"`
+	Limit          *int64              `json:"limit,omitempty"`
+	MergeLabels    *bool               `json:"merge_labels,omitempty"`
+	MergeMetrics   *bool               `json:"merge_metrics,omitempty"`
+	ScrapeInterval *int64              `json:"scrape_interval,omitempty"`
+	Filters        map[string][]string `json:"filters,omitempty"`
+	Exclude        map[string][]string `json:"exclude,omitempty"`
+}
+
+// MetricsQueryRequest is the body of POST /api/v1/metrics/query. The API
+// requires the time_range key to be present, so it is not omitted when empty.
+type MetricsQueryRequest struct {
+	Hosts     []string         `json:"hosts,omitempty"`
+	Monitors  []string         `json:"monitors,omitempty"`
+	Devices   []string         `json:"devices,omitempty"`
+	Query     MetricsQuerySpec `json:"query"`
+	TimeRange MetricsTimeRange `json:"time_range"`
+}
+
+// MetricsUptimeRequest is the body of POST /api/v1/metrics/uptime. Monitors take
+// precedence over tasks, which take precedence over hosts.
+type MetricsUptimeRequest struct {
+	Hosts         []string          `json:"hosts,omitempty"`
+	Monitors      []string          `json:"monitors,omitempty"`
+	Tasks         []string          `json:"tasks,omitempty"`
+	CollapseScope *bool             `json:"collapse_scope,omitempty"`
+	Aggregation   string            `json:"aggregation,omitempty"`
+	TimeRange     *MetricsTimeRange `json:"time_range,omitempty"`
+}
+
+// MetricsMonitorSSLRequest is the body of POST /api/v1/metrics/monitor_ssl. It
+// is a "now" snapshot, so no time range applies.
+type MetricsMonitorSSLRequest struct {
+	Monitors      []string `json:"monitors,omitempty"`
+	CollapseScope *bool    `json:"collapse_scope,omitempty"`
+	Aggregation   string   `json:"aggregation,omitempty"`
+}
+
+// MetricsIncidentStatsRequest is the body of POST /api/v1/metrics/incident_stats.
+type MetricsIncidentStatsRequest struct {
+	Metric    string            `json:"metric"`
+	Format    string            `json:"format,omitempty"`
+	GroupBy   string            `json:"group_by,omitempty"`
+	Limit     *int64            `json:"limit,omitempty"`
+	TimeRange *MetricsTimeRange `json:"time_range,omitempty"`
+}
+
+// MetricsCveStatsRequest is the body of POST /api/v1/metrics/cve_stats. Hosts is
+// an optional instance filter; omit it for the whole organization.
+type MetricsCveStatsRequest struct {
+	Metric    string            `json:"metric"`
+	Format    string            `json:"format,omitempty"`
+	GroupBy   string            `json:"group_by,omitempty"`
+	Limit     *int64            `json:"limit,omitempty"`
+	Hosts     []string          `json:"hosts,omitempty"`
+	TimeRange *MetricsTimeRange `json:"time_range,omitempty"`
+}
+
+// MetricsItem is one reduced value in an aggregated metrics response.
+//
+// Which id field is populated depends on the endpoint and the target kind:
+// /metrics/query fills host_id or monitor_id, /metrics/uptime fills whichever of
+// host_id / monitor_id / task_id matches the requested targets,
+// /metrics/monitor_ssl fills monitor_id, and the organization-wide stats
+// endpoints fill none. Collapsed results describe no single entity either.
+type MetricsItem struct {
+	Name        string   `json:"name"`
+	HostID      *string  `json:"host_id"`
+	MonitorID   *string  `json:"monitor_id"`
+	TaskID      *string  `json:"task_id"`
+	Value       *float64 `json:"value"`
+	Formatted   string   `json:"formatted"`
+	Aggregation string   `json:"aggregation"`
+}
+
+// EntityID returns the id of the entity an item describes, whichever per-kind id
+// field the endpoint populated. Empty when the item covers no single entity.
+func (i MetricsItem) EntityID() string {
+	return firstNonEmptyID(i.HostID, i.MonitorID, i.TaskID)
+}
+
+// MetricsSeries is one time series in a time_series metrics response. Data holds
+// [unix timestamp, value] pairs.
+type MetricsSeries struct {
+	Name      string      `json:"name"`
+	HostID    *string     `json:"host_id"`
+	MonitorID *string     `json:"monitor_id"`
+	TaskID    *string     `json:"task_id"`
+	Data      [][]float64 `json:"data"`
+}
+
+// EntityID returns the id of the entity a series describes, whichever per-kind
+// id field the endpoint populated. Empty when the series covers no single entity.
+func (s MetricsSeries) EntityID() string {
+	return firstNonEmptyID(s.HostID, s.MonitorID, s.TaskID)
+}
+
+// MetricsResult is the response of every metrics endpoint except /metrics/uptime:
+// items for the aggregated format, series for time_series.
+type MetricsResult struct {
+	Result struct {
+		Type   string          `json:"type"`
+		Unit   string          `json:"unit"`
+		Items  []MetricsItem   `json:"items"`
+		Series []MetricsSeries `json:"series"`
+	} `json:"result"`
+}
+
+// MetricsUptimeBlock is one bucket of an availability timeline.
+type MetricsUptimeBlock struct {
+	From   int64   `json:"from"`
+	To     int64   `json:"to"`
+	Status string  `json:"status"`
+	Uptime float64 `json:"uptime"`
+}
+
+// MetricsUptimeSeries is one entity's bucketed up/partial/down timeline.
+type MetricsUptimeSeries struct {
+	Name      string               `json:"name"`
+	HostID    *string              `json:"host_id"`
+	MonitorID *string              `json:"monitor_id"`
+	TaskID    *string              `json:"task_id"`
+	Blocks    []MetricsUptimeBlock `json:"blocks"`
+}
+
+// EntityID returns the id of the entity a timeline describes, whichever per-kind
+// id field the endpoint populated.
+func (s MetricsUptimeSeries) EntityID() string {
+	return firstNonEmptyID(s.HostID, s.MonitorID, s.TaskID)
+}
+
+// MetricsUptimeResult is the response of POST /api/v1/metrics/uptime: the
+// availability percentage per entity in items, the timeline behind it in series.
+type MetricsUptimeResult struct {
+	Result struct {
+		Type   string                `json:"type"`
+		Items  []MetricsItem         `json:"items"`
+		Series []MetricsUptimeSeries `json:"series"`
+	} `json:"result"`
+}
+
+func firstNonEmptyID(ids ...*string) string {
+	for _, id := range ids {
+		if id != nil && *id != "" {
+			return *id
+		}
+	}
+	return ""
+}

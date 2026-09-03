@@ -45,6 +45,8 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_organization_members` | Member roster with per-person two-factor state |
 | `fivenines_organization_security` | Two-factor policy and enrollment counters (read-only by design) |
 | `fivenines_organization_saml` | SAML SSO posture and IdP certificate expiry (read-only by design) |
+| `fivenines_vulnerabilities` | CVE findings org-wide, or scoped to one instance or container image |
+| `fivenines_organization_docker_images` | Org-wide container image inventory, scan posture and blast radius |
 
 ### Per-instance collector inventories
 
@@ -58,7 +60,7 @@ off" (which deletes the rows) from "this agent is too old to report them".
 |-------------|-------------|
 | `fivenines_systemd_units` | Failed units, systemd's verdict, and the journal tail |
 | `fivenines_docker_containers` | Container state, exit codes, restart loops |
-| `fivenines_docker_images` | Deployed images and their scan verdict |
+| `fivenines_docker_images` | Deployed images and their scan verdict (this instance's slice) |
 | `fivenines_listening_ports` | What is listening, loopback sockets included |
 | `fivenines_smart_devices` | smartctl PASSED / FAILED verdicts per drive |
 | `fivenines_zfs_pools` | Pool health, resilver progress, scrub results |

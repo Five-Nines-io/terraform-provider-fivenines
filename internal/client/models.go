@@ -1211,6 +1211,18 @@ func IsNotFound(err error) bool {
 	return apiErr != nil && apiErr.StatusCode == http.StatusNotFound
 }
 
+// IsForbidden reports whether err is a 403 — the plan gate on the security
+// endpoints, which answers one rather than an empty list precisely so a caller
+// can tell "you may not ask" from "nothing found".
+//
+// The STATUS decides, as it does for IsNotFound: the public error envelope
+// discards the machine-readable code, so the message is all a client would have
+// to match on and the status is the one signal the transport guarantees.
+func IsForbidden(err error) bool {
+	apiErr := AsAPIError(err)
+	return apiErr != nil && apiErr.StatusCode == http.StatusForbidden
+}
+
 // StatusPageMaintenanceWindow represents a scheduled maintenance window on a status page.
 type StatusPageMaintenanceWindow struct {
 	ID            int64                           `json:"id"`

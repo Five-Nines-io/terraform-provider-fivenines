@@ -24,6 +24,23 @@ resource "fivenines_uptime_monitor" "api" {
   keyword            = "healthy"
 }
 
+# custom_body and content_type are stored only for a POST. The API clears them
+# for any other method, so pairing them with the default GET is refused at plan
+# time rather than silently dropped on apply.
+resource "fivenines_uptime_monitor" "graphql" {
+  name         = "GraphQL Health Probe"
+  protocol     = "https"
+  url          = "https://api.example.com/graphql"
+  http_method  = "POST"
+  content_type = "application/json"
+  custom_body  = jsonencode({ query = "{ __typename }" })
+
+  # Up to 20 headers, 4KB per value, and no control characters in either.
+  custom_headers = {
+    Authorization = "Bearer ${var.api_probe_token}"
+  }
+}
+
 resource "fivenines_uptime_monitor" "database" {
   name     = "Database TCP Check"
   protocol = "tcp"
@@ -44,7 +61,7 @@ resource "fivenines_uptime_monitor" "dns" {
 
 # The protocol can be changed in place; set whatever the new protocol requires
 # in the same plan (https needs url, tcp needs hostname + port, icmp needs
-# hostname, dns needs dns_record_type).
+# hostname, dns needs hostname + dns_record_type).
 resource "fivenines_uptime_monitor" "staging" {
   name     = "Staging Website"
   protocol = "https"

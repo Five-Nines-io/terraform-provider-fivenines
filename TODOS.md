@@ -104,6 +104,11 @@
   timestamps client-side risks rejecting a format the server accepts, which turns a
   working config into a plan-time failure. `status` is present on every returned
   incident and run, so the server-honoured-it assertion is available there too
+- `fivenines_tasks` (#8) joins on the same terms: `status`, `schedule_type`,
+  `order` and `direction` carry `OneOf` validators built from `Task::STATUSES`,
+  `Task::SCHEDULE_TYPES` and `IndexFilters::TASKS.sortable`, but `query` and
+  `updated_since` are forwarded unchecked. `status` and `schedule_type` are on
+  every returned task, so the server-honoured-it assertion is available here too
 - The twenty collector inventories (#22) join it too, at twenty times the surface.
   Their enumerated arguments carry `OneOf` validators generated from the table, but
   `q`/`updated_since` do not, and neither does `instance_id` — a malformed UUID is a
@@ -121,6 +126,110 @@
   string, so a malformed uuid is an apply-time 404 rather than a plan-time error.
   That is the `instance_id` gap above, on four more data sources
 
+### The list data sources have no result bound except `fivenines_tasks`
+- `fivenines_tasks` (#8) took a `limit` argument after a /ship performance review
+  measured the cost: an unbounded read is one request per 100 rows, the API
+  throttles `/api/v1/*` at 20 requests per minute per IP
+  (`config/initializers/rack_attack.rb`), and the client sleeps out the 60s
+  `Retry-After` — so a single unfiltered refresh of a large organisation can spend
+  the rate budget the rest of the apply needs. Data sources re-read on every plan,
+  so this is per-plan, not per-apply
+- `listAllPages` grew the `maxRows` parameter that makes this possible; the three
+  other callers (ceph clusters, proxmox clusters, status page subscribers) pass 0
+  and stay unbounded, as do `fivenines_uptime_monitors`, `fivenines_incidents`,
+  `fivenines_integrations`, `fivenines_host_groups`, `fivenines_vulnerabilities`
+  and the twenty collector inventories, which walk through `listRowPages`
+- Fix: lift `limit` to every list data source, and give `listRowPages` the same
+  `maxRows` parameter. Additive and non-breaking, so it can land in one pass
+- Found by: /ship performance specialist, 2026-09-04
+
+### Offset pagination: the DUPLICATE half is fixed, `listRowPages` still exposed
+- The sibling of the skip below. The server pages with `ORDER BY <col>, id` +
+  OFFSET and every list data source defaults to `created_at desc`, so a row
+  INSERTED between two page requests pushes the last row of page N onto page N+1
+  and is returned twice. A duplicate is worse in a data source than in a resource
+  Read: it is invisible in a `count`, and `{ for t in data.fivenines_tasks.x.tasks
+  : t.id => t }` — the idiomatic way to consume a list — fails the plan outright
+  with "Duplicate object key", on every plan, nondeterministically
+- ~~Fixed in #8 for `listAllPages`~~: rows implementing the new `rowIdentifier`
+  interface are de-duplicated as they arrive, before the row cap, so a repeat does
+  not consume a slot the caller asked for. Covers tasks, ceph clusters, proxmox
+  clusters and status page subscribers
+- **Residual:** `listRowPages` (the twenty collector inventories and the three
+  Proxmox child routes) has no equivalent — its rows are `map[string]any` with no
+  guaranteed id column, so it needs a per-collector key rather than an interface
+- The DELETE half below is untouched and unfixable by de-duplication: a row
+  removed mid-walk shifts the window and is never served at all. That needs cursor
+  pagination server-side
+- Found by: /ship performance specialist + both adversarial passes, 2026-09-04
+
+### A bounded walk cannot tell a short read from a complete one
+- `listAllPages` truncates to the row cap and returns. If the server serves an
+  EMPTY middle page — which `morePages` tolerates by design, trusting a recognised
+  `meta` — the walk skips that page's rows silently. Unbounded, the shortfall at
+  least disagrees with `meta.total_count`; bounded, the caller asked for N and got
+  N, so nothing looks wrong at all
+- The `limit` path (#8) converts an already-silent gap into an undetectable one
+- Fix: compare `len(all)` against `meta.total_count` before returning a truncated
+  slice, and surface a diagnostic on a mismatch
+- Found by: /ship Claude adversarial pass, 2026-09-04
+
+### `limit` bounds rows, not response bytes
+- The walker decodes the whole `rows` array the server sends before applying the
+  cap, so a server that ignores `per_page` and answers with a million rows is
+  still fully transferred and allocated. `limit = 1` does not protect against it
+- Low priority: the server is the practitioner's own API and the failure needs a
+  server-side regression, but the cap reads like a resource bound and is not one
+- Fix: an `io.LimitedReader` on the response body, or decode rows incrementally
+- Found by: /ship Codex adversarial pass, 2026-09-04
+
+### The optional* mapping helpers are forked across two packages
+- `optionalString`, `optionalInt64`, `optionalFloat64`, `optionalBool` and now
+  `optionalNonEmptyString` (#8) exist twice: `internal/resources/mapping.go` and
+  `internal/datasources/helpers.go`. The copies have already diverged — `mapping.go`
+  grew `optionalNonEmptyStringOrKeep` with no datasources counterpart
+- A rule stated in two places drifts, and these encode the provider's null-vs-empty
+  contract, which is the thing #29 spent a release stabilising
+- Fix: one shared package both import. Mechanical, no behaviour change
+- Found by: /ship maintainability specialist, 2026-09-04
+
+### `q` is spelled two ways in the published schema
+- `query` in `fivenines_uptime_monitors`, `fivenines_host_groups`,
+  `fivenines_ceph_clusters`, `fivenines_proxmox_clusters`,
+  `fivenines_status_page_subscribers` and `fivenines_tasks`; bare `q` in
+  `fivenines_incidents`, `fivenines_integrations`,
+  `fivenines_organization_docker_images` and `fivenines_vulnerabilities`
+- Both spellings are published contract now, so neither side can simply be renamed.
+  A practitioner who writes `q = "backup"` against `fivenines_tasks` gets "An
+  argument named \"q\" is not expected here" with no hint the same filter exists
+  under another name
+- The `order`/`direction`/`updated_since` attribute bodies are likewise copy-pasted
+  into eleven data sources and the PROSE has already drifted, which is visible to
+  practitioners in the generated docs (`fivenines_uptime_monitors` omits the
+  defaults that `fivenines_incidents` documents)
+- Fix: accept `query` as an alias on the four `q` data sources, keeping `q` working;
+  and extract `orderAttribute`/`directionAttribute`/`updatedSinceAttribute`
+  constructors next to `configureClient` so the prose has one source
+- Found by: /ship api-contract and maintainability specialists, 2026-09-04
+
+### Task client code sits in client.go, not a topic file
+- `clusters.go`, `status_page_subscribers.go` and `security.go` each self-contain
+  their perPage const, options struct, `query()` and List function. Tasks are split
+  across the 3000-line `client.go` and `models.go`, which is what let two doc
+  comments about the same endpoint's blank-value handling contradict each other
+  until a review caught it (#8)
+- Fix: move `Task`, `TaskListOptions`, `taskPerPage`, `query()` and the task CRUD
+  into `internal/client/tasks.go`. Pure code motion
+- Found by: /ship maintainability specialist, 2026-09-04
+
+### The same non-empty-query loop is copied ten times in internal/client
+- `for key, value := range map[string]string{...} { if value != "" { q.Set(...) } }`
+  appears in `status_page_subscribers.go`, twice in `clusters.go`, and seven times
+  in `client.go` (including `TaskListOptions.query()` from #8)
+- Fix: one `nonEmptyQuery(map[string]string) url.Values` beside `morePages`; each
+  `query()` keeps only its typed extras (the `*bool` promoted/standalone/stale flags)
+- Found by: /ship maintainability and simplification specialists, 2026-09-04
+
 ### monitors is an ordered List with a server-defined default order
 - `order`/`direction` are optional, so default ordering is whatever the API
   returns. A server-side reordering shifts every index, causing spurious diffs in
@@ -129,6 +238,10 @@
   order is `position` — the one column the API renumbers when any sibling moves,
   without touching `updated_at`. Indexing it positionally is the least stable of
   the two
+- `fivenines_tasks.tasks` (#8) shares the shape, defaulting to the API's
+  `created_at desc`. That default is at least stable — unlike `position`, nothing
+  renumbers `created_at` — so the exposure is the ordinary one: a task created or
+  deleted shifts every index below it
 - The twenty collector inventories (#22) share the shape and deliberately do NOT
   expose `order`/`direction`, so their order is entirely the server's default. The
   rows are agent-reported state rather than configuration, so `for_each` over them
@@ -289,9 +402,14 @@
   `internal/provider/plan_test_harness_test.go`. The remaining resources have no
   equivalent — their plan-time behaviour is only covered by the TF_ACC suite,
   which does not run in CI and needs a staging org that does not exist yet
-- Fix: extend the hermetic pattern to the resources whose plan behaviour is
-  non-trivial — uptime monitor (`protocolForbidden`), status page (items/sections
-  semantics), task (`schedule_type` switching)
+- #8 added `internal/provider/task_plan_test.go`, which pins the in-place
+  `schedule_type` switch to `plancheck.ResourceActionUpdate` — a `RequiresReplace`
+  reintroduced on that attribute would keep every unit test green while silently
+  reissuing the ping key of every task a practitioner moves between cron and
+  interval
+- Fix: extend the hermetic pattern to the resources whose plan behaviour is still
+  non-trivial and uncovered — uptime monitor (`protocolForbidden`), status page
+  (items/sections semantics)
 - Found by: /ship Codex structured review, 2026-09-02
 
 ### Required name attributes are overwritten from the API response

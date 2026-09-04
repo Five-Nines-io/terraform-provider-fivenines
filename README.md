@@ -38,6 +38,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_workflow_node_types` | Node types available to workflow execution graphs |
 | `fivenines_incidents` | Incidents, filterable by status, subject, active window and update time |
 | `fivenines_uptime_monitors` | Uptime monitors, filterable by status, protocol, search text and update time |
+| `fivenines_tasks` | Cron & heartbeat tasks, filterable by status, schedule type, name and update time, with a `limit` |
 | `fivenines_uptime_monitor_status` | Lightweight current status of a single uptime monitor |
 | `fivenines_instance_capability_status` | What one agent can actually collect, as opposed to what is switched on |
 | `fivenines_dashboard_templates` | The dashboard gallery, with an availability verdict per template |
@@ -452,6 +453,7 @@ What ends up there:
 | Attribute | Why it is in state |
 |-----------|--------------------|
 | `fivenines_task.ping_key` / `ping_url` | Server-generated; the API returns the key on every read, and `ping_url` embeds it. This is what you feed to the job that pings the task, so it has to be readable as an output. |
+| `data.fivenines_tasks.<name>.tasks[*].ping_key` / `ping_url` | The same secret, for every task the filters matched — including tasks this configuration does not manage. Narrow the filters if you only need one. |
 | `fivenines_network_device.snmp_community`, `snmp_auth_password`, `snmp_priv_password` | Write-only — never returned by the API, so state holds the value you configured. |
 | `fivenines_instance.redis_password`, `postgresql_password`, `mysql_password`, `rabbitmq_password`, `haproxy_password`, `proxmox_token_secret`, `tsdb_auth_header_value`, `tsdb_basic_auth_password`, `vllm_auth_header_value`, `sglang_auth_header_value` | Write-only — the API never returns a collector credential, so state holds the value you configured. The paired `_set` booleans report whether the server holds one. |
 | `fivenines_integration.url`, `secret`, `routing_key`, `user_key`, `app_token` | Write-only — the API never serializes an integration's metadata, so state holds the value you configured. |

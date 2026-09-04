@@ -7,7 +7,7 @@ data "fivenines_uptime_monitors" "failing_https" {
   protocol = "https"
 }
 
-# Free-text search over name, URL and hostname.
+# Substring match on the monitor name. It does not search the URL or hostname.
 data "fivenines_uptime_monitors" "api" {
   query     = "api"
   order     = "name"

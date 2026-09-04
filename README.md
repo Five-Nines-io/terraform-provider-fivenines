@@ -37,7 +37,7 @@ Manage your [FiveNines](https://fivenines.io) monitoring infrastructure as code.
 | `fivenines_workflow_templates` | Prebuilt workflow templates, instantiable by slug |
 | `fivenines_workflow_node_types` | Node types available to workflow execution graphs |
 | `fivenines_incidents` | Incidents, filterable by status, subject, active window and update time |
-| `fivenines_uptime_monitors` | Uptime monitors, filterable by status, protocol, search text and update time |
+| `fivenines_uptime_monitors` | Uptime monitors, filterable by status, protocol, name and update time |
 | `fivenines_tasks` | Cron & heartbeat tasks, filterable by status, schedule type, name and update time, with a `limit` |
 | `fivenines_uptime_monitor_status` | Lightweight current status of a single uptime monitor |
 | `fivenines_instance_capability_status` | What one agent can actually collect, as opposed to what is switched on |
@@ -520,6 +520,41 @@ you actually get `ping_url` to the job that pings the task. The exposure is
 bounded: the key authenticates heartbeat pings for a single task and grants no
 read access and no ability to change configuration. If a key leaks, replace the
 task to issue a new one.
+
+### Upgrading: uptime monitor rules are checked at plan time
+
+`fivenines_uptime_monitor` used to accept configurations the API then rejected
+with a 422 or silently rewrote. From this release the provider mirrors the
+server's own validations, so those configurations fail during `terraform plan`
+with a message naming the attribute, instead of failing partway through an
+apply. A valid monitor is unaffected; what changes is when an invalid one is
+caught.
+
+| Configuration | Why it is refused |
+|---|---|
+| `protocol = "dns"` without `hostname` | The hostname is the name being resolved, and the API requires it on every dns write. |
+| `custom_body` or `content_type` beside a `GET` or `HEAD` | The API stores both only for a POST and clears them otherwise, so the value never survived the apply. Omitting `http_method` counts, because it defaults to `GET`. Set `http_method = "POST"`. |
+| A blank or whitespace-padded entry in `dns_expected_records` | Stored verbatim and compared without trimming, so the entry can never match what DNS resolves. Wrap it in `trim()`; a trailing newline in a `split()` is the usual cause. |
+| `timeout_seconds` outside 1-15, `recovery_count` outside 1-10, `interval_seconds` or `confirmation_count` below 1 | The API's own bounds, checked before the round trip. |
+| More than 20 `custom_headers`, a header value over 4KB, or a header name outside `[A-Za-z0-9_-]` | The API's caps and its header-name rule. |
+
+Two behaviour changes come with it.
+
+**`dns_expected_records` and `custom_headers` now really clear.** Removing
+either attribute used to send a JSON null that Rails strong params dropped, so
+the stored value survived and the apply failed with "Provider produced
+inconsistent result after apply". The provider sends an empty collection now,
+which the API accepts, so the apply succeeds. For `dns_expected_records` that
+also clears the baseline the probe auto-seeds after a monitor's first successful
+check, and the seed is written once and never again. Pin the records explicitly
+if you want them.
+
+**A rejected `custom_headers` value is no longer printed.** That map is where an
+`Authorization` header for the monitored endpoint goes, and Terraform redacts a
+sensitive value in the plan diff but not inside a provider diagnostic. Its
+validator reports the offending character and where it is, never the value, so a
+bearer token with a trailing newline no longer echoes itself into `terraform
+plan` output and CI logs.
 
 ## Importing existing resources
 

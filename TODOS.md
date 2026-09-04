@@ -731,13 +731,12 @@
 - Fix: optional `limit`, threaded into the ListXOptions struct, stopping the walk
   once `len(all) >= limit` and sizing per_page as `min(100, limit)`
 
-### dns monitors may also require hostname
-- `protocolRequirements` maps dns to `{dns_record_type}` only, but a DNS monitor
-  has nothing to query without a hostname, and the repo's own example sets one
-- Not added in #9 because the issue only specified `dns_record_type` and it is
-  unclear whether the API accepts `url` for dns; a wrong guess false-rejects
-  valid configs at plan time
-- Fix: confirm against the server-side validation, then add `hostname`
+### ~~dns monitors may also require hostname~~
+- Fixed in #9. `protocolRequirements` maps dns to `{hostname, dns_record_type}`,
+  confirmed against the server rather than guessed: `validates :hostname,
+  presence: true, if: :dns?` runs on every dns write, so omitting it only moved
+  the failure from plan time to a 422 on apply. The open question about `url`
+  resolved the same way — dns validates `hostname`, never `url`
 
 ## Recently closed
 
@@ -798,7 +797,9 @@
 - **Cross-field validation** — tasks in #8 (`ValidateConfig` enforces cron ⇒
   `schedule`, interval ⇒ `interval_seconds`), uptime monitors in #9
   (`ValidateConfig` + the `protocolRequirements` table: https ⇒ `url`, tcp ⇒
-  `hostname`+`port`, icmp ⇒ `hostname`, dns ⇒ `dns_record_type`), status pages in
+  `hostname`+`port`, icmp ⇒ `hostname`, dns ⇒ `hostname`+`dns_record_type`, plus
+  the `postOnly` rule on the second axis: `custom_body`/`content_type` ⇒
+  `http_method = "POST"`), status pages in
   #12 (`ValidateConfig` enforces items[].section ⇒ declared in `sections`), and
   integrations in #15 (`ValidateConfig` + the `integrationRules` table: webhook ⇒
   `url`, pagerduty ⇒ `name`+`routing_key`, pushover ⇒ `name`+`user_key`+

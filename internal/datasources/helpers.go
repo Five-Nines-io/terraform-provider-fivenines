@@ -16,6 +16,19 @@ func optionalString(s *string) types.String {
 	return types.StringValue(*s)
 }
 
+// optionalNonEmptyString is optionalString for a field whose empty string means
+// the same thing as its null. The tasks index answers null for the schedule of
+// an interval task and has been seen to answer "" — both mean "no cron
+// expression" — so folding the two here keeps a task read through the data
+// source shaped like the same task read through fivenines_task, which applies
+// the identical rule in internal/resources/mapping.go.
+func optionalNonEmptyString(s *string) types.String {
+	if s == nil || *s == "" {
+		return types.StringNull()
+	}
+	return types.StringValue(*s)
+}
+
 func optionalInt64(i *int64) types.Int64 {
 	if i == nil {
 		return types.Int64Null()
@@ -79,6 +92,12 @@ func addSecurityError(diags *diag.Diagnostics, summary string, err error) {
 	diags.AddError(summary, err.Error())
 }
 
+// maxListLimit bounds every `limit` argument. It is well under math.MaxInt32 so
+// the int64 -> int conversion in filterLimit is lossless on every build target,
+// and far above any real organization's row count, so it never truncates a
+// legitimate read.
+const maxListLimit = 1_000_000
+
 // The filter* helpers turn configured arguments into client filter values. An
 // unset argument must stay out of the query entirely: the API rejects unknown
 // and malformed query parameters with a 400 rather than ignoring them.
@@ -96,6 +115,31 @@ func filterInt64(v types.Int64) *int64 {
 	}
 	i := v.ValueInt64()
 	return &i
+}
+
+// filterLimit renders an unset limit as 0, which the client walkers read as
+// unbounded. Unlike filterInt64 it is not a pointer: 0 is not a meaningful cap,
+// so there is no value to distinguish it from.
+//
+// The clamp is what makes the narrowing conversion safe. Terraform numbers are
+// int64 and Go's int is 32 bits on a 32-bit build, so a bare int(...) turns
+// limit = 4294967296 into 0 — which the walkers read as UNBOUNDED, i.e. the exact
+// opposite of the bound the practitioner asked for, silently. maxTaskLimit also
+// caps the plan-time validator, so a value this large is rejected before it gets
+// here; the clamp stays as the second line of defence, because the failure it
+// prevents is silent.
+func filterLimit(v types.Int64) int {
+	if v.IsNull() || v.IsUnknown() {
+		return 0
+	}
+	n := v.ValueInt64()
+	if n > maxListLimit {
+		return maxListLimit
+	}
+	if n < 0 {
+		return 0
+	}
+	return int(n)
 }
 
 func filterBool(v types.Bool) *bool {

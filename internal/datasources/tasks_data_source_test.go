@@ -229,7 +229,8 @@ func TestTasksDataSource_Read(t *testing.T) {
 					"schedule_type": "cron", "schedule": "0 3 * * *", "interval_seconds": nil,
 					"time_zone": "Europe/Paris", "grace_period_minutes": 10,
 					"status": "active", "monitoring_status": "ok",
-					"ping_key": "pk_live_abc", "ping_url": "https://ping.fivenines.io/pk_live_abc",
+					"ping_key":         "8f14e45f-ceea-467a-9f3a-0000000000a1",
+					"ping_url":         "https://app.fivenines.io/ping/8f14e45f-ceea-467a-9f3a-0000000000a1",
 					"host_id":          "3cac0e44-0000-4000-8000-0000000000ff",
 					"expected_ping_at": "2026-01-02T03:00:00Z", "last_ping_at": "2026-01-01T03:00:04Z",
 					"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
@@ -239,7 +240,8 @@ func TestTasksDataSource_Read(t *testing.T) {
 					"schedule_type": "interval", "schedule": "", "interval_seconds": 300,
 					"time_zone": "UTC", "grace_period_minutes": 5,
 					"status": "paused", "monitoring_status": "paused",
-					"ping_key": "pk_live_def", "ping_url": "https://ping.fivenines.io/pk_live_def",
+					"ping_key":         "8f14e45f-ceea-467a-9f3a-0000000000a2",
+					"ping_url":         "https://app.fivenines.io/ping/8f14e45f-ceea-467a-9f3a-0000000000a2",
 					"host_id":          nil,
 					"expected_ping_at": nil, "last_ping_at": nil,
 					"created_at": "2026-01-03T00:00:00Z", "updated_at": "2026-01-04T00:00:00Z",
@@ -305,7 +307,8 @@ func TestTasksDataSource_Read(t *testing.T) {
 	if cron.Paused.ValueBool() {
 		t.Error("expected an active task to read as not paused")
 	}
-	if cron.PingKey.ValueString() != "pk_live_abc" || cron.PingURL.ValueString() != "https://ping.fivenines.io/pk_live_abc" {
+	if cron.PingKey.ValueString() != "8f14e45f-ceea-467a-9f3a-0000000000a1" ||
+		cron.PingURL.ValueString() != "https://app.fivenines.io/ping/8f14e45f-ceea-467a-9f3a-0000000000a1" {
 		t.Errorf("unexpected ping fields: %+v", cron)
 	}
 	if cron.HostID.ValueString() != "3cac0e44-0000-4000-8000-0000000000ff" {

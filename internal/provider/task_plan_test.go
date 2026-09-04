@@ -62,8 +62,9 @@ func (a *taskAPI) body() map[string]interface{} {
 		"schedule_type": a.scheduleType, "schedule": a.schedule,
 		"interval_seconds": a.intervalSeconds, "time_zone": "UTC",
 		"grace_period_minutes": 5, "status": a.status, "monitoring_status": a.monitoringStatus(),
-		"ping_key": "pk_live_abc", "ping_url": "https://ping.fivenines.io/pk_live_abc",
-		"host_id": nil, "expected_ping_at": "2026-01-02T03:00:00Z", "last_ping_at": nil,
+		"ping_key": "8f14e45f-ceea-467a-9f3a-0000000000a1",
+		"ping_url": "https://app.fivenines.io/ping/8f14e45f-ceea-467a-9f3a-0000000000a1",
+		"host_id":  nil, "expected_ping_at": "2026-01-02T03:00:00Z", "last_ping_at": nil,
 		"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
 	}}
 }
@@ -168,7 +169,7 @@ resource "fivenines_task" "test" {
 					// The ping key survives an in-place switch. Under the old
 					// RequiresReplace it would not have, which is the whole cost
 					// of getting this wrong.
-					resource.TestCheckResourceAttr("fivenines_task.test", "ping_key", "pk_live_abc"),
+					resource.TestCheckResourceAttr("fivenines_task.test", "ping_key", "8f14e45f-ceea-467a-9f3a-0000000000a1"),
 				),
 			},
 		},
@@ -233,7 +234,7 @@ resource "fivenines_task" "test" {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("fivenines_task.test", "schedule_type", "cron"),
 					resource.TestCheckResourceAttr("fivenines_task.test", "schedule", "0 3 * * *"),
-					resource.TestCheckResourceAttr("fivenines_task.test", "ping_key", "pk_live_abc"),
+					resource.TestCheckResourceAttr("fivenines_task.test", "ping_key", "8f14e45f-ceea-467a-9f3a-0000000000a1"),
 				),
 			},
 		},
@@ -298,7 +299,7 @@ resource "fivenines_task" "test" {
 				},
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("fivenines_task.test", "name", "nightly database backup"),
-					resource.TestCheckResourceAttr("fivenines_task.test", "ping_key", "pk_live_abc"),
+					resource.TestCheckResourceAttr("fivenines_task.test", "ping_key", "8f14e45f-ceea-467a-9f3a-0000000000a1"),
 				),
 			},
 		},

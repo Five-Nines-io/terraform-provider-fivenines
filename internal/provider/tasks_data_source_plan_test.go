@@ -26,8 +26,9 @@ func tasksPlanHandler(gotQuery *url.Values) func(http.ResponseWriter, *http.Requ
 				"schedule_type": "cron", "schedule": "0 3 * * *", "interval_seconds": nil,
 				"time_zone": "Europe/Paris", "grace_period_minutes": 10,
 				"status": "paused", "monitoring_status": "paused",
-				"ping_key": "pk_live_abc", "ping_url": "https://ping.fivenines.io/pk_live_abc",
-				"host_id": nil, "expected_ping_at": nil, "last_ping_at": nil,
+				"ping_key": "8f14e45f-ceea-467a-9f3a-0000000000a1",
+				"ping_url": "https://app.fivenines.io/ping/8f14e45f-ceea-467a-9f3a-0000000000a1",
+				"host_id":  nil, "expected_ping_at": nil, "last_ping_at": nil,
 				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
 			}},
 			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
@@ -215,8 +216,9 @@ func TestTasksDataSourcePlan_MonitoringStatusVocabularyDrivesExample(t *testing.
 				"schedule_type": "cron", "schedule": "0 3 * * *", "interval_seconds": nil,
 				"time_zone": "UTC", "grace_period_minutes": 5,
 				"status": "active", "monitoring_status": monitoring,
-				"ping_key": "pk_" + id, "ping_url": "https://ping.fivenines.io/pk_" + id,
-				"host_id": nil, "expected_ping_at": nil, "last_ping_at": nil,
+				"ping_key": "8f14e45f-ceea-467a-9f3a-00000000000" + id[1:],
+				"ping_url": "https://app.fivenines.io/ping/8f14e45f-ceea-467a-9f3a-00000000000" + id[1:],
+				"host_id":  nil, "expected_ping_at": nil, "last_ping_at": nil,
 				"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
 			}
 		}

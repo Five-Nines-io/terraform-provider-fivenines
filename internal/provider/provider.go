@@ -144,6 +144,7 @@ func (p *fiveninesProvider) DataSources(_ context.Context) []func() datasource.D
 		datasources.NewOrganizationDockerImagesDataSource,
 		datasources.NewVulnerabilitiesDataSource,
 		datasources.NewUptimeMonitorsDataSource,
+		datasources.NewTasksDataSource,
 		datasources.NewUptimeMonitorStatusDataSource,
 		datasources.NewDashboardTemplatesDataSource,
 		datasources.NewHostGroupsDataSource,

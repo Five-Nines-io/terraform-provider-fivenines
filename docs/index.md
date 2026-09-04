@@ -101,6 +101,14 @@ surfaces, so an active MCP client competes with a Terraform run on the same
 organization. If a large `terraform apply` hits sustained 429s, lower
 `-parallelism` or stagger it against MCP activity.
 
+**There is a second ceiling underneath the plan tier**: `/api/v1/*` is also
+throttled per IP, at 20 requests/minute, on every plan. From a single CI runner
+that is the binding limit. It matters most for the list data sources, which walk
+the index one request per 100 rows: 5,000 tasks is 50 requests, so one refresh
+crosses the per-IP ceiling twice and the provider sleeps out each `Retry-After`.
+Filter server-side rather than in HCL, and cap the read where the data source
+offers a `limit` (today, `fivenines_tasks`).
+
 ### Quoting a request ID in support tickets
 
 Every API response carries an `X-Request-Id`, and the provider attaches it to

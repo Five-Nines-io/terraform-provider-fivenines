@@ -173,3 +173,130 @@ func TestClient_ListInventory_Error(t *testing.T) {
 		t.Errorf("expected a 404 APIError, got %v", err)
 	}
 }
+
+// A negative cap is a caller bug, and the zero-means-unbounded sentinel makes the
+// dangerous reading (walk everything) the natural one. Refuse it instead.
+func TestListAllPages_RejectsNegativeRowCap(t *testing.T) {
+	var requests int
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tasks": []map[string]interface{}{{"id": "task-uuid"}},
+			"meta":  map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
+		})
+	})
+
+	_, err := listAllPages[Task](context.Background(), c, "/api/v1/tasks", "tasks", nil, 100, -5)
+	if err == nil {
+		t.Fatal("expected a negative row cap to be refused, not read as unbounded")
+	}
+	if requests != 0 {
+		t.Errorf("expected the walk to be refused before any request, got %d", requests)
+	}
+}
+
+// The offset-pagination insert race: a task created between two page requests
+// pushes the last row of page 1 onto page 2, so it arrives twice. A duplicate id
+// fails a Terraform plan outright on `{ for t in ... : t.id => t }`, and a data
+// source re-reads on every plan, so it recurs nondeterministically.
+func TestListAllPages_DropsRowsRepeatedAcrossPages(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		var ids []string
+		switch page {
+		case "1":
+			ids = []string{"a", "b", "c"}
+		default:
+			// "c" slid onto page 2 when a new task was inserted mid-walk.
+			ids = []string{"c", "d"}
+		}
+		rows := make([]map[string]interface{}, 0, len(ids))
+		for _, id := range ids {
+			rows = append(rows, map[string]interface{}{"id": id, "name": "backup"})
+		}
+		current, _ := strconv.Atoi(page)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tasks": rows,
+			"meta":  map[string]int{"current_page": current, "total_pages": 2, "total_count": 5, "per_page": 3},
+		})
+	})
+
+	tasks, err := listAllPages[Task](context.Background(), c, "/api/v1/tasks", "tasks", nil, 3, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got []string
+	seen := map[string]int{}
+	for _, task := range tasks {
+		got = append(got, task.ID)
+		seen[task.ID]++
+	}
+	for id, n := range seen {
+		if n > 1 {
+			t.Errorf("task %q returned %d times; a repeated id fails a Terraform plan", id, n)
+		}
+	}
+	if len(got) != 4 {
+		t.Errorf("expected 4 distinct tasks, got %d (%v)", len(got), got)
+	}
+}
+
+// De-duplication happens BEFORE the cap, so a repeated row does not eat a slot
+// the caller asked for: limit 3 over a duplicate-bearing walk still yields 3.
+func TestListAllPages_DuplicatesDoNotConsumeTheRowCap(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		var ids []string
+		switch page {
+		case "1":
+			ids = []string{"a", "b"}
+		default:
+			ids = []string{"b", "c"}
+		}
+		rows := make([]map[string]interface{}, 0, len(ids))
+		for _, id := range ids {
+			rows = append(rows, map[string]interface{}{"id": id, "name": "backup"})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tasks": rows,
+			"meta":  map[string]int{"current_page": 1, "total_pages": 3, "total_count": 6, "per_page": 2},
+		})
+	})
+
+	tasks, err := listAllPages[Task](context.Background(), c, "/api/v1/tasks", "tasks", nil, 2, 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tasks) != 3 {
+		t.Fatalf("expected the cap filled with 3 DISTINCT tasks, got %d", len(tasks))
+	}
+	want := []string{"a", "b", "c"}
+	for i, id := range want {
+		if tasks[i].ID != id {
+			t.Errorf("row %d: expected %q, got %q", i, id, tasks[i].ID)
+		}
+	}
+}
+
+// A row type with no identity still walks: de-duplication is opt-in via
+// rowIdentifier, and nothing is dropped for want of an id.
+func TestListAllPages_RowsWithoutIdentityAreNotDropped(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"rows": []map[string]interface{}{{"v": 1}, {"v": 1}, {"v": 2}},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 3, "per_page": 100},
+		})
+	})
+
+	type plainRow struct {
+		V int `json:"v"`
+	}
+	rows, err := listAllPages[plainRow](context.Background(), c, "/api/v1/anything", "rows", nil, 100, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Errorf("expected all 3 rows kept for a type with no rowID, got %d", len(rows))
+	}
+}

@@ -416,6 +416,201 @@ func TestClient_ListInstances_Pagination(t *testing.T) {
 
 // --- Tasks ---
 
+func TestClient_ListTasks_Filters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tasks": []interface{}{},
+			"meta":  map[string]int{"current_page": 1, "total_pages": 1, "total_count": 0, "per_page": 100},
+		})
+	})
+
+	got, err := c.ListTasks(context.Background(), TaskListOptions{
+		Status:       "paused",
+		ScheduleType: "cron",
+		Query:        "backup",
+		UpdatedSince: "2026-01-01T00:00:00Z",
+		Order:        "name",
+		Direction:    "asc",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// An empty index returns [] and not nil: the data source layer maps a nil to
+	// a NULL Terraform list, and length()/for_each over a null fail a plan. Zero
+	// matches is the normal case for a filtered read.
+	if got == nil {
+		t.Error("expected a non-nil empty slice for an empty index, got nil")
+	}
+
+	for key, want := range map[string]string{
+		"status": "paused", "schedule_type": "cron", "q": "backup",
+		"updated_since": "2026-01-01T00:00:00Z", "order": "name", "direction": "asc",
+		"page": "1", "per_page": "100",
+	} {
+		if got := gotQuery.Get(key); got != want {
+			t.Errorf("expected %s=%q, got %q", key, want, got)
+		}
+	}
+}
+
+// An unset filter has to be absent from the query, not sent blank. Whether a
+// blank means "no filter" or is refused outright is the server's choice per
+// filter, so the client should never make the request depend on it.
+func TestClient_ListTasks_OmitsUnsetFilters(t *testing.T) {
+	var gotQuery url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tasks": []map[string]interface{}{
+				{"id": "task-uuid", "name": "backup", "schedule_type": "cron", "status": "active"},
+			},
+			"meta": map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
+		})
+	})
+
+	tasks, err := c.ListTasks(context.Background(), TaskListOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	for _, key := range []string{"status", "schedule_type", "q", "updated_since", "order", "direction"} {
+		if _, ok := gotQuery[key]; ok {
+			t.Errorf("expected %s to be omitted when unset", key)
+		}
+	}
+}
+
+// The filters have to be carried on EVERY page, not just the first: a query
+// string rebuilt per page without them turns page 2 onwards into an unfiltered
+// read, silently appending rows the caller filtered out.
+func TestClient_ListTasks_Pagination(t *testing.T) {
+	var pages []url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		pages = append(pages, query)
+		page := query.Get("page")
+		current, _ := strconv.Atoi(page)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tasks": []map[string]interface{}{{"id": "task-page-" + page, "name": "backup", "schedule_type": "cron"}},
+			"meta":  map[string]int{"current_page": current, "total_pages": 2, "total_count": 2, "per_page": 100},
+		})
+	})
+
+	tasks, err := c.ListTasks(context.Background(), TaskListOptions{Status: "active"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks across 2 pages, got %d", len(tasks))
+	}
+	if len(pages) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(pages))
+	}
+	for i, query := range pages {
+		if got := query.Get("status"); got != "active" {
+			t.Errorf("page %d: expected status=active, got %q", i+1, got)
+		}
+		if got, want := query.Get("page"), strconv.Itoa(i+1); got != want {
+			t.Errorf("request %d: expected page=%s, got %q", i+1, want, got)
+		}
+	}
+}
+
+// Limit bounds the WORK, not just the output: a cap below one page shrinks the
+// page request itself, so asking for 5 rows costs one request for 5 rather than
+// one for 100.
+func TestClient_ListTasks_LimitShrinksThePageRequest(t *testing.T) {
+	var requests []url.Values
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Query())
+		rows := make([]map[string]interface{}, 0, 5)
+		for i := 0; i < 5; i++ {
+			rows = append(rows, map[string]interface{}{
+				"id": fmt.Sprintf("task-%d", i), "name": "backup", "schedule_type": "cron",
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tasks": rows,
+			"meta":  map[string]int{"current_page": 1, "total_pages": 40, "total_count": 200, "per_page": 5},
+		})
+	})
+
+	tasks, err := c.ListTasks(context.Background(), TaskListOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tasks) != 5 {
+		t.Fatalf("expected 5 tasks, got %d", len(tasks))
+	}
+	// One request, and it asked for 5 — not 100 with 95 thrown away, and not a
+	// walk of the remaining 39 pages the meta advertises.
+	if len(requests) != 1 {
+		t.Fatalf("expected exactly 1 request for a limit under one page, got %d", len(requests))
+	}
+	if got := requests[0].Get("per_page"); got != "5" {
+		t.Errorf("expected per_page=5, got %q", got)
+	}
+}
+
+// A cap that spans pages stops the walk mid-index and truncates, rather than
+// trusting the server to have honoured per_page exactly.
+func TestClient_ListTasks_LimitStopsTheWalkAndTruncates(t *testing.T) {
+	var requests int
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		// Over-deliver: 100 rows for a page the walk will cut to reach the cap.
+		rows := make([]map[string]interface{}, 0, 100)
+		for i := 0; i < 100; i++ {
+			rows = append(rows, map[string]interface{}{
+				"id":   fmt.Sprintf("task-%s-%d", r.URL.Query().Get("page"), i),
+				"name": "backup", "schedule_type": "cron",
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tasks": rows,
+			"meta":  map[string]int{"current_page": 1, "total_pages": 10, "total_count": 1000, "per_page": 100},
+		})
+	})
+
+	tasks, err := c.ListTasks(context.Background(), TaskListOptions{Limit: 150})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tasks) != 150 {
+		t.Errorf("expected the result truncated to the limit, got %d", len(tasks))
+	}
+	// Two pages of 100 reach 200 >= 150, so the remaining 8 pages are never fetched.
+	if requests != 2 {
+		t.Errorf("expected the walk to stop after 2 pages, got %d requests", requests)
+	}
+}
+
+// Limit 0 is "no cap", not "no rows" — the zero value has to stay unbounded or
+// every caller that does not set it gets an empty list.
+func TestClient_ListTasks_ZeroLimitIsUnbounded(t *testing.T) {
+	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Errorf("expected the full page size when unbounded, got %q", got)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"tasks": []map[string]interface{}{{"id": "task-uuid", "name": "backup", "schedule_type": "cron"}},
+			"meta":  map[string]int{"current_page": 1, "total_pages": 1, "total_count": 1, "per_page": 100},
+		})
+	})
+
+	tasks, err := c.ListTasks(context.Background(), TaskListOptions{Limit: 0})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 task, got %d", len(tasks))
+	}
+}
+
 func TestClient_GetTask(t *testing.T) {
 	_, c := newTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/tasks/task-uuid" {

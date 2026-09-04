@@ -19,7 +19,9 @@ work is tracked in GitHub issues #5-#26.
   `terraform` binary is, and skip only when it is missing. They are the only
   tests that exercise plan validation: the unit tests drive Create and Update
   directly, which skips the step where Terraform compares the plan to the
-  configuration. Add one when a resource's plan-time behaviour is non-trivial.
+  configuration. Add one when a resource's or a data source's plan-time behaviour
+  is non-trivial: a data source's `ValidateConfig` refusal is reachable only from
+  a real plan, so a unit test that calls `Read` directly never sees it.
 - `make docs` runs `tfplugindocs generate --provider-name fivenines
   --rendered-provider-name terraform-provider-fivenines`. The flags are not
   optional: tfplugindocs derives the provider name from the directory name, so

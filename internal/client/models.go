@@ -312,6 +312,33 @@ type Task struct {
 	UpdatedAt          string  `json:"updated_at"`
 }
 
+// TaskListOptions holds the index filters accepted by GET /api/v1/tasks.
+// Zero-valued fields are not sent — see TaskListOptions.query for why omitting
+// beats sending a blank. An UNKNOWN key is a different matter: the index answers
+// 400 rather than ignoring it, so nothing may be added here speculatively.
+type TaskListOptions struct {
+	// Status filters on the lifecycle status: "active" or "paused".
+	Status string
+	// ScheduleType filters on "cron" or "interval".
+	ScheduleType string
+	// Query is a substring match on the task NAME only (the "q" param). Neither
+	// the cron expression nor the host is searched.
+	Query string
+	// UpdatedSince keeps only tasks with updated_at >= this ISO8601 timestamp.
+	// The boundary is inclusive by contract: feed back the newest updated_at you
+	// received and a task updated in that same instant is returned again rather
+	// than falling through the gap.
+	UpdatedSince string
+	// Order is the column to sort on -- "created_at" (the API default),
+	// "updated_at" or "name". Direction is "asc" or "desc" (default "desc").
+	Order     string
+	Direction string
+	// Limit caps how many tasks are returned, and with them how many requests
+	// the walk costs. 0 means unbounded. Pair it with Order/Direction: without a
+	// sort the API's own default decides which rows the cap keeps.
+	Limit int
+}
+
 // CreateTaskInput is the request body for creating a task.
 type CreateTaskInput struct {
 	Name               string `json:"name"`

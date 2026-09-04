@@ -573,38 +573,42 @@ func (c *Client) instanceAction(ctx context.Context, id, action string) error {
 
 // --- Tasks ---
 
-func (c *Client) ListTasks(ctx context.Context) ([]Task, error) {
-	var all []Task
-	page := 1
-	for {
-		path := fmt.Sprintf("/api/v1/tasks?page=%d&per_page=100", page)
-		resp, err := c.doRequest(ctx, "GET", path, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, parseError(resp)
-		}
+// taskPerPage is the page size for the tasks index walk.
+const taskPerPage = 100
 
-		var result struct {
-			Tasks []Task         `json:"tasks"`
-			Meta  PaginationMeta `json:"meta"`
+// query renders the index filter options as query parameters. An empty value is
+// omitted rather than sent blank. Today the tasks filters read a blank as
+// absent, so the two are equivalent — but that is a per-filter server-side
+// setting (a filter set can opt into refusing `?key=`), and an UNKNOWN key is a
+// 400 outright. Sending only what the caller asked for depends on neither.
+func (o TaskListOptions) query() url.Values {
+	q := url.Values{}
+	for key, value := range map[string]string{
+		"status":        o.Status,
+		"schedule_type": o.ScheduleType,
+		"q":             o.Query,
+		"updated_since": o.UpdatedSince,
+		"order":         o.Order,
+		"direction":     o.Direction,
+	} {
+		if value != "" {
+			q.Set(key, value)
 		}
-		if err := decodeResponse(resp, &result); err != nil {
-			return nil, fmt.Errorf("decoding response: %w", err)
-		}
-		all = append(all, result.Tasks...)
-		more, err := morePages(len(result.Tasks), result.Meta, page)
-		if err != nil {
-			return nil, err
-		}
-		if !more {
-			break
-		}
-		page++
 	}
-	return all, nil
+	return q
 }
+
+// ListTasks walks the whole index, applying the server-side filters in opts.
+// Filtering here rather than client-side is what makes an incremental sync
+// possible: `updated_since` plus the caller's own cursor turns a full
+// repagination of the fleet into one page of changes.
+func (c *Client) ListTasks(ctx context.Context, opts TaskListOptions) ([]Task, error) {
+	return listAllPages[Task](ctx, c, "/api/v1/tasks", "tasks", opts.query(), taskPerPage, opts.Limit)
+}
+
+// rowID implements rowIdentifier, so a task served twice by an offset-paginated
+// walk reaches the data source once. A repeated id fails a Terraform plan.
+func (t Task) rowID() string { return t.ID }
 
 func (c *Client) GetTask(ctx context.Context, id string) (*Task, string, error) {
 	resp, err := c.doRequest(ctx, "GET", "/api/v1/tasks/"+id, nil, nil)

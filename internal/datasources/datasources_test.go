@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	dschema "github.com/hashicorp/terraform-plugin-framework/datasource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
@@ -394,6 +395,56 @@ func TestUptimeMonitorsDataSource_Read_NoFiltersAndNoResults(t *testing.T) {
 	}
 	if monitors.IsNull() {
 		t.Error("expected an empty list, got null")
+	}
+}
+
+// order is enumerated server-side from IndexFilters::UPTIME_MONITORS, and the
+// accepted set is the contract in both directions: the plan test proves a typo
+// is refused, and this proves the three the API really takes are not. A OneOf
+// that had drifted from the server would fail refresh for a valid config.
+func TestUptimeMonitorsDataSource_OrderValidator(t *testing.T) {
+	s := dataSourceSchema(t, &uptimeMonitorsDataSource{})
+	attribute, ok := s.Attributes["order"].(dschema.StringAttribute)
+	if !ok {
+		t.Fatalf("expected order to be a StringAttribute, got %T", s.Attributes["order"])
+	}
+	validators := attribute.StringValidators()
+	if len(validators) == 0 {
+		t.Fatal("expected order to declare validators")
+	}
+
+	tests := []struct {
+		name      string
+		value     types.String
+		wantError bool
+	}{
+		// order is Optional with no default, so an omitted filter arrives null
+		// and an interpolated one can arrive unknown. Neither is a bad value.
+		{name: "null is skipped", value: types.StringNull()},
+		{name: "unknown is skipped", value: types.StringUnknown()},
+		{name: "created_at", value: types.StringValue("created_at")},
+		{name: "updated_at", value: types.StringValue("updated_at")},
+		{name: "name", value: types.StringValue("name")},
+		// Sortable in the UI, not in IndexFilters::UPTIME_MONITORS.
+		{name: "last_check_at is not sortable", value: types.StringValue("last_check_at"), wantError: true},
+		{name: "empty string", value: types.StringValue(""), wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := validator.StringRequest{
+				Path:           path.Root("order"),
+				PathExpression: path.MatchRoot("order"),
+				ConfigValue:    tt.value,
+			}
+			resp := &validator.StringResponse{}
+			for _, v := range validators {
+				v.ValidateString(context.Background(), req, resp)
+			}
+			if resp.Diagnostics.HasError() != tt.wantError {
+				t.Errorf("expected error=%v, got %v", tt.wantError, resp.Diagnostics.Errors())
+			}
+		})
 	}
 }
 

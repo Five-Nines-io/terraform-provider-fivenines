@@ -23,6 +23,16 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 		preserves = "preserves on nil (Optional+Computed, defaulted, or write-only)"
 		always    = "always sent (Required: no nil case and no omitempty)"
 		dropsZero = "dropped when zero-valued (only safe when \"\" or 0 is not a legal config value)"
+		// The one classification the JSON tag CANNOT prove, so it is asserted by
+		// the caller's tests instead (see TestUptimeMonitorResource_Update).
+		//
+		// Rails strong params drops a null sent to a key permitted as a
+		// collection (`dns_expected_records: []`, `custom_headers: {}`), so the
+		// nil-marshals-as-null clear every other Optional-only field relies on is
+		// a silent no-op there. Those fields carry omitempty — mechanically
+		// identical to `preserves` — but the caller never assigns nil except for
+		// an unknown plan value, and clears by sending an EMPTY collection.
+		clearsEmpty = "clears by sending an empty collection (a null is dropped by strong params)"
 	)
 
 	specs := []struct {
@@ -114,10 +124,11 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 				"follow_redirects": preserves, "expected_status_codes": preserves,
 				"recovery_count": preserves, "probe_region_ids": preserves,
 				// Protocol-scoped: switching protocol has to actively clear the
-				// previous protocol's settings (#9).
+				// previous protocol's settings (#9). The scalars clear with an
+				// explicit null; the two collection keys cannot — see clearsEmpty.
 				"port": clears, "keyword": clears, "dns_record_type": clears,
-				"dns_expected_records": clears, "custom_headers": clears,
 				"custom_body": clears, "content_type": clears,
+				"dns_expected_records": clearsEmpty, "custom_headers": clearsEmpty,
 			},
 		},
 		{
@@ -645,6 +656,12 @@ func TestUpdateInputTagsMatchTheirPolicy(t *testing.T) {
 					if strings.Contains(opts, "omitempty") {
 						got = dropsZero
 					}
+				}
+				// clearsEmpty and preserves are the same tag shape by
+				// construction (pointer + omitempty); only the caller can tell
+				// them apart, so the tag check accepts either for it.
+				if want == clearsEmpty && got == preserves {
+					continue
 				}
 				if got != want {
 					t.Errorf("%s.%s (json:%q) %s, but the policy says it %s",

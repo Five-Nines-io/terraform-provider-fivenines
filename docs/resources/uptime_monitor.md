@@ -42,6 +42,23 @@ resource "fivenines_uptime_monitor" "api" {
   keyword            = "healthy"
 }
 
+# custom_body and content_type are stored only for a POST. The API clears them
+# for any other method, so pairing them with the default GET is refused at plan
+# time rather than silently dropped on apply.
+resource "fivenines_uptime_monitor" "graphql" {
+  name         = "GraphQL Health Probe"
+  protocol     = "https"
+  url          = "https://api.example.com/graphql"
+  http_method  = "POST"
+  content_type = "application/json"
+  custom_body  = jsonencode({ query = "{ __typename }" })
+
+  # Up to 20 headers, 4KB per value, and no control characters in either.
+  custom_headers = {
+    Authorization = "Bearer ${var.api_probe_token}"
+  }
+}
+
 resource "fivenines_uptime_monitor" "database" {
   name     = "Database TCP Check"
   protocol = "tcp"
@@ -62,7 +79,7 @@ resource "fivenines_uptime_monitor" "dns" {
 
 # The protocol can be changed in place; set whatever the new protocol requires
 # in the same plan (https needs url, tcp needs hostname + port, icmp needs
-# hostname, dns needs dns_record_type).
+# hostname, dns needs hostname + dns_record_type).
 resource "fivenines_uptime_monitor" "staging" {
   name     = "Staging Website"
   protocol = "https"
@@ -83,25 +100,25 @@ resource "fivenines_uptime_monitor" "staging" {
 
 ### Optional
 
-- `confirmation_count` (Number) Number of probe regions that must confirm status (quorum).
-- `content_type` (String) Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain". https only: the other protocols reject it at plan time.
-- `custom_body` (String, Sensitive) Request body for POST requests. https only: the other protocols reject it at plan time.
-- `custom_headers` (Map of String, Sensitive) Custom HTTP headers as key-value pairs. https only: the other protocols reject it at plan time. Marked sensitive: this is where an Authorization header for the monitored endpoint goes.
-- `dns_expected_records` (List of String) Expected DNS record values. Up to 50 records of at most 2048 characters each. Set to an empty list to pin no expectation.
+- `confirmation_count` (Number) Number of probe regions that must confirm status (quorum). At least 1, and at most the number of probe regions the monitor checks from. Going above that does NOT silently reduce: the API clamps on create, which fails the apply with an inconsistent-result error, and rejects the same value with a 422 on every later update. Keep it at or below `length(probe_region_ids)`. Note the provider defaults to 1 where the API defaults to 2: a monitor created through Terraform pages on a single region's failure, so set it explicitly when migrating monitors created in the dashboard.
+- `content_type` (String) Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain". Stored only when http_method is "POST" — the API clears it otherwise, so setting it beside a GET or HEAD is rejected at plan time. https only: the other protocols reject it at plan time too.
+- `custom_body` (String, Sensitive) Request body for POST requests, up to 64KB. Stored only when http_method is "POST" — the API clears it otherwise, so setting it beside a GET or HEAD is rejected at plan time. https only: the other protocols reject it at plan time too.
+- `custom_headers` (Map of String, Sensitive) Custom HTTP headers as key-value pairs. Up to 20 headers; names may contain only ASCII letters, digits, hyphens and underscores, and values may not contain a NUL byte, carriage return or line feed, or exceed 4KB. https only: the other protocols reject it at plan time. Marked sensitive: this is where an Authorization header for the monitored endpoint goes.
+- `dns_expected_records` (List of String) Expected DNS record values. Up to 50 records of at most 2048 characters each, and at most 8192 characters in total once joined with CRLF line endings. A record may not contain a NUL byte or a line break, and must not be blank or carry leading or trailing whitespace — the API accepts those and then never matches them. Set to an empty list to pin no expectation. Leaving the attribute out of the configuration is not "let the server decide": it clears the pin on every apply, including the baseline the probe auto-seeds after a monitor's first successful check. That seed is only ever written once, so it is not recreated. Pin the records explicitly if you want them, or accept that a Terraform-managed dns monitor has no expectation unless this attribute sets one.
 - `dns_record_type` (String) DNS record type to query (required for dns protocol): "A", "AAAA", "CNAME", "MX", "TXT", "NS".
 - `expected_status_codes` (List of Number) Expected HTTP status codes. 1-50 codes, each between 100 and 599. An empty list is rejected because it would match nothing. Defaults to [200] on create; because the value is computed, removing it later keeps the last applied codes rather than resetting to the default.
 - `follow_redirects` (Boolean) Whether to follow HTTP redirects.
-- `hostname` (String) Hostname to monitor (required for tcp/icmp protocols).
-- `http_method` (String) HTTP method: "GET", "HEAD", or "POST".
-- `interval_seconds` (Number) Check interval in seconds.
+- `hostname` (String) Hostname to monitor (required for tcp, icmp and dns protocols).
+- `http_method` (String) HTTP method: "GET", "HEAD", or "POST". Defaults to "GET"; custom_body and content_type are stored only when this is "POST".
+- `interval_seconds` (Number) Check interval in seconds. The organization's plan sets the floor, which only the API knows, so a too-frequent interval is rejected at apply time.
 - `ip_version` (String) IP version: "auto", "ipv4", or "ipv6".
 - `keyword` (String) Keyword that must be present in the response body. https only: the other protocols reject it at plan time.
 - `keyword_absent` (Boolean) If true, alert when the keyword IS found (absent check).
 - `paused` (Boolean) Whether the monitor is paused.
 - `port` (Number) Port to monitor (required for tcp protocol). 1-65535.
 - `probe_region_ids` (List of Number) Probe region IDs to check from. Defaults to all active regions.
-- `recovery_count` (Number) Number of successful checks required to transition from down to up.
-- `timeout_seconds` (Number) Timeout in seconds (max 15).
+- `recovery_count` (Number) Number of successful checks required to transition from down to up. 1-10.
+- `timeout_seconds` (Number) Timeout in seconds. 1-15.
 - `url` (String) URL to monitor (required for https protocol).
 
 ### Read-Only

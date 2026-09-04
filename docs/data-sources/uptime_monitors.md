@@ -22,7 +22,7 @@ data "fivenines_uptime_monitors" "failing_https" {
   protocol = "https"
 }
 
-# Free-text search over name, URL and hostname.
+# Substring match on the monitor name. It does not search the URL or hostname.
 data "fivenines_uptime_monitors" "api" {
   query     = "api"
   order     = "name"
@@ -44,10 +44,10 @@ output "down_urls" {
 
 ### Optional
 
-- `direction` (String) Sort direction: "asc" or "desc".
-- `order` (String) Column to sort by. The API defines the sortable columns; an unsupported value is rejected by the API at refresh time rather than at plan time.
+- `direction` (String) Sort direction: "asc" or "desc". Defaults to "desc", newest first.
+- `order` (String) Column to sort by: "created_at", "updated_at" or "name". Defaults to "created_at".
 - `protocol` (String) Only return monitors using this protocol: "https", "tcp", "icmp" or "dns".
-- `query` (String) Free-text search across monitor name, URL and hostname (the API's `q` filter).
+- `query` (String) Case-insensitive substring match on the monitor name (the API's `q` filter). It does not search the URL or hostname.
 - `status` (String) Only return monitors in this status: "unknown", "up", "down", "paused" or "recovering".
 - `updated_since` (String) Only return monitors updated at or after this ISO8601 timestamp.
 

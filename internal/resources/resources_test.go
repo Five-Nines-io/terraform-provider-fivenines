@@ -786,14 +786,23 @@ func TestMissingProtocolAttributes(t *testing.T) {
 			want:   []string{"hostname"},
 		},
 		{
-			name:   "dns without record type",
+			name:   "dns without hostname or record type",
 			config: uptimeMonitorModel{Protocol: types.StringValue("dns")},
-			want:   []string{"dns_record_type"},
+			want:   []string{"hostname", "dns_record_type"},
 		},
 		{
-			name: "dns with record type",
+			name: "dns with record type but no hostname",
 			config: uptimeMonitorModel{
 				Protocol:      types.StringValue("dns"),
+				DNSRecordType: types.StringValue("A"),
+			},
+			want: []string{"hostname"},
+		},
+		{
+			name: "dns fully configured",
+			config: uptimeMonitorModel{
+				Protocol:      types.StringValue("dns"),
+				Hostname:      types.StringValue("example.com"),
 				DNSRecordType: types.StringValue("A"),
 			},
 		},
@@ -808,7 +817,7 @@ func TestMissingProtocolAttributes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := missingProtocolAttributes(tt.config)
+			got := missingProtocolAttributes(protocolScopedValues(tt.config), tt.config.Protocol)
 			if len(got) != len(tt.want) {
 				t.Fatalf("expected missing %v, got %v", tt.want, got)
 			}
@@ -973,7 +982,7 @@ func TestForbiddenProtocolAttributes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := forbiddenProtocolAttributes(tt.config)
+			got := forbiddenProtocolAttributes(protocolScopedValues(tt.config), tt.config.Protocol)
 			if len(got) != len(tt.want) {
 				t.Fatalf("expected %v, got %v", tt.want, got)
 			}
@@ -999,6 +1008,14 @@ func TestProtocolTablesResolve(t *testing.T) {
 			}
 		}
 	}
+	// postOnly is a third table indexed against the same map. The comma-ok
+	// guarding that lookup is unreachable while the two agree, so nothing else
+	// would catch them drifting apart before a nil interface panics mid-plan.
+	for _, name := range postOnly {
+		if _, ok := values[name]; !ok {
+			t.Errorf("postOnly references %q, which protocolScopedValues does not provide", name)
+		}
+	}
 }
 
 func TestMapUptimeMonitorToState_KeywordEmptyVsNull(t *testing.T) {
@@ -1019,6 +1036,30 @@ func TestMapUptimeMonitorToState_KeywordEmptyVsNull(t *testing.T) {
 	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", Keyword: "healthy"}, state)
 	if state.Keyword.ValueString() != "healthy" {
 		t.Errorf("expected healthy, got %q", state.Keyword.ValueString())
+	}
+}
+
+func TestMapUptimeMonitorToState_CustomBodyEmptyVsNull(t *testing.T) {
+	// `custom_body = ""` is a legal config, and CreateUptimeMonitorInput drops it
+	// via omitempty, so the API answers null on the very first apply. Without the
+	// carve-out the plan holds "" and state gets null — "Provider produced
+	// inconsistent result after apply" before the resource ever exists.
+	state := &uptimeMonitorModel{CustomBody: types.StringValue("")}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", CustomBody: ""}, state)
+	if state.CustomBody.IsNull() {
+		t.Error("an explicitly empty custom_body must stay an empty string, not become null")
+	}
+
+	state = &uptimeMonitorModel{CustomBody: types.StringNull()}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", CustomBody: ""}, state)
+	if !state.CustomBody.IsNull() {
+		t.Errorf("an unset custom_body must be null, got %q", state.CustomBody.ValueString())
+	}
+
+	state = &uptimeMonitorModel{CustomBody: types.StringNull()}
+	mapUptimeMonitor(t, &client.UptimeMonitor{ID: "mon-uuid", CustomBody: `{"ping":true}`}, state)
+	if state.CustomBody.ValueString() != `{"ping":true}` {
+		t.Errorf(`expected {"ping":true}, got %q`, state.CustomBody.ValueString())
 	}
 }
 

@@ -78,19 +78,139 @@
 - If the server DERIVES any of them on create (`content_type` from a POST body,
   `port` from a `https://host:8443/` URL) the value lands in state while the plan
   holds a known null — the same inconsistent-result error, on the first apply
-- Unverified either way; needs one live create to confirm before changing
+- **Both named examples are disproven**, read out of the server 2026-09-04 rather
+  than guessed at. `UptimeMonitor`'s entire write path is six callbacks
+  (`normalize_expected_status_codes`, `normalize_dns_expected_records`,
+  `stamp_dns_expected_records_provenance`, `truncate_last_error`,
+  `reset_recovery_on_config_change`, `clear_body_unless_post`) plus the
+  controller's `create`, and not one of them assigns `port` or `content_type`.
+  The only create-side derivations are `probe_region_ids` (defaulted to every
+  active region) and `confirmation_count` (clamped down to the region count),
+  both Computed in the provider, so they absorb the server's value
+- The failure mode is real but runs the OTHER way, and #9 fixed it:
+  `clear_body_unless_post` NILS `custom_body` and `content_type` for any method
+  but POST, so a config setting either beside the GET default planned a known
+  value the apply dropped. `postOnly` in `ValidateConfig` now rejects that pair at
+  plan time, the way `protocolForbidden` does for the protocol axis
+- Residual: the create-side `omitempty` asymmetry is still there and is believed
+  harmless (nothing derives those fields). The update side turned out NOT to be —
+  see the next item, fixed in #9 — so do not close this one on "one live create"
+  alone; the failing case was an update that removes an attribute
 - Found by: /ship adversarial review, 2026-09-01
+
+### ~~`nil` does not clear an array or hash key — strong params drops it~~
+- Fixed in #9. `UpdateUptimeMonitorInput` now splits the protocol-scoped fields by
+  type: the five SCALARS keep the no-`omitempty` convention (a nil pointer
+  marshals as JSON null, and `NilClass` is a Rails permitted scalar, so the clear
+  lands), while `dns_expected_records` and `custom_headers` regained `omitempty`
+  and are ALWAYS assigned a real collection by `Update` — an empty one to clear
+- Why the old shape was wrong: `monitor_params` permits those two as
+  `dns_expected_records: []` and `custom_headers: {}`, and strong params'
+  `hash_filter` skips a null on a collection key. The PATCH was accepted, the
+  stored value survived, and the API kept echoing records the plan said were null
+  → "Provider produced inconsistent result after apply". The server's swagger
+  says it verbatim: "NOT nullable, which is the difference that matters on a
+  PATCH; strong params drops an explicit null sent to an array key, so it is a
+  silent no-op that leaves the stored expectation in place"
+- The tag-policy test could not catch this — it classifies by JSON tag, and
+  clear-with-empty-collection is the same tag shape as preserve-on-nil. It gained
+  a `clearsEmpty` classification recording that, with the real assertion in
+  `TestUptimeMonitorResource_Update` and `TestClient_UpdateUptimeMonitor_*`
+- Found by: /ship red team, 2026-09-04
+
+### `dns_expected_records` clears the probe's auto-seeded baseline
+- Now that update sends `[]` rather than a null the server drops (fixed above), a
+  dns monitor whose config omits `dns_expected_records` actively clears the pin
+  on every apply — including the baseline `Uptime::ResultProcessorJob` auto-seeds
+  after the monitor's first successful check. The seed is gated on
+  `dns_record_events.none?`, so it is never written again
+- It converges and is strictly better than the pre-fix behaviour (which failed the
+  apply outright), and it is what Optional-only means in Terraform. But the
+  operator sees a phantom "will be removed" diff once, and loses the auto-detect
+- Option: make the attribute Optional+Computed, the shape `probe_region_ids` and
+  `expected_status_codes` already use for server-derived values — an unset config
+  would adopt the seed, with `[]` still meaning "clear". That trades away
+  clear-on-remove, so it wants its own PR and its own drift tests
+- Documented in the attribute description for now
+- Found by: /ship api-contract + red team, 2026-09-04
+
+### The ETag race is now destructive, not just loud
+- The existing "Update costs a round trip it cannot use" item (above) notes the
+  If-Match window is effectively zero. #9 changed what a lost update COSTS:
+  before, a plan holding `custom_headers = null` sent a JSON null that strong
+  params dropped, so a concurrent dashboard edit survived and the apply failed
+  loudly with "inconsistent result after apply". Now the same race sends `{}`
+  and deletes those headers silently
+- If the deleted headers carried the monitored endpoint's Authorization value,
+  the monitor starts getting 401s and pages as a false DOWN
+- The fix is the one already written up above (persist the ETag from Read/Create
+  in `resp.Private` and pass it to the PATCH), which gives the precondition a
+  real window. This entry records why it matters more than it used to
+- Found by: /ship adversarial review, 2026-09-04
+
+### `postOnly` does not fire when either side is unknown at plan time
+- `postOnlyAttributes` skips an unknown `http_method`, and `setAttributes` skips
+  an unknown `custom_body` — correct for a plan-time rule (an unresolved
+  reference may still be POST), but it means the guard is bypassed when either
+  value comes from a reference. A known `custom_body` beside an `http_method`
+  that resolves to GET during apply still produces "inconsistent result after
+  apply", the error the rule exists to pre-empt
+- Fix: repeat the check in Create/Update, after Terraform has resolved
+  everything, so the failure is a named diagnostic instead of a generic one.
+  Deliberately not done in #9: it duplicates the rule in a second place, and two
+  copies of a cross-field rule drift
+- Found by: /ship Codex adversarial pass, 2026-09-04
+
+### Sensitive attributes elsewhere still use value-echoing validators
+- `stringvalidator.RegexMatches` (and every library string validator) formats its
+  diagnostic through `validatordiag`, which appends `, got: <value>`. Terraform
+  does NOT redact a Sensitive attribute inside a provider diagnostic, so any
+  Sensitive attribute guarded by one can print a credential to stdout and CI logs
+- #9 fixed the one live instance (`custom_headers`) with `NoControlCharacters`,
+  which reports the offending character class and position and never the value
+- Residual: `instanceSecret()` in `internal/resources/instance_resource.go` builds
+  all ten Sensitive write-only instance credentials with `RegexMatches`. Not
+  exploitable today — the pattern only rejects whitespace-only input, so the
+  echoed value can never be a real secret — but tightening that pattern to a
+  format check re-creates the original bug
+- Fix: a value-free `NotBlank()` in the `NoControlCharacters` style, applied to
+  every Sensitive attribute in the provider
+- Found by: /ship security specialist, 2026-09-04
+
+### ~~`custom_body = ""` can never converge~~
+- Fixed in #9. `mapToState` gained the `isKnownEmptyString` carve-out `keyword`
+  already had, so a pinned empty string survives the round trip instead of
+  flipping to null on the first apply
+- Found by: /ship red team, 2026-09-04
+
+### ~~A null element inside a string list applies a value the plan never promised~~
+- Fixed in #9. `NoNullElements()` / `NoNullValues()` reject a null entry in
+  `dns_expected_records` and `custom_headers` at plan time
+- The framework's element validators all skip nulls by contract, so nothing else
+  could catch it: a null passed every check and then marshalled as `""`, which the
+  API stored and echoed back
+- Found by: /ship testing specialist, 2026-09-04
 
 
 ### Index filters are trusted without verification
 - The data source forwards `status`/`protocol`/`q`/`updated_since`/`order`/
-  `direction` and consumes the result verbatim. A server that ignores an
-  unrecognised param returns every monitor with no error, and the result feeds
-  `for_each`
-- `status` and `protocol` are present on every returned object, so the provider
-  could cheaply assert the server honoured them
-- `updated_since` has no RFC3339 validator, so a malformed timestamp the server
-  ignores yields a silent superset
+  `direction` and consumes the result verbatim, and the result feeds `for_each`
+- **The silent-superset premise this item was written on is false**, verified
+  against the server while re-speccing #9. `Api::Concerns::Filtering` rejects any
+  key outside the FilterSet with a 400 and the accepted list
+  (`code: "unknown_parameter"`), and `IndexFilters::Since` 400s a `updated_since`
+  it cannot parse rather than ignoring it. Both live in the shared filter
+  machinery, so they hold for every index below, not just this one. A mistyped
+  filter is a loud apply-time error, never "there are none"
+- What is left is the narrower gap: an unrecognised value is a round trip and an
+  opaque 400 where it could have been a plan-time message. `status` and
+  `protocol` are present on every returned object, so the provider could also
+  cheaply assert the server honoured the filters it did accept
+- ~~The uptime monitors `order` is unenumerated~~: fixed in #9 — the server
+  sortable set is `created_at`/`updated_at`/`name` (`IndexFilters::UPTIME_MONITORS`,
+  and the swagger enum agrees), so it carries a `OneOf` like the rest. Its `q`
+  description was wrong too: `Search.new("q", columns: %i[name])` matches the
+  monitor NAME only, not the url or hostname the docs advertised
 - `fivenines_host_groups` (#25) forwards `q`/`updated_since`/`order`/`direction`
   the same way. `order`/`direction` are enumerated so they are validated at plan
   time, but `q` and `updated_since` are not, and `name` is present on every
@@ -611,13 +731,12 @@
 - Fix: optional `limit`, threaded into the ListXOptions struct, stopping the walk
   once `len(all) >= limit` and sizing per_page as `min(100, limit)`
 
-### dns monitors may also require hostname
-- `protocolRequirements` maps dns to `{dns_record_type}` only, but a DNS monitor
-  has nothing to query without a hostname, and the repo's own example sets one
-- Not added in #9 because the issue only specified `dns_record_type` and it is
-  unclear whether the API accepts `url` for dns; a wrong guess false-rejects
-  valid configs at plan time
-- Fix: confirm against the server-side validation, then add `hostname`
+### ~~dns monitors may also require hostname~~
+- Fixed in #9. `protocolRequirements` maps dns to `{hostname, dns_record_type}`,
+  confirmed against the server rather than guessed: `validates :hostname,
+  presence: true, if: :dns?` runs on every dns write, so omitting it only moved
+  the failure from plan time to a 422 on apply. The open question about `url`
+  resolved the same way — dns validates `hostname`, never `url`
 
 ## Recently closed
 
@@ -678,7 +797,9 @@
 - **Cross-field validation** — tasks in #8 (`ValidateConfig` enforces cron ⇒
   `schedule`, interval ⇒ `interval_seconds`), uptime monitors in #9
   (`ValidateConfig` + the `protocolRequirements` table: https ⇒ `url`, tcp ⇒
-  `hostname`+`port`, icmp ⇒ `hostname`, dns ⇒ `dns_record_type`), status pages in
+  `hostname`+`port`, icmp ⇒ `hostname`, dns ⇒ `hostname`+`dns_record_type`, plus
+  the `postOnly` rule on the second axis: `custom_body`/`content_type` ⇒
+  `http_method = "POST"`), status pages in
   #12 (`ValidateConfig` enforces items[].section ⇒ declared in `sections`), and
   integrations in #15 (`ValidateConfig` + the `integrationRules` table: webhook ⇒
   `url`, pagerduty ⇒ `name`+`routing_key`, pushover ⇒ `name`+`user_key`+

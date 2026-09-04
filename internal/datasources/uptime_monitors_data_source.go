@@ -73,20 +73,23 @@ func (d *uptimeMonitorsDataSource) Schema(_ context.Context, _ datasource.Schema
 				},
 			},
 			"query": schema.StringAttribute{
-				Description: "Free-text search across monitor name, URL and hostname (the API's `q` filter).",
-				Optional:    true,
+				Description: "Case-insensitive substring match on the monitor name (the API's `q` filter). " +
+					"It does not search the URL or hostname.",
+				Optional: true,
 			},
 			"updated_since": schema.StringAttribute{
 				Description: "Only return monitors updated at or after this ISO8601 timestamp.",
 				Optional:    true,
 			},
 			"order": schema.StringAttribute{
-				Description: "Column to sort by. The API defines the sortable columns; an unsupported " +
-					"value is rejected by the API at refresh time rather than at plan time.",
-				Optional: true,
+				Description: `Column to sort by: "created_at", "updated_at" or "name". Defaults to "created_at".`,
+				Optional:    true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("created_at", "updated_at", "name"),
+				},
 			},
 			"direction": schema.StringAttribute{
-				Description: `Sort direction: "asc" or "desc".`,
+				Description: `Sort direction: "asc" or "desc". Defaults to "desc", newest first.`,
 				Optional:    true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("asc", "desc"),

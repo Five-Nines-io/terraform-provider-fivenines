@@ -1427,12 +1427,13 @@ func TestClient_UpdateUptimeMonitor_SendsNullForUnsetProtocolFields(t *testing.T
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Protocol-scoped fields carry no omitempty: a nil pointer must reach the API as
-	// an explicit null so switching protocol clears the previous protocol's values.
+	// The protocol-scoped SCALARS carry no omitempty: a nil pointer must reach the
+	// API as an explicit null so switching protocol clears the previous protocol's
+	// values. NilClass is a Rails permitted scalar, so the null survives strong
+	// params and the assignment goes through.
 	monitor := gotBody["uptime_monitor"].(map[string]interface{})
 	for _, key := range []string{
-		"dns_expected_records", "port", "keyword", "dns_record_type",
-		"custom_headers", "custom_body", "content_type",
+		"port", "keyword", "dns_record_type", "custom_body", "content_type",
 	} {
 		value, present := monitor[key]
 		if !present {
@@ -1441,6 +1442,17 @@ func TestClient_UpdateUptimeMonitor_SendsNullForUnsetProtocolFields(t *testing.T
 		}
 		if value != nil {
 			t.Errorf("expected %s to be null, got %v", key, value)
+		}
+	}
+	// The two COLLECTION keys must NOT ride that convention. Strong params drops a
+	// null on a key permitted as `dns_expected_records: []` / `custom_headers: {}`,
+	// so a null there is accepted and silently ignored — the stored value survives
+	// and the API keeps echoing values the plan says are null. The caller clears
+	// them by sending an empty collection instead, so a nil pointer at this level
+	// means "not managed in this request" and must be omitted rather than nulled.
+	for _, key := range []string{"dns_expected_records", "custom_headers"} {
+		if value, present := monitor[key]; present {
+			t.Errorf("expected %s to be omitted when nil, got %v — a null here is a silent no-op", key, value)
 		}
 	}
 	// Fields the plan always carries a value for stay omitempty and must not appear.

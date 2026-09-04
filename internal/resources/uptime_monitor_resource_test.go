@@ -3,6 +3,7 @@ package resources
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,14 +120,26 @@ func TestUptimeMonitorValidateConfig(t *testing.T) {
 			wantPaths: []string{"hostname"},
 		},
 		{
-			name:      "dns without record type",
+			name:      "dns without hostname or record type",
 			config:    map[string]tftypes.Value{"protocol": tftypes.NewValue(tftypes.String, "dns")},
-			wantPaths: []string{"dns_record_type"},
+			wantPaths: []string{"hostname", "dns_record_type"},
 		},
 		{
-			name: "dns with record type",
+			// The name being resolved is as required as the record type: the
+			// server validates hostname presence on every dns write, so a config
+			// carrying only the record type would 422 on apply.
+			name: "dns with record type but no hostname",
 			config: map[string]tftypes.Value{
 				"protocol":        tftypes.NewValue(tftypes.String, "dns"),
+				"dns_record_type": tftypes.NewValue(tftypes.String, "A"),
+			},
+			wantPaths: []string{"hostname"},
+		},
+		{
+			name: "dns fully configured",
+			config: map[string]tftypes.Value{
+				"protocol":        tftypes.NewValue(tftypes.String, "dns"),
+				"hostname":        tftypes.NewValue(tftypes.String, "example.com"),
 				"dns_record_type": tftypes.NewValue(tftypes.String, "A"),
 			},
 		},
@@ -139,6 +152,16 @@ func TestUptimeMonitorValidateConfig(t *testing.T) {
 			// A protocol behind an unresolved reference must not be guessed at.
 			name:   "unknown protocol short-circuits",
 			config: map[string]tftypes.Value{"protocol": tftypes.NewValue(tftypes.String, tftypes.UnknownValue)},
+		},
+		{
+			// Rails `presence: true` rejects "" as well as nil, so a variable that
+			// collapsed to blank must fail at plan time, not as a 422 on apply.
+			name: "an empty string url is a missing url",
+			config: map[string]tftypes.Value{
+				"protocol": tftypes.NewValue(tftypes.String, "https"),
+				"url":      tftypes.NewValue(tftypes.String, ""),
+			},
+			wantPaths: []string{"url"},
 		},
 		{
 			// The requirement is on the config being resolvable, not resolved.
@@ -179,6 +202,256 @@ func TestUptimeMonitorValidateConfig(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The API's clear_body_unless_post callback nils custom_body and content_type
+// for anything but a POST, so a config that sets either beside a GET plans a
+// known value the apply silently drops. The trap is the schema default: leaving
+// http_method out means GET.
+func TestUptimeMonitorValidateConfig_PostOnlyAttributes(t *testing.T) {
+	ctx := context.Background()
+	s := uptimeMonitorSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	https := tftypes.NewValue(tftypes.String, "https")
+	url := tftypes.NewValue(tftypes.String, "https://example.com")
+
+	tests := []struct {
+		name      string
+		config    map[string]tftypes.Value
+		wantPaths []string
+	}{
+		{
+			name: "body and content type on a POST",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"http_method":  tftypes.NewValue(tftypes.String, "POST"),
+				"custom_body":  tftypes.NewValue(tftypes.String, `{"ping":true}`),
+				"content_type": tftypes.NewValue(tftypes.String, "application/json"),
+			},
+		},
+		{
+			name: "body on an explicit GET",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"http_method": tftypes.NewValue(tftypes.String, "GET"),
+				"custom_body": tftypes.NewValue(tftypes.String, `{"ping":true}`),
+			},
+			wantPaths: []string{"custom_body"},
+		},
+		{
+			// The easy mistake: http_method is Optional+Computed with a GET
+			// default, so omitting it is not "unset", it is GET.
+			name: "body with http_method left out entirely",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"custom_body": tftypes.NewValue(tftypes.String, `{"ping":true}`),
+			},
+			wantPaths: []string{"custom_body"},
+		},
+		{
+			name: "both attributes on a HEAD",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"http_method":  tftypes.NewValue(tftypes.String, "HEAD"),
+				"custom_body":  tftypes.NewValue(tftypes.String, "x"),
+				"content_type": tftypes.NewValue(tftypes.String, "text/plain"),
+			},
+			wantPaths: []string{"custom_body", "content_type"},
+		},
+		{
+			// A method behind an unresolved reference may still be POST.
+			name: "unknown http_method short-circuits",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"http_method": tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+				"custom_body": tftypes.NewValue(tftypes.String, "x"),
+			},
+		},
+		{
+			name: "no post-only attributes set",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"http_method": tftypes.NewValue(tftypes.String, "GET"),
+			},
+		},
+		{
+			// content_type alone is just as lossy: the same callback nils both,
+			// so a Content-Type pinned beside a GET is dropped on the way in.
+			name: "content type alone on a GET",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"http_method":  tftypes.NewValue(tftypes.String, "GET"),
+				"content_type": tftypes.NewValue(tftypes.String, "application/json"),
+			},
+			wantPaths: []string{"content_type"},
+		},
+		{
+			// The body itself can be the unresolved half — jsonencode of a value
+			// computed elsewhere. An unknown is not yet a value the apply could
+			// drop, so it is not yet something to refuse.
+			name: "unknown custom_body is not reported",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"http_method": tftypes.NewValue(tftypes.String, "GET"),
+				"custom_body": tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+			},
+		},
+		{
+			// The post-only rule reads http_method and nothing else, so an
+			// unresolved protocol reference must not disable it: that config
+			// still applies a GET, and still has its body dropped.
+			name: "an unknown protocol does not disable the post-only rule",
+			config: map[string]tftypes.Value{
+				"protocol":    tftypes.NewValue(tftypes.String, tftypes.UnknownValue),
+				"custom_body": tftypes.NewValue(tftypes.String, "x"),
+			},
+			wantPaths: []string{"custom_body"},
+		},
+		{
+			// tcp forbids both outright, so the protocol rule reports them and
+			// the post-only rule stays quiet rather than doubling up.
+			name: "not reported twice on a protocol that forbids them",
+			config: map[string]tftypes.Value{
+				"protocol":    tftypes.NewValue(tftypes.String, "tcp"),
+				"hostname":    tftypes.NewValue(tftypes.String, "db.example.com"),
+				"port":        tftypes.NewValue(tftypes.Number, 5432),
+				"custom_body": tftypes.NewValue(tftypes.String, "x"),
+			},
+			wantPaths: []string{"custom_body"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := resource.ValidateConfigRequest{
+				Config: tfsdk.Config{Schema: s, Raw: nullObjectValue(t, objType, tt.config)},
+			}
+			resp := &resource.ValidateConfigResponse{}
+			(&uptimeMonitorResource{}).ValidateConfig(ctx, req, resp)
+
+			got := errorPaths(resp.Diagnostics)
+			if len(got) != len(tt.wantPaths) {
+				t.Fatalf("expected errors on %v, got %v (%v)", tt.wantPaths, got, resp.Diagnostics.Errors())
+			}
+			for i := range got {
+				if got[i] != tt.wantPaths[i] {
+					t.Errorf("expected errors on %v, got %v", tt.wantPaths, got)
+				}
+			}
+		})
+	}
+}
+
+// The detail has to name the method that will actually be applied, because the
+// trap is a method the config never mentions. Asserting only the blamed path
+// leaves effectiveHTTPMethod free to return anything at all: both of its
+// branches run under the table above without either message being read.
+func TestUptimeMonitorValidateConfig_PostOnlyDiagnosticNamesTheMethod(t *testing.T) {
+	ctx := context.Background()
+	s := uptimeMonitorSchema(t)
+	objType := s.Type().TerraformType(ctx)
+
+	https := tftypes.NewValue(tftypes.String, "https")
+	url := tftypes.NewValue(tftypes.String, "https://example.com")
+
+	tests := []struct {
+		name       string
+		config     map[string]tftypes.Value
+		wantDetail string
+	}{
+		{
+			// Nothing in the HCL says GET, so the message has to say where it
+			// came from or the reader goes hunting for a line they never wrote.
+			name: "an omitted method is named as the schema default",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"custom_body": tftypes.NewValue(tftypes.String, "x"),
+			},
+			wantDetail: "clears it for GET (the default, since http_method is unset)",
+		},
+		{
+			name: "an explicit method is quoted back verbatim",
+			config: map[string]tftypes.Value{
+				"protocol": https, "url": url,
+				"http_method": tftypes.NewValue(tftypes.String, "HEAD"),
+				"custom_body": tftypes.NewValue(tftypes.String, "x"),
+			},
+			wantDetail: `clears it for "HEAD"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := resource.ValidateConfigRequest{
+				Config: tfsdk.Config{Schema: s, Raw: nullObjectValue(t, objType, tt.config)},
+			}
+			resp := &resource.ValidateConfigResponse{}
+			(&uptimeMonitorResource{}).ValidateConfig(ctx, req, resp)
+
+			errs := resp.Diagnostics.Errors()
+			if len(errs) != 1 {
+				t.Fatalf("expected exactly one error, got %v", errs)
+			}
+			if got := errs[0].Summary(); got != "Attribute requires a POST request" {
+				t.Errorf("unexpected summary: %q", got)
+			}
+			if got := errs[0].Detail(); !strings.Contains(got, tt.wantDetail) {
+				t.Errorf("detail %q does not mention %q", got, tt.wantDetail)
+			}
+		})
+	}
+}
+
+// custom_headers is Sensitive because it carries an Authorization header, and
+// Terraform does NOT redact a sensitive value inside a provider diagnostic. The
+// library's RegexMatches formats "Attribute %s %s, got: %s" with the raw value,
+// so using it here printed the bearer token on every plan. Assert the message
+// names the offence without ever quoting the value.
+func TestUptimeMonitorSchema_CustomHeaderDiagnosticDoesNotLeakTheValue(t *testing.T) {
+	s := uptimeMonitorSchema(t)
+	attribute := s.Attributes["custom_headers"].(rschema.MapAttribute)
+
+	const secret = "Bearer sk_live_SUPERSECRET_abcdef123456"
+	diags := validateMap(t, attribute.MapValidators(), "custom_headers",
+		stringMap(t, map[string]string{"Authorization": secret + "\n"}))
+
+	if !diags.HasError() {
+		t.Fatal("a trailing newline in a header value must be rejected")
+	}
+	for _, d := range diags.Errors() {
+		message := d.Summary() + " " + d.Detail()
+		if strings.Contains(message, secret) {
+			t.Errorf("diagnostic leaked the header value: %q", message)
+		}
+		if !strings.Contains(message, "line feed") {
+			t.Errorf("diagnostic should name the offending character, got: %q", message)
+		}
+	}
+}
+
+// A null entry clears every element validator by contract (they all skip nulls)
+// and then marshals as "" — a value the plan never promised, which the API
+// stores and echoes back.
+func TestUptimeMonitorSchema_RejectsNullEntries(t *testing.T) {
+	listValidators := listValidatorsFor(t, "dns_expected_records")
+	if diags := validateList(t, listValidators, "dns_expected_records",
+		mixedStringList(t, types.StringValue("1.2.3.4"), types.StringNull())); !diags.HasError() {
+		t.Error("a null dns_expected_records entry must be rejected at plan time")
+	}
+	if diags := validateList(t, listValidators, "dns_expected_records",
+		stringList(t, "1.2.3.4")); diags.HasError() {
+		t.Errorf("a list with no nulls must pass, got %v", diags.Errors())
+	}
+
+	s := uptimeMonitorSchema(t)
+	mapValidators := s.Attributes["custom_headers"].(rschema.MapAttribute).MapValidators()
+	nullValued := types.MapValueMust(types.StringType, map[string]attr.Value{
+		"X-Trace": types.StringNull(),
+	})
+	if diags := validateMap(t, mapValidators, "custom_headers", nullValued); !diags.HasError() {
+		t.Error("a null custom_headers value must be rejected at plan time")
 	}
 }
 
@@ -306,10 +579,29 @@ func TestUptimeMonitorSchema_DNSExpectedRecordsValidators(t *testing.T) {
 		// pinned expectation, so it must stay valid.
 		{name: "empty list is allowed", value: stringList(t)},
 		{name: "a few records", value: stringList(t, "1.2.3.4", "5.6.7.8")},
-		{name: "empty string record", value: stringList(t, "")},
+		// The API stores a blank record and then never matches it, so the plan is
+		// the only place it can be caught.
+		{name: "empty string record", value: stringList(t, ""), wantError: true},
+		{name: "whitespace-only record", value: stringList(t, "   "), wantError: true},
+		{name: "record with trailing whitespace", value: stringList(t, "1.2.3.4 "), wantError: true},
+		{name: "record with a leading newline from a split", value: stringList(t, "1.2.3.4", "\n"), wantError: true},
 		{name: "record at the length cap", value: stringList(t, strings.Repeat("a", 2048))},
 		{name: "record over the length cap", value: stringList(t, strings.Repeat("a", 2049)), wantError: true},
 		{name: "over the size cap", value: stringList(t, tooMany...), wantError: true},
+		// The per-record cap is characters, matching the API's Ruby String#length.
+		// Measured in bytes a 2048-rune multi-byte record is 6144 and would be
+		// rejected here while the API accepts it.
+		{name: "multi-byte record at the character cap", value: stringList(t, strings.Repeat("é", 2048))},
+		{name: "multi-byte record over the character cap", value: stringList(t, strings.Repeat("é", 2049)), wantError: true},
+		// A NUL is refused by Postgres inside jsonb — past every server validation,
+		// so it is a 500 rather than a 422 unless it is caught first.
+		{name: "record with a NUL byte", value: stringList(t, "1.2.3.4\x00"), wantError: true},
+		{name: "record with a line feed", value: stringList(t, "1.2.3.4\nsecond"), wantError: true},
+		{name: "record with a carriage return", value: stringList(t, "1.2.3.4\rsecond"), wantError: true},
+		// Under every per-record rule, over the joined blob cap: 50 x 160
+		// characters is 8000 of payload and 8098 once the CRLFs are counted.
+		{name: "under the joined cap", value: stringList(t, joinedRecords(50, 160)...)},
+		{name: "over the joined cap", value: stringList(t, joinedRecords(50, 165)...), wantError: true},
 	}
 
 	for _, tt := range tests {
@@ -319,6 +611,366 @@ func TestUptimeMonitorSchema_DNSExpectedRecordsValidators(t *testing.T) {
 				t.Errorf("expected error=%v, got %v", tt.wantError, diags.Errors())
 			}
 		})
+	}
+}
+
+// joinedRecords builds count records of width characters each, all under the
+// per-record cap, for exercising the CRLF-joined total.
+func joinedRecords(count, width int) []string {
+	records := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		records = append(records, strings.Repeat("a", width))
+	}
+	return records
+}
+
+func validateInt64(t *testing.T, validators []validator.Int64, name string, value types.Int64) diag.Diagnostics {
+	t.Helper()
+	req := validator.Int64Request{
+		Path:           path.Root(name),
+		PathExpression: path.MatchRoot(name),
+		ConfigValue:    value,
+	}
+	resp := &validator.Int64Response{}
+	for _, v := range validators {
+		v.ValidateInt64(context.Background(), req, resp)
+	}
+	return resp.Diagnostics
+}
+
+func int64ValidatorsFor(t *testing.T, name string) []validator.Int64 {
+	t.Helper()
+	s := uptimeMonitorSchema(t)
+	attribute, ok := s.Attributes[name].(rschema.Int64Attribute)
+	if !ok {
+		t.Fatalf("expected %s to be an Int64Attribute, got %T", name, s.Attributes[name])
+	}
+	validators := attribute.Int64Validators()
+	if len(validators) == 0 {
+		t.Fatalf("expected %s to declare validators", name)
+	}
+	return validators
+}
+
+func validateMap(t *testing.T, validators []validator.Map, name string, value types.Map) diag.Diagnostics {
+	t.Helper()
+	req := validator.MapRequest{
+		Path:           path.Root(name),
+		PathExpression: path.MatchRoot(name),
+		ConfigValue:    value,
+	}
+	resp := &validator.MapResponse{}
+	for _, v := range validators {
+		v.ValidateMap(context.Background(), req, resp)
+	}
+	return resp.Diagnostics
+}
+
+func validateString(t *testing.T, validators []validator.String, name string, value types.String) diag.Diagnostics {
+	t.Helper()
+	req := validator.StringRequest{
+		Path:           path.Root(name),
+		PathExpression: path.MatchRoot(name),
+		ConfigValue:    value,
+	}
+	resp := &validator.StringResponse{}
+	for _, v := range validators {
+		v.ValidateString(context.Background(), req, resp)
+	}
+	return resp.Diagnostics
+}
+
+func stringMap(t *testing.T, pairs map[string]string) types.Map {
+	t.Helper()
+	elems := make(map[string]attr.Value, len(pairs))
+	for k, v := range pairs {
+		elems[k] = types.StringValue(v)
+	}
+	return types.MapValueMust(types.StringType, elems)
+}
+
+// The API bounds these four, and every bound it rejects is an apply-time 422 the
+// provider can turn into a plan-time message for free.
+func TestUptimeMonitorSchema_NumericValidators(t *testing.T) {
+	tests := []struct {
+		attribute string
+		value     int64
+		wantError bool
+	}{
+		// timeout_seconds: greater_than 0, less_than_or_equal_to 15
+		{attribute: "timeout_seconds", value: 1},
+		{attribute: "timeout_seconds", value: 15},
+		{attribute: "timeout_seconds", value: 0, wantError: true},
+		{attribute: "timeout_seconds", value: 16, wantError: true},
+		// interval_seconds: greater_than 0, with a plan-dependent floor the API owns
+		{attribute: "interval_seconds", value: 1},
+		{attribute: "interval_seconds", value: 300},
+		{attribute: "interval_seconds", value: 0, wantError: true},
+		{attribute: "interval_seconds", value: -60, wantError: true},
+		// confirmation_count: greater_than 0
+		{attribute: "confirmation_count", value: 1},
+		{attribute: "confirmation_count", value: 0, wantError: true},
+		// recovery_count: greater_than 0, less_than_or_equal_to 10
+		{attribute: "recovery_count", value: 1},
+		{attribute: "recovery_count", value: 10},
+		{attribute: "recovery_count", value: 0, wantError: true},
+		{attribute: "recovery_count", value: 11, wantError: true},
+		// port: greater_than 0, less_than_or_equal_to 65535 (tcp only server-side,
+		// but the schema bound is unconditional). Pre-dates this sweep; included so
+		// the sweep is the one place every numeric bound on this resource is pinned.
+		{attribute: "port", value: 1},
+		{attribute: "port", value: 65535},
+		{attribute: "port", value: 0, wantError: true},
+		{attribute: "port", value: 65536, wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%s=%d", tt.attribute, tt.value), func(t *testing.T) {
+			validators := int64ValidatorsFor(t, tt.attribute)
+			diags := validateInt64(t, validators, tt.attribute, types.Int64Value(tt.value))
+			if diags.HasError() != tt.wantError {
+				t.Errorf("expected error=%v, got %v", tt.wantError, diags.Errors())
+			}
+		})
+	}
+
+	// Null and unknown reach every one of them and must never error: an unset
+	// attribute takes its default, and an unresolved reference is not a value yet.
+	for _, name := range []string{"timeout_seconds", "interval_seconds", "confirmation_count", "recovery_count", "port"} {
+		validators := int64ValidatorsFor(t, name)
+		for label, value := range map[string]types.Int64{
+			"null": types.Int64Null(), "unknown": types.Int64Unknown(),
+		} {
+			if diags := validateInt64(t, validators, name, value); diags.HasError() {
+				t.Errorf("%s %s should be skipped, got %v", name, label, diags.Errors())
+			}
+		}
+	}
+}
+
+func TestUptimeMonitorSchema_CustomHeadersValidators(t *testing.T) {
+	s := uptimeMonitorSchema(t)
+	attribute, ok := s.Attributes["custom_headers"].(rschema.MapAttribute)
+	if !ok {
+		t.Fatalf("expected custom_headers to be a MapAttribute, got %T", s.Attributes["custom_headers"])
+	}
+	validators := attribute.MapValidators()
+	if len(validators) == 0 {
+		t.Fatal("expected custom_headers to declare validators")
+	}
+
+	tooMany := make(map[string]string, 21)
+	for i := 0; i < 21; i++ {
+		tooMany[fmt.Sprintf("X-Header-%d", i)] = "v"
+	}
+	exactlyTwenty := make(map[string]string, 20)
+	for i := 0; i < 20; i++ {
+		exactlyTwenty[fmt.Sprintf("X-Header-%d", i)] = "v"
+	}
+
+	tests := []struct {
+		name      string
+		value     types.Map
+		wantError bool
+	}{
+		{name: "null is skipped", value: types.MapNull(types.StringType)},
+		{name: "unknown is skipped", value: types.MapUnknown(types.StringType)},
+		{name: "empty map", value: stringMap(t, map[string]string{})},
+		{name: "a normal header", value: stringMap(t, map[string]string{"Authorization": "Bearer t"})},
+		{name: "hyphens and underscores", value: stringMap(t, map[string]string{"X-Trace_Id": "abc"})},
+		{name: "value at the 4KB cap", value: stringMap(t, map[string]string{"X-Big": strings.Repeat("a", 4096)})},
+		{name: "value over the 4KB cap", value: stringMap(t, map[string]string{"X-Big": strings.Repeat("a", 4097)}), wantError: true},
+		// Bytes, matching the API's value_str.bytesize — unlike dns_expected_records,
+		// which the server caps in characters. Pinning both sides here stops a
+		// consistency "fix" to UTF8LengthAtMost from doubling the accepted size.
+		{name: "multi-byte value at the byte cap", value: stringMap(t, map[string]string{"X-Big": strings.Repeat("é", 2048)})},
+		{name: "multi-byte value over the byte cap", value: stringMap(t, map[string]string{"X-Big": strings.Repeat("é", 2049)}), wantError: true},
+		// A CR or LF in a header value is a response-splitting vector, which is
+		// why the API refuses it outright rather than escaping it.
+		{name: "value with a line feed", value: stringMap(t, map[string]string{"X-Bad": "a\nb"}), wantError: true},
+		{name: "value with a carriage return", value: stringMap(t, map[string]string{"X-Bad": "a\rb"}), wantError: true},
+		{name: "value with a NUL byte", value: stringMap(t, map[string]string{"X-Bad": "a\x00b"}), wantError: true},
+		{name: "name with a colon", value: stringMap(t, map[string]string{"X-Bad:": "v"}), wantError: true},
+		{name: "name with a space", value: stringMap(t, map[string]string{"X Bad": "v"}), wantError: true},
+		{name: "empty name", value: stringMap(t, map[string]string{"": "v"}), wantError: true},
+		{name: "exactly at the header count cap", value: stringMap(t, exactlyTwenty)},
+		{name: "over the header count cap", value: stringMap(t, tooMany), wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			diags := validateMap(t, validators, "custom_headers", tt.value)
+			if diags.HasError() != tt.wantError {
+				t.Errorf("expected error=%v, got %v", tt.wantError, diags.Errors())
+			}
+		})
+	}
+}
+
+func TestUptimeMonitorSchema_CustomBodyValidator(t *testing.T) {
+	s := uptimeMonitorSchema(t)
+	attribute, ok := s.Attributes["custom_body"].(rschema.StringAttribute)
+	if !ok {
+		t.Fatalf("expected custom_body to be a StringAttribute, got %T", s.Attributes["custom_body"])
+	}
+	validators := attribute.StringValidators()
+	if len(validators) == 0 {
+		t.Fatal("expected custom_body to declare validators")
+	}
+
+	tests := []struct {
+		name      string
+		value     types.String
+		wantError bool
+	}{
+		{name: "null is skipped", value: types.StringNull()},
+		{name: "unknown is skipped", value: types.StringUnknown()},
+		{name: "a json body", value: types.StringValue(`{"ping":true}`)},
+		{name: "at the 64KB cap", value: types.StringValue(strings.Repeat("a", 65536))},
+		{name: "over the 64KB cap", value: types.StringValue(strings.Repeat("a", 65537)), wantError: true},
+		// The API caps bytesize, so multi-byte characters count for what they
+		// weigh on the wire rather than for one apiece.
+		{name: "multi-byte over the cap in bytes", value: types.StringValue(strings.Repeat("é", 32769)), wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			diags := validateString(t, validators, "custom_body", tt.value)
+			if diags.HasError() != tt.wantError {
+				t.Errorf("expected error=%v, got %v", tt.wantError, diags.Errors())
+			}
+		})
+	}
+}
+
+// mixedStringList builds a string list from element values directly, so a case
+// can put a null or an unknown inside an otherwise known list — something
+// stringList, which takes plain Go strings, cannot express.
+func mixedStringList(t *testing.T, elems ...attr.Value) types.List {
+	t.Helper()
+	return types.ListValueMust(types.StringType, elems)
+}
+
+// The joined cap is the whole reason this is a bespoke validator rather than
+// another listvalidator, and the separators are the whole difference. The cases
+// already on dns_expected_records straddle the cap by so much that the CRLF
+// arithmetic could be deleted outright and they would all still pass, so this
+// pins the boundary from both sides.
+func TestUptimeMonitorSchema_DNSExpectedRecordsCountsCRLFSeparators(t *testing.T) {
+	validators := listValidatorsFor(t, "dns_expected_records")
+
+	// 5 x 1636 is 8180 characters of payload and 8188 once the four separators
+	// are counted: inside the cap either way.
+	if diags := validateList(t, validators, "dns_expected_records",
+		stringList(t, joinedRecords(5, 1636)...)); diags.HasError() {
+		t.Errorf("8188 joined characters must be accepted, got %v", diags.Errors())
+	}
+	// 5 x 1638 is 8190 of payload — under the cap on its own — and 8198 joined.
+	// Only counting the separators rejects this one, and the API would 422 it.
+	if diags := validateList(t, validators, "dns_expected_records",
+		stringList(t, joinedRecords(5, 1638)...)); !diags.HasError() {
+		t.Error("the four CRLF pairs must push an 8190 character payload over the 8192 cap")
+	}
+}
+
+// CRLFJoinedLengthAtMost is the only validator on this resource that walks the
+// elements itself instead of delegating to the framework, so its own null and
+// unknown handling has to hold: a value Terraform has not resolved cannot be
+// guessed at in either direction, and a null element must not stop the count.
+func TestCRLFJoinedLengthAtMost(t *testing.T) {
+	tests := []struct {
+		name      string
+		max       int
+		value     types.List
+		wantError bool
+	}{
+		{name: "null list is skipped", max: 1, value: types.ListNull(types.StringType)},
+		{name: "unknown list is skipped", max: 1, value: types.ListUnknown(types.StringType)},
+		{name: "empty list", max: 1, value: stringList(t)},
+		// A single element carries no separator at all.
+		{name: "one element at the cap", max: 10, value: stringList(t, "1234567890")},
+		{name: "one element over the cap", max: 10, value: stringList(t, "12345678901"), wantError: true},
+		// 5 + 2 + 5. Dropping the separator lands on exactly 10 and passes, so
+		// this pair is what actually distinguishes the arithmetic.
+		{name: "the separator tips two elements over", max: 10, value: stringList(t, "12345", "12345"), wantError: true},
+		{name: "two elements that fit with their separator", max: 10, value: stringList(t, "1234", "1234")},
+		// Runes, not bytes: the server caps a Ruby String#length, so an accented
+		// character weighs one, not the two it takes on the wire.
+		{name: "multi-byte characters count once each", max: 12, value: stringList(t, strings.Repeat("é", 5), strings.Repeat("é", 5))},
+		{name: "multi-byte characters over the cap", max: 11, value: stringList(t, strings.Repeat("é", 5), strings.Repeat("é", 5)), wantError: true},
+		{
+			// An unresolved element makes the total unknowable. Erroring here
+			// would reject a config that is very likely fine once it resolves.
+			name:  "an unknown element abandons the check",
+			max:   1,
+			value: mixedStringList(t, types.StringValue("12345"), types.StringUnknown(), types.StringValue("12345")),
+		},
+		{
+			// A null contributes nothing, but the elements after it still do: a
+			// return here rather than a continue would silently stop counting.
+			name:      "a null element is skipped without stopping the count",
+			max:       10,
+			value:     mixedStringList(t, types.StringNull(), types.StringValue("12345678901")),
+			wantError: true,
+		},
+		{
+			// An interior null carries no characters but still carries the CRLF
+			// that precedes it, exactly as ["a", nil, "b"].join("\r\n") does
+			// server-side: 1 + 2 + 2 + 1 = 6. Skipping its separator too would
+			// score 4 and let this list through.
+			name:      "an interior null still carries its separator",
+			max:       5,
+			value:     mixedStringList(t, types.StringValue("a"), types.StringNull(), types.StringValue("b")),
+			wantError: true,
+		},
+		{
+			name:  "the same list fits when the cap allows for the separators",
+			max:   6,
+			value: mixedStringList(t, types.StringValue("a"), types.StringNull(), types.StringValue("b")),
+		},
+		{
+			// Defensive. Every wiring today is a StringType list, but a element
+			// of another type has to abandon the check rather than panic.
+			name: "a non-string element abandons the check", max: 1, value: int64List(t, 1, 2, 3),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			diags := validateList(t, []validator.List{CRLFJoinedLengthAtMost(tt.max)},
+				"dns_expected_records", tt.value)
+			if diags.HasError() != tt.wantError {
+				t.Errorf("expected error=%v, got %v", tt.wantError, diags.Errors())
+			}
+		})
+	}
+}
+
+// The number in the message is the joined total, not the payload the reader can
+// add up from their own HCL — quoting the payload back would send them looking
+// for a limit their records appear to be under.
+func TestCRLFJoinedLengthAtMost_Diagnostic(t *testing.T) {
+	diags := validateList(t, []validator.List{CRLFJoinedLengthAtMost(10)},
+		"dns_expected_records", stringList(t, "12345", "12345"))
+
+	errs := diags.Errors()
+	if len(errs) != 1 {
+		t.Fatalf("expected exactly one error, got %v", errs)
+	}
+	if got := errs[0].Summary(); got != "List Too Long" {
+		t.Errorf("unexpected summary: %q", got)
+	}
+	if got := errs[0].Detail(); !strings.Contains(got, "total 12 characters") {
+		t.Errorf("detail %q should report the 12 character joined total, not the 10 of payload", got)
+	}
+
+	want := "must be at most 8192 characters once joined with CRLF line endings"
+	v := CRLFJoinedLengthAtMost(8192)
+	if got := v.Description(context.Background()); got != want {
+		t.Errorf("Description() = %q, want %q", got, want)
+	}
+	if got := v.MarkdownDescription(context.Background()); got != want {
+		t.Errorf("MarkdownDescription() = %q, want %q", got, want)
 	}
 }
 
@@ -554,10 +1206,14 @@ func TestUptimeMonitorResource_Update(t *testing.T) {
 			wantStatus:  "up",
 		},
 		{
-			name:        "a null dns_expected_records sends an explicit null",
+			// A null plan value means "clear", and for this key the clear is an
+			// EMPTY ARRAY, not a null: strong params drops a null sent to a
+			// collection key, so the null the provider used to send was accepted
+			// and silently ignored, leaving the stored records in place.
+			name:        "a null dns_expected_records sends an empty array, not a null",
 			planPaused:  tftypes.NewValue(tftypes.Bool, nil),
 			startStatus: "up",
-			wantDNS:     "null",
+			wantDNS:     "empty",
 			wantStatus:  "up",
 		},
 	}
@@ -646,11 +1302,23 @@ func TestUptimeMonitorResource_Update(t *testing.T) {
 			if sent["recovery_count"] != float64(2) {
 				t.Errorf("expected recovery_count 2 in the update body, got %v", sent["recovery_count"])
 			}
+			// The other collection key follows the same rule: an unset
+			// custom_headers clears with {}, never with a null the server drops.
+			switch headers, present := sent["custom_headers"]; {
+			case !present:
+				t.Error("expected custom_headers in the update body, got nothing")
+			case headers == nil:
+				t.Error("expected custom_headers to be {}, got null — strong params drops a null on a collection key")
+			default:
+				if m, ok := headers.(map[string]interface{}); !ok || len(m) != 0 {
+					t.Errorf("expected custom_headers to be {}, got %v", headers)
+				}
+			}
 			switch records, present := sent["dns_expected_records"]; tt.wantDNS {
 			case "":
 			case "null":
-				// Unset protocol-scoped fields are sent as an explicit null so the
-				// server clears them when the protocol changes.
+				// The SCALAR protocol-scoped fields clear with an explicit null.
+				// dns_expected_records is not one of them — see "empty".
 				if !present || records != nil {
 					t.Errorf("expected dns_expected_records to be null, got %v (present=%v)", records, present)
 				}

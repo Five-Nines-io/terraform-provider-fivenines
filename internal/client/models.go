@@ -599,17 +599,26 @@ type CreateUptimeMonitorInput struct {
 
 // UpdateUptimeMonitorInput is the request body for updating an uptime monitor.
 //
-// The protocol-scoped fields below deliberately carry NO omitempty: they are
-// always serialised, and a nil pointer marshals as an explicit JSON null, which
-// the API reads as "clear this". That is what makes `protocol` updatable in
-// place — switching an https monitor to tcp has to actively clear `keyword` and
-// `content_type`, or the server keeps echoing values the Terraform plan says are
-// null and every apply fails with "Provider produced inconsistent result after
-// apply". Terraform resolves Optional-only attributes before calling Update, so
-// the plan value is always known by the time it reaches this struct.
+// The fields below fall into three buckets, and the JSON tag alone does not tell
+// them apart — read the per-bucket comments before changing a tag.
 //
-// The remaining fields keep omitempty: they are Computed or defaulted, so the
-// plan always carries a concrete value and there is nothing to clear.
+//  1. Protocol-scoped SCALARS carry NO omitempty: they are always serialised, and
+//     a nil pointer marshals as an explicit JSON null, which the API reads as
+//     "clear this". That is what makes `protocol` updatable in place — switching
+//     an https monitor to tcp has to actively clear `keyword` and `content_type`,
+//     or the server keeps echoing values the Terraform plan says are null and
+//     every apply fails with "Provider produced inconsistent result after apply".
+//     `NilClass` is a Rails permitted scalar, so the null survives strong params.
+//
+//  2. Protocol-scoped COLLECTIONS carry omitempty and are cleared by sending an
+//     EMPTY collection, never a null — strong params drops a null on a key
+//     permitted as a collection. See their own comment below.
+//
+//  3. Everything else keeps omitempty because it is Computed or defaulted, so the
+//     plan always carries a concrete value and there is nothing to clear.
+//
+// Terraform resolves Optional-only attributes before calling Update, so the plan
+// value is always known by the time it reaches this struct.
 type UpdateUptimeMonitorInput struct {
 	Name                *string `json:"name,omitempty"`
 	Protocol            *string `json:"protocol,omitempty"`
@@ -631,14 +640,33 @@ type UpdateUptimeMonitorInput struct {
 	// place while the plan holds a known [].
 	ProbeRegionIDs *[]int64 `json:"probe_region_ids,omitempty"`
 
-	// Protocol-scoped: nil marshals as null and clears the stored value.
-	Port               *int               `json:"port"`
-	Keyword            *string            `json:"keyword"`
-	DNSRecordType      *string            `json:"dns_record_type"`
-	DNSExpectedRecords *[]string          `json:"dns_expected_records"`
-	CustomHeaders      *map[string]string `json:"custom_headers"`
-	CustomBody         *string            `json:"custom_body"`
-	ContentType        *string            `json:"content_type"`
+	// Protocol-scoped SCALARS: nil marshals as null and clears the stored value.
+	// `NilClass` is a Rails permitted scalar, so strong params keeps the null and
+	// the assignment goes through.
+	Port          *int    `json:"port"`
+	Keyword       *string `json:"keyword"`
+	DNSRecordType *string `json:"dns_record_type"`
+	CustomBody    *string `json:"custom_body"`
+	ContentType   *string `json:"content_type"`
+
+	// Protocol-scoped COLLECTIONS: a null does NOT clear these, so the caller
+	// must always send a real collection — an empty one to clear.
+	//
+	// `monitor_params` permits them as `dns_expected_records: []` and
+	// `custom_headers: {}`, and strong params' hash_filter skips a null on a
+	// collection key. The PATCH is accepted, the stored value survives, and the
+	// API keeps echoing values the plan says are null — "Provider produced
+	// inconsistent result after apply" on the next apply. The server's own
+	// swagger says so for the array key: "NOT nullable, which is the difference
+	// that matters on a PATCH; strong params drops an explicit null sent to an
+	// array key, so it is a silent no-op that leaves the stored expectation in
+	// place." An empty array is normalised to null server-side, which is the end
+	// state a cleared field wants.
+	//
+	// They stay pointers only so an UNKNOWN plan value can omit the key
+	// entirely; Update never assigns nil for any other reason.
+	DNSExpectedRecords *[]string          `json:"dns_expected_records,omitempty"`
+	CustomHeaders      *map[string]string `json:"custom_headers,omitempty"`
 }
 
 // UptimeMonitorStatus is the lightweight payload returned by
@@ -663,7 +691,9 @@ type ListUptimeMonitorsOptions struct {
 	Status string
 	// Protocol filters by protocol: https, tcp, icmp or dns.
 	Protocol string
-	// Query is a free-text search over name, url and hostname (the "q" param).
+	// Query is a case-insensitive substring match on the monitor NAME (the "q"
+	// param). It does not search the url or hostname — IndexFilters::UPTIME_MONITORS
+	// declares Search.new("q", columns: %i[name]).
 	Query string
 	// UpdatedSince returns only monitors updated at or after this ISO8601 timestamp.
 	UpdatedSince string

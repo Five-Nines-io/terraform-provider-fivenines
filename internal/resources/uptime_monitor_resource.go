@@ -3,10 +3,13 @@ package resources
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"slices"
 
 	"github.com/Five-Nines-io/terraform-provider-fivenines/internal/client"
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -37,7 +40,11 @@ var protocolRequirements = map[string][]string{
 	"https": {"url"},
 	"tcp":   {"hostname", "port"},
 	"icmp":  {"hostname"},
-	"dns":   {"dns_record_type"},
+	// dns needs the hostname as well as the record type: it is the name being
+	// resolved, and the server validates its presence on every write
+	// (`validates :hostname, presence: true, if: :dns?`), so omitting it here
+	// only moved the failure from plan time to a 422 on apply.
+	"dns": {"hostname", "dns_record_type"},
 }
 
 // protocolForbidden is the inverse: the protocol-scoped attributes each protocol
@@ -49,12 +56,33 @@ var protocolRequirements = map[string][]string{
 //
 // Only the seven attributes Update actually clears are listed. url and hostname
 // are Computed and are never cleared, so they cannot produce that error.
+//
+// How the clear reaches the API differs by type: the five SCALARS go as an
+// explicit JSON null (NilClass is a Rails permitted scalar), while
+// dns_expected_records and custom_headers go as an empty collection, because
+// strong params silently drops a null sent to a collection key. See the
+// UpdateUptimeMonitorInput comment.
 var protocolForbidden = map[string][]string{
 	"https": {"port", "dns_record_type", "dns_expected_records"},
 	"tcp":   {"keyword", "dns_record_type", "dns_expected_records", "custom_headers", "custom_body", "content_type"},
 	"icmp":  {"port", "keyword", "dns_record_type", "dns_expected_records", "custom_headers", "custom_body", "content_type"},
 	"dns":   {"port", "keyword", "custom_headers", "custom_body", "content_type"},
 }
+
+// headerNamePattern is the server's own header-NAME rule from
+// custom_headers_format: an RFC-shaped token. The matching value rule lives in
+// NoControlCharacters rather than in a pattern here, deliberately — a regex
+// validator echoes the offending value into the diagnostic, and header values
+// are where an Authorization header goes.
+var headerNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// postOnly lists the attributes the API stores only for a POST request. Its
+// `clear_body_unless_post` callback nils BOTH of them whenever http_method is
+// anything else, so leaving either beside a GET or a HEAD plans a known value
+// that the apply nulls out — the same "Provider produced inconsistent result
+// after apply" protocolForbidden exists to prevent, and easier to hit: omitting
+// http_method entirely means GET, because that is the schema default.
+var postOnly = []string{"custom_body", "content_type"}
 
 type uptimeMonitorResource struct {
 	client *client.Client
@@ -146,7 +174,7 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				Computed:    true,
 			},
 			"hostname": schema.StringAttribute{
-				Description: "Hostname to monitor (required for tcp/icmp protocols).",
+				Description: "Hostname to monitor (required for tcp, icmp and dns protocols).",
 				Optional:    true,
 				Computed:    true,
 			},
@@ -158,10 +186,11 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				},
 			},
 			"http_method": schema.StringAttribute{
-				Description: `HTTP method: "GET", "HEAD", or "POST".`,
-				Optional:    true,
-				Computed:    true,
-				Default:     stringdefault.StaticString("GET"),
+				Description: `HTTP method: "GET", "HEAD", or "POST". Defaults to "GET"; custom_body and ` +
+					`content_type are stored only when this is "POST".`,
+				Optional: true,
+				Computed: true,
+				Default:  stringdefault.StaticString("GET"),
 				Validators: []validator.String{
 					stringvalidator.OneOf("GET", "HEAD", "POST"),
 				},
@@ -176,25 +205,39 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				},
 			},
 			"interval_seconds": schema.Int64Attribute{
-				Description: "Check interval in seconds.",
-				Optional:    true,
-				Computed:    true,
-				Default:     int64default.StaticInt64(300),
+				Description: "Check interval in seconds. The organization's plan sets the floor, " +
+					"which only the API knows, so a too-frequent interval is rejected at apply time.",
+				Optional: true,
+				Computed: true,
+				Default:  int64default.StaticInt64(300),
+				Validators: []validator.Int64{
+					int64validator.AtLeast(1),
+				},
 			},
 			"timeout_seconds": schema.Int64Attribute{
-				Description: "Timeout in seconds (max 15).",
+				Description: "Timeout in seconds. 1-15.",
 				Optional:    true,
 				Computed:    true,
 				Default:     int64default.StaticInt64(15),
 				Validators: []validator.Int64{
-					int64validator.AtMost(15),
+					int64validator.Between(1, 15),
 				},
 			},
 			"confirmation_count": schema.Int64Attribute{
-				Description: "Number of probe regions that must confirm status (quorum).",
-				Optional:    true,
-				Computed:    true,
-				Default:     int64default.StaticInt64(1),
+				Description: "Number of probe regions that must confirm status (quorum). At least 1, " +
+					"and at most the number of probe regions the monitor checks from. Going above that " +
+					"does NOT silently reduce: the API clamps on create, which fails the apply with an " +
+					"inconsistent-result error, and rejects the same value with a 422 on every later " +
+					"update. Keep it at or below `length(probe_region_ids)`. Note the provider defaults " +
+					"to 1 where the API defaults to 2: a monitor created through Terraform pages on a " +
+					"single region's failure, so set it explicitly when migrating monitors created in " +
+					"the dashboard.",
+				Optional: true,
+				Computed: true,
+				Default:  int64default.StaticInt64(1),
+				Validators: []validator.Int64{
+					int64validator.AtLeast(1),
+				},
 			},
 			"keyword": schema.StringAttribute{
 				Description: "Keyword that must be present in the response body. https only: the other protocols reject it at plan time.",
@@ -239,41 +282,93 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 				},
 			},
 			"dns_expected_records": schema.ListAttribute{
-				Description: "Expected DNS record values. Up to 50 records of at most 2048 characters each. " +
-					"Set to an empty list to pin no expectation.",
+				Description: "Expected DNS record values. Up to 50 records of at most 2048 characters each, " +
+					"and at most 8192 characters in total once joined with CRLF line endings. A record may " +
+					"not contain a NUL byte or a line break, and must not be blank or carry leading or " +
+					"trailing whitespace — the API accepts those and then never matches them. Set to an " +
+					"empty list to pin no expectation. " +
+					"Leaving the attribute out of the configuration is not \"let the server decide\": it " +
+					"clears the pin on every apply, including the baseline the probe auto-seeds after a " +
+					"monitor's first successful check. That seed is only ever written once, so it is not " +
+					"recreated. Pin the records explicitly if you want them, or accept that a " +
+					"Terraform-managed dns monitor has no expectation unless this attribute sets one.",
 				Optional:    true,
 				ElementType: types.StringType,
 				Validators: []validator.List{
 					listvalidator.SizeAtMost(50),
-					listvalidator.ValueStringsAre(stringvalidator.LengthAtMost(2048)),
+					NoNullElements(),
+					listvalidator.ValueStringsAre(
+						// Characters, not bytes: the API caps `record.length`, a
+						// Ruby String#length, so UTF8LengthAtMost is the match and
+						// LengthAtMost would reject an accepted multi-byte record.
+						stringvalidator.UTF8LengthAtMost(2048),
+						NoControlCharacters(),
+						// Not a server rule — the API accepts these and then never
+						// matches them. See NoBlankOrPadded.
+						NoBlankOrPadded(),
+					),
+					CRLFJoinedLengthAtMost(8192),
 				},
 			},
 			"custom_headers": schema.MapAttribute{
-				Description: "Custom HTTP headers as key-value pairs. https only: the other protocols " +
+				Description: "Custom HTTP headers as key-value pairs. Up to 20 headers; names may contain " +
+					"only ASCII letters, digits, hyphens and underscores, and values may not contain " +
+					"a NUL byte, carriage return or line feed, or exceed 4KB. https only: the other protocols " +
 					"reject it at plan time. Marked sensitive: this is where an Authorization " +
 					"header for the monitored endpoint goes.",
 				Optional:    true,
 				Sensitive:   true,
 				ElementType: types.StringType,
+				Validators: []validator.Map{
+					mapvalidator.SizeAtMost(20),
+					NoNullValues(),
+					mapvalidator.KeysAre(stringvalidator.RegexMatches(headerNamePattern,
+						"must contain only ASCII letters, digits, hyphens and underscores")),
+					mapvalidator.ValueStringsAre(
+						// NoControlCharacters, not stringvalidator.RegexMatches: the
+						// library helper echoes the offending value into the
+						// diagnostic, and Terraform does not redact a Sensitive
+						// attribute there. A bearer token with a trailing newline
+						// would print itself on every plan.
+						NoControlCharacters(),
+						stringvalidator.LengthAtMost(4096),
+					),
+				},
 			},
 			"custom_body": schema.StringAttribute{
-				Description: "Request body for POST requests. https only: the other protocols reject it at plan time.",
-				Optional:    true,
-				Sensitive:   true,
+				Description: `Request body for POST requests, up to 64KB. Stored only when http_method is ` +
+					`"POST" — the API clears it otherwise, so setting it beside a GET or HEAD is rejected ` +
+					`at plan time. https only: the other protocols reject it at plan time too.`,
+				Optional:  true,
+				Sensitive: true,
+				Validators: []validator.String{
+					// Bytes, like the API's `custom_body.bytesize`: LengthAtMost
+					// measures single-byte character length, not runes.
+					stringvalidator.LengthAtMost(65536),
+					// The API has no NUL guard on this column, so a NUL gets past
+					// its validations and dies in Postgres as a 500 rather than a
+					// 422. Newlines stay legal — this is a request body.
+					NoNulBytes(),
+				},
 			},
 			"content_type": schema.StringAttribute{
 				Description: `Content-Type header: "application/json", "application/x-www-form-urlencoded", or "text/plain". ` +
-					`https only: the other protocols reject it at plan time.`,
+					`Stored only when http_method is "POST" — the API clears it otherwise, so setting it ` +
+					`beside a GET or HEAD is rejected at plan time. https only: the other protocols ` +
+					`reject it at plan time too.`,
 				Optional: true,
 				Validators: []validator.String{
 					stringvalidator.OneOf("application/json", "application/x-www-form-urlencoded", "text/plain"),
 				},
 			},
 			"recovery_count": schema.Int64Attribute{
-				Description: "Number of successful checks required to transition from down to up.",
+				Description: "Number of successful checks required to transition from down to up. 1-10.",
 				Optional:    true,
 				Computed:    true,
 				Default:     int64default.StaticInt64(1),
+				Validators: []validator.Int64{
+					int64validator.Between(1, 10),
+				},
 			},
 			"status": schema.StringAttribute{
 				Description: `Current status: "unknown", "up", "down", "paused" or "recovering".`,
@@ -307,27 +402,41 @@ func (r *uptimeMonitorResource) Schema(_ context.Context, _ resource.SchemaReque
 	}
 }
 
-// ValidateConfig enforces the protocol-specific required attributes listed in
-// protocolRequirements.
+// ValidateConfig enforces the three cross-field rule families this resource has:
+// the protocol-scoped ones (protocolRequirements and its inverse
+// protocolForbidden) and the http_method-scoped one (postOnly).
 func (r *uptimeMonitorResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var config uptimeMonitorModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	// The nine protocol-scoped attribute values, built once and shared by all
+	// three rule functions below.
+	values := protocolScopedValues(config)
+
+	// Checked BEFORE the protocol guard, because this rule reads http_method and
+	// nothing else. Gating it on a resolvable protocol would silently disable it
+	// for `protocol = <unresolved reference>` — a config that still applies a
+	// GET, and still has its body dropped.
+	postOnlyNames := postOnlyAttributes(values, config.HTTPMethod)
+
 	if config.Protocol.IsNull() || config.Protocol.IsUnknown() {
+		r.addPostOnlyErrors(resp, postOnlyNames, nil, config.HTTPMethod)
 		return
 	}
 
 	protocol := config.Protocol.ValueString()
-	for _, name := range missingProtocolAttributes(config) {
+	for _, name := range missingProtocolAttributes(values, config.Protocol) {
 		resp.Diagnostics.AddAttributeError(
 			path.Root(name),
 			"Missing required attribute",
 			fmt.Sprintf("%q monitors require %q to be set.", protocol, name),
 		)
 	}
-	for _, name := range forbiddenProtocolAttributes(config) {
+	forbidden := forbiddenProtocolAttributes(values, config.Protocol)
+	for _, name := range forbidden {
 		resp.Diagnostics.AddAttributeError(
 			path.Root(name),
 			"Attribute not used by this protocol",
@@ -335,10 +444,63 @@ func (r *uptimeMonitorResource) ValidateConfig(ctx context.Context, req resource
 				"Remove it from the configuration.", protocol, name),
 		)
 	}
+
+	r.addPostOnlyErrors(resp, postOnlyNames, forbidden, config.HTTPMethod)
 }
 
-// missingProtocolAttributes returns the attributes that config's protocol
-// requires but leaves unset, in schema order.
+// addPostOnlyErrors reports the post-only attributes that are not already
+// covered by a protocol diagnostic. On a non-https protocol both of them are
+// forbidden outright, and two diagnostics on one path would bury the actionable
+// one.
+func (r *uptimeMonitorResource) addPostOnlyErrors(resp *resource.ValidateConfigResponse, names, forbidden []string, httpMethod types.String) {
+	if len(names) == 0 {
+		return
+	}
+	method := effectiveHTTPMethod(httpMethod)
+	for _, name := range names {
+		if slices.Contains(forbidden, name) {
+			continue
+		}
+		resp.Diagnostics.AddAttributeError(
+			path.Root(name),
+			"Attribute requires a POST request",
+			fmt.Sprintf("The API stores %q only for POST requests and clears it for %s, so this "+
+				"value would not survive the apply. Set http_method = \"POST\", or remove %q.",
+				name, method, name),
+		)
+	}
+}
+
+// effectiveHTTPMethod names the method that will actually be applied, for the
+// diagnostic. A config that omits http_method still gets one: the schema
+// default. Correct standalone rather than relying on its caller having
+// short-circuited the unknown case first.
+func effectiveHTTPMethod(httpMethod types.String) string {
+	switch {
+	case httpMethod.IsUnknown():
+		return "a method that is not known until apply"
+	case httpMethod.IsNull():
+		return `GET (the default, since http_method is unset)`
+	default:
+		return fmt.Sprintf("%q", httpMethod.ValueString())
+	}
+}
+
+// postOnlyAttributes returns the attributes set in config that the API keeps
+// only on a POST. See postOnly.
+func postOnlyAttributes(values map[string]attr.Value, httpMethod types.String) []string {
+	// An unresolved reference may still turn out to be POST, so only a config
+	// that definitely is not one can forbid anything. A NULL method does count:
+	// it takes the schema default, which is GET.
+	if httpMethod.IsUnknown() || httpMethod.ValueString() == "POST" {
+		return nil
+	}
+	return setAttributes(values, postOnly)
+}
+
+// protocolScopedValues is the name -> value table the three rule functions
+// index into. Built once per ValidateConfig and passed down, so the tables and
+// the model cannot drift apart in one place and not another.
 func protocolScopedValues(config uptimeMonitorModel) map[string]attr.Value {
 	return map[string]attr.Value{
 		"url":                  config.URL,
@@ -353,11 +515,11 @@ func protocolScopedValues(config uptimeMonitorModel) map[string]attr.Value {
 	}
 }
 
-func missingProtocolAttributes(config uptimeMonitorModel) []string {
-	values := protocolScopedValues(config)
-
+// missingProtocolAttributes returns the attributes that the protocol requires but
+// the config leaves unset, in schema order.
+func missingProtocolAttributes(values map[string]attr.Value, protocol types.String) []string {
 	var missing []string
-	for _, name := range protocolRequirements[config.Protocol.ValueString()] {
+	for _, name := range protocolRequirements[protocol.ValueString()] {
 		// Comma-ok: protocolRequirements and values are two tables that have to
 		// stay in step, and indexing a missing name would hand .IsNull() a nil
 		// interface and panic the provider mid-plan. Report it as missing instead.
@@ -366,25 +528,40 @@ func missingProtocolAttributes(config uptimeMonitorModel) []string {
 		// and may well turn out to be set, so only a null is a genuine omission.
 		if !ok || v.IsNull() {
 			missing = append(missing, name)
+			continue
+		}
+		// A known empty string is not set either. These rules mirror Rails
+		// `presence: true`, which rejects "" as well as nil, so treating `hostname
+		// = var.name` with an unset variable as satisfied would put the failure
+		// back on the apply as a 422 — the round trip the rule exists to remove.
+		// IsUnknown guard: ValueString() is "" for an unknown too, and an
+		// unresolved reference may still turn out to be set.
+		if str, isString := v.(types.String); isString && !str.IsUnknown() && str.ValueString() == "" {
+			missing = append(missing, name)
 		}
 	}
 	return missing
 }
 
-// forbiddenProtocolAttributes returns the attributes set in config that its
-// protocol does not use, in schema order.
-func forbiddenProtocolAttributes(config uptimeMonitorModel) []string {
-	values := protocolScopedValues(config)
-
-	var forbidden []string
-	for _, name := range protocolForbidden[config.Protocol.ValueString()] {
-		// Only a value the user actually set can be a known plan value, so
-		// unknowns and nulls are both fine here.
+// setAttributes returns the subset of names the config actually set, in the
+// order given. Only a value the user wrote can be a known plan value, so
+// unknowns and nulls are both skipped; the comma-ok keeps a name that is in a
+// rule table but missing from values from handing .IsNull() a nil interface and
+// panicking the provider mid-plan.
+func setAttributes(values map[string]attr.Value, names []string) []string {
+	var found []string
+	for _, name := range names {
 		if v, ok := values[name]; ok && !v.IsNull() && !v.IsUnknown() {
-			forbidden = append(forbidden, name)
+			found = append(found, name)
 		}
 	}
-	return forbidden
+	return found
+}
+
+// forbiddenProtocolAttributes returns the attributes set in config that its
+// protocol does not use, in schema order.
+func forbiddenProtocolAttributes(values map[string]attr.Value, protocol types.String) []string {
+	return setAttributes(values, protocolForbidden[protocol.ValueString()])
 }
 
 func (r *uptimeMonitorResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -653,10 +830,16 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		v := plan.DNSRecordType.ValueString()
 		input.DNSRecordType = &v
 	}
-	if !plan.DNSExpectedRecords.IsNull() && !plan.DNSExpectedRecords.IsUnknown() {
-		// Non-nil even when empty: the API normalises [] to "no expectation
-		// pinned", which is the same end state as null but keeps the plan's [].
-		records := make([]string, 0, len(plan.DNSExpectedRecords.Elements()))
+	// The two COLLECTION keys never send a JSON null, unlike the scalars above.
+	// `monitor_params` permits them as `dns_expected_records: []` and
+	// `custom_headers: {}`, and Rails strong params drops a null on a collection
+	// key — the PATCH is accepted, the stored value survives, and the API keeps
+	// echoing records the plan says are null. An empty collection is the clear the
+	// permit list actually accepts: the server normalises an empty ARRAY to null,
+	// and stores an empty HASH as {} (the column default), which its serializer
+	// renders identically to null.
+	records := make([]string, 0, len(plan.DNSExpectedRecords.Elements()))
+	if !plan.DNSExpectedRecords.IsUnknown() {
 		for _, elem := range plan.DNSExpectedRecords.Elements() {
 			if sv, ok := elem.(types.String); ok {
 				records = append(records, sv.ValueString())
@@ -664,8 +847,8 @@ func (r *uptimeMonitorResource) Update(ctx context.Context, req resource.UpdateR
 		}
 		input.DNSExpectedRecords = &records
 	}
-	if !plan.CustomHeaders.IsNull() && !plan.CustomHeaders.IsUnknown() {
-		headers := make(map[string]string)
+	headers := make(map[string]string)
+	if !plan.CustomHeaders.IsUnknown() {
 		for k, v := range plan.CustomHeaders.Elements() {
 			if sv, ok := v.(types.String); ok {
 				headers[k] = sv.ValueString()
@@ -852,9 +1035,15 @@ func (r *uptimeMonitorResource) mapToState(ctx context.Context, m *client.Uptime
 	default:
 		state.CustomHeaders = types.MapNull(types.StringType)
 	}
-	if m.CustomBody != "" {
+	switch {
+	case m.CustomBody != "":
 		state.CustomBody = types.StringValue(m.CustomBody)
-	} else {
+	case isKnownEmptyString(state.CustomBody):
+		// `custom_body = ""` is a legal config, and CreateUptimeMonitorInput
+		// drops it via omitempty, so the API answers null on the first apply.
+		// Keep the pinned empty string rather than flipping it to null — the
+		// same carve-out `keyword` has above, for the same reason.
+	default:
 		state.CustomBody = types.StringNull()
 	}
 	if m.ContentType != "" {

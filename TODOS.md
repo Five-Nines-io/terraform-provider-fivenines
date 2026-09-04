@@ -582,7 +582,14 @@
 - Fix: a shared `resourcePath(base, id, suffix...)` helper so the escaping cannot
   drift per-resource again
 
-### The list data sources have no limit
+### The list data sources have no limit — superseded, see P1
+- **Superseded by "The list data sources have no result bound except
+  `fivenines_tasks`" (P1).** #8 built the mechanism this entry asks for:
+  `listAllPages` takes a `maxRows` cap, shrinks `per_page` to `min(100, limit)` and
+  stops at `len(all) >= limit`, which is the Fix below. `fivenines_tasks` is the
+  only caller that passes one, so every data source enumerated here is still
+  unbounded and `listRowPages` still has no equivalent. Kept for that enumeration,
+  which the P1 entry does not repeat
 - `fivenines_uptime_monitors` exposes `order`/`direction` but no `limit`/`per_page`,
   and the client always walks to the last page. "The 5 most recently updated
   monitors" still pulls every monitor in the org on every plan and refresh

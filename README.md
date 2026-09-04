@@ -402,6 +402,14 @@ enterprise 2400). The provider retries a `429` automatically, honouring
 counter serves both — so a busy MCP client competes with a Terraform run on the
 same organization. Lower `-parallelism` if you hit sustained 429s.
 
+A second, tighter ceiling sits underneath it: `/api/v1/*` is **also throttled per
+IP, at 20 requests/minute**, on every plan. From a single CI runner that is the
+binding limit, not the plan tier. It bites hardest on unfiltered list data
+sources, which walk one request per 100 rows — 5,000 tasks is 50 requests, so one
+refresh crosses the per-IP ceiling twice and the provider sleeps out each
+`Retry-After`. Filter server-side rather than in HCL, and cap the read where the
+data source offers a `limit` (today, `fivenines_tasks`).
+
 ### Reporting a failure
 
 Every diagnostic carries the API's request ID, which correlates your failed

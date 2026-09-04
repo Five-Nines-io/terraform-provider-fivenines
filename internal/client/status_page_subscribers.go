@@ -58,5 +58,8 @@ func (o StatusPageSubscriberListOptions) query() url.Values {
 // list.
 func (c *Client) ListStatusPageSubscribers(ctx context.Context, statusPageID int64, opts StatusPageSubscriberListOptions) ([]StatusPageSubscriber, error) {
 	base := "/api/v1/status_pages/" + strconv.FormatInt(statusPageID, 10) + "/subscribers"
-	return listAllPages[StatusPageSubscriber](ctx, c, base, "subscribers", opts.query(), subscriberPerPage)
+	return listAllPages[StatusPageSubscriber](ctx, c, base, "subscribers", opts.query(), subscriberPerPage, 0)
 }
+
+// rowID implements rowIdentifier.
+func (s StatusPageSubscriber) rowID() string { return strconv.FormatInt(s.ID, 10) }

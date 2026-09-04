@@ -142,7 +142,7 @@ func (o CephClusterListOptions) query() url.Values {
 // derived health and its provenance; the per-host reporter breakdown is on
 // GetCephCluster only.
 func (c *Client) ListCephClusters(ctx context.Context, opts CephClusterListOptions) ([]CephCluster, error) {
-	return listAllPages[CephCluster](ctx, c, "/api/v1/ceph_clusters", "ceph_clusters", opts.query(), clusterPerPage)
+	return listAllPages[CephCluster](ctx, c, "/api/v1/ceph_clusters", "ceph_clusters", opts.query(), clusterPerPage, 0)
 }
 
 // GetCephCluster returns one cluster plus the per-host reporters the index
@@ -291,7 +291,7 @@ func (o ProxmoxClusterListOptions) query() url.Values {
 // quorum verdict, provenance and rollups. The per-host reporter breakdown is on
 // GetProxmoxCluster only.
 func (c *Client) ListProxmoxClusters(ctx context.Context, opts ProxmoxClusterListOptions) ([]ProxmoxCluster, error) {
-	return listAllPages[ProxmoxCluster](ctx, c, "/api/v1/proxmox_clusters", "proxmox_clusters", opts.query(), clusterPerPage)
+	return listAllPages[ProxmoxCluster](ctx, c, "/api/v1/proxmox_clusters", "proxmox_clusters", opts.query(), clusterPerPage, 0)
 }
 
 // GetProxmoxCluster returns one cluster plus the per-host reporters the index
@@ -349,3 +349,11 @@ func (c *Client) getJSON(ctx context.Context, path string, target interface{}) e
 	}
 	return nil
 }
+
+// rowID implements rowIdentifier. The fsid is this endpoint's identity, and it is
+// what a paginated walk could serve twice.
+func (c CephCluster) rowID() string { return c.FSID }
+
+// rowID implements rowIdentifier. ID, not ClusterKey: ID is what this endpoint's
+// rows are keyed by.
+func (p ProxmoxCluster) rowID() string { return p.ID }

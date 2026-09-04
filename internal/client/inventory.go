@@ -174,6 +174,27 @@ func (c *Client) listRowPages(
 	}
 }
 
+// rowIdentifier is implemented by the row types whose index has a stable per-row
+// identity, so listAllPages can drop a row a paginated walk served twice.
+//
+// The walk is OFFSET-based: the server pages with ORDER BY <col>, id + OFFSET, so
+// a row INSERTED between two page requests pushes the last row of page N onto
+// page N+1 and it arrives twice. That is invisible in a count, and fatal in a
+// Terraform data source -- `{ for x in data...list : x.id => x }` is the idiomatic
+// way to consume one, and a repeated key fails the plan outright. Data sources
+// re-read on every plan, so it recurs nondeterministically.
+//
+// A type assertion rather than a type constraint on T: a row type with no natural
+// identity (the collector inventories) still walks fine, it just does not get
+// de-duplicated. Nothing is silently skipped for want of an id.
+//
+// This closes the INSERT half only. A row DELETED mid-walk shifts the window the
+// other way and is never served at all, which offset pagination cannot fix -- see
+// TODOS.md.
+type rowIdentifier interface {
+	rowID() string
+}
+
 // listAllPages walks every page of a paginated index whose rows decode into a
 // concrete type T, returning them as one slice.
 //
@@ -181,12 +202,28 @@ func (c *Client) listRowPages(
 // same "an empty value stays out of the query" contract. It is a free function
 // rather than a method because Go does not allow type parameters on methods.
 //
+// maxRows caps the walk; 0 means unbounded. It is a bound on WORK, not just on
+// output: the API throttles /api/v1/* per IP and the client sleeps out a 429, so
+// an unbounded walk of a large index can burn the whole per-minute budget the
+// rest of the run needs. A cap below perPage shrinks the page request itself, so
+// asking for five rows costs one request for five rather than one for a hundred.
+//
 // The returned slice is always non-nil, so an index that matches nothing gives
 // callers an empty slice rather than a nil one -- the data source layer maps nil
 // to a NULL Terraform list, which fails `length()` in a plan, and "no matches"
 // must not read as "the API refused".
-func listAllPages[T any](ctx context.Context, c *Client, basePath, key string, filters url.Values, perPage int) ([]T, error) {
+func listAllPages[T any](ctx context.Context, c *Client, basePath, key string, filters url.Values, perPage, maxRows int) ([]T, error) {
 	all := []T{}
+
+	// A negative cap is a caller bug (arithmetic that went below zero), not a
+	// request for everything. Refusing it keeps the zero-means-unbounded sentinel
+	// unambiguous: silently walking the whole index is the worst reading of it.
+	if maxRows < 0 {
+		return nil, fmt.Errorf("listAllPages: negative row cap %d", maxRows)
+	}
+	if maxRows > 0 && maxRows < perPage {
+		perPage = maxRows
+	}
 
 	// Copied, not written through: url.Values is a map, so setting page and
 	// per_page on the caller's value would leave a stale `page` behind for any
@@ -197,6 +234,8 @@ func listAllPages[T any](ctx context.Context, c *Client, basePath, key string, f
 		query[k] = append([]string(nil), vs...)
 	}
 	query.Set("per_page", strconv.Itoa(perPage))
+
+	seen := map[string]struct{}{}
 
 	for page := 1; ; page++ {
 		query.Set("page", strconv.Itoa(page))
@@ -212,7 +251,26 @@ func listAllPages[T any](ctx context.Context, c *Client, basePath, key string, f
 				return nil, fmt.Errorf("decoding %s rows: %w", key, err)
 			}
 		}
-		all = append(all, rows...)
+		for _, row := range rows {
+			// De-duplicate BEFORE the cap, so a page that repeats a row still
+			// contributes its share toward maxRows instead of silently returning
+			// the caller fewer rows than they asked for.
+			if id, ok := any(row).(rowIdentifier); ok {
+				rowID := id.rowID()
+				if _, dup := seen[rowID]; dup {
+					continue
+				}
+				seen[rowID] = struct{}{}
+			}
+			all = append(all, row)
+		}
+
+		// Truncate rather than trust the server to honour per_page exactly: a
+		// page that over-delivers would otherwise return more rows than the
+		// caller asked for.
+		if maxRows > 0 && len(all) >= maxRows {
+			return all[:maxRows], nil
+		}
 
 		var meta PaginationMeta
 		if raw, ok := envelope["meta"]; ok {
